@@ -8,6 +8,16 @@
   "bugs": {
     "url": "https://github.com/cyanheads/inaturalist-mcp-server/issues"
   },
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/cyanheads"
+    },
+    {
+      "type": "buy_me_a_coffee",
+      "url": "https://www.buymeacoffee.com/cyanheads"
+    }
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
