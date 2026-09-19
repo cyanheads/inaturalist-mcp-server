@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "inaturalist-mcp-server",
+  "version": "0.1.0",
+  "description": "Global citizen-science biodiversity observations from iNaturalist — sightings, photos, identification threads, phenology, similar species, annotations, places, and projects via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/inaturalist-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/inaturalist-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "inaturalist", "biodiversity", "citizen-science", "species", "wildlife"],
+  "mcpServers": {
+    "inaturalist-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/inaturalist-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

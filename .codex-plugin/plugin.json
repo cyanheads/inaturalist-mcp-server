@@ -1,0 +1,25 @@
+{
+  "name": "inaturalist-mcp-server",
+  "version": "0.1.0",
+  "description": "Global citizen-science biodiversity observations from iNaturalist — sightings, photos, identification threads, phenology, similar species, annotations, places, and projects via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/inaturalist-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/inaturalist-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "inaturalist", "biodiversity", "citizen-science", "species", "wildlife"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "inaturalist-mcp-server",
+    "shortDescription": "Global citizen-science biodiversity observations from iNaturalist via MCP.",
+    "longDescription": "Provides tools for querying iNaturalist — wildlife sightings with photos, the community identification thread behind each record, per-taxon phenology, similar-species confusion data, annotations, places, projects, and observer leaderboards.",
+    "developerName": "cyanheads",
+    "category": "science",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/inaturalist-mcp-server",
+    "defaultPrompt": []
+  }
+}
