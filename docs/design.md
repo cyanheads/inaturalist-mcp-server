@@ -197,7 +197,7 @@ Every place response drops `geometry_geojson` and reduces `bounding_box_geojson`
 | A photo renders as its `medium_url` (or `square_url` when no medium variant could be derived) followed by its verbatim `attribution`, its licence, and `open licence` / `licence not open` from the domain flag. Attribution is never shortened in the text. | Every tool that returns a photo |
 | `obscured: true` renders the coordinate as `obscured locality — accurate to ±{accuracy_m} m`, never as a sighting position. `obscured: false` renders `lat, lng (±{accuracy_m} m)`. | Observation records |
 | Upstream free text — `wikipedia_summary`, identification and comment bodies, `place_guess`, tags, attributions — renders inside a `>` blockquote. | Every tool that surfaces it |
-| A capped text list renders the first N and closes with `…and {x} more (complete list in structuredContent)`; the same cut is disclosed through `ctx.enrich.truncated`. | Tools with per-record arrays |
+| The text renders every record of the page. Volume is bounded by the caller through `per_page` and each tool's cap, so the text is never cut shorter than `structuredContent`; a cap that was reached is disclosed through `ctx.enrich.truncated`. | Tools with per-record arrays |
 | The enrichment trailer carries applied defaults, totals, notices, and truncation — never hand-authored into `format()`, since `ctx.enrich` already reaches both surfaces. | Every tool |
 
 ---
@@ -213,7 +213,7 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `iconic_taxa=Birds` | 200, `total_results: 0` — silently narrowed to nothing | Strict enum of the 14 spec values: `Actinopterygii, Amphibia, Animalia, Arachnida, Aves, Chromista, Fungi, Insecta, Mammalia, Mollusca, Plantae, Protozoa, Reptilia, unknown`. |
 | `lat` without `lng`/`radius` | 200, `total_results: 387,388,228` — went global | The coordinate triple is validated as a unit: all three or none. |
 | `radius` alone | 200, `total_results: 387,389,093` — went global | Same rule, enforced from both directions. |
-| `d1=notadate` | 200, `total_results: 4,660,461` — identical to the unfiltered place total, so the date filter was dropped entirely | `d1` and `d2` must match `^\d{4}-\d{2}-\d{2}$`. Anything else is rejected before the request. |
+| `d1=notadate` | 200, `total_results: 4,660,461` — identical to the unfiltered place total, so the date filter was dropped entirely | `d1` and `d2` must match `^\d{4}-\d{2}-\d{2}$`. Anything else is rejected before the request. A blank string is the one exception: form clients submit every optional string field, blank when untouched, so a blank `d1`, `d2`, `q`, or `cursor` is treated as unset rather than as a malformed value. |
 | `term_value_id` without `term_id` | 200, `total_results: 4,660,477` — the filter was ignored | `term_value_id` requires `term_id`; the pair is validated together. |
 | `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | `per_page` capped in the schema: 200 for observation search, 500 for leaderboards and species counts — verified live: `/observations/observers?per_page=999` and `/observations/identifiers?per_page=999` both clamp to 500, not 200. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the cursor. |
@@ -291,6 +291,7 @@ With `taxon_id`, the `controlled_terms` topic adds an `observed_usage` array fro
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
 | `taxon_id_not_applicable` | `ValidationError` | `taxon_id` was supplied with a topic other than `controlled_terms`. | `Drop taxon_id, or set topic to controlled_terms where taxon-scoped annotation usage applies.` |
+| `unknown_taxon_id` | `ValidationError` | iNaturalist answered 422 because the taxon_id does not exist. | `Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.` (`thrownBy: 'service'`) |
 
 **Enrichment:** `notice` when `observed_usage` is empty for the requested taxon — `No annotations have been recorded for this taxon yet; the full vocabulary above still applies.`
 
@@ -376,7 +377,7 @@ The spine of the surface.
 | `unknown_taxon_id` | `ValidationError` | Upstream answered 422 `Unknown taxon_id`. | `Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.` (`thrownBy: 'service'`) |
 | `search_on_without_query` | `ValidationError` | `search_on` without `q`. | `Pass q alongside search_on, or drop search_on to search every observation property.` |
 
-**Enrichment:** `applied_filters` (echo of the server-applied defaults — `quality_grade`, `captive`, and the forced ordering under a cursor), `total_results`, `notice`.
+**Enrichment:** `applied_filters` (echo of the server-applied defaults — `quality_grade`, `captive`, and the forced ordering under a cursor), `notice`, and truncation disclosure (`truncated`, `shown`, `cap`) when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice fragments, composed by condition:**
 
@@ -434,7 +435,7 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 
 **Errors:** `invalid_geography`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
 
-**Enrichment:** `applied_filters`, `total_results`, `notice`, truncation disclosure when the page fills.
+**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`, `truncationCeiling`) when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice:** `No species recorded for that area and period. Widen the date range or the area, or set quality_grade to include "needs_id".`
 
@@ -493,7 +494,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 | `not_found` | `NotFound` | Upstream answered 200 with an empty `results` array. | `Resolve the organism name with inaturalist_resolve_name and retry with the taxon id it returns.` |
 | `unknown_section` | `ValidationError` | `sections` named a key the projected document does not carry. | `Call inaturalist_get_taxon without sections to see the section outline, then name sections from that list.` |
 
-**Enrichment:** `notice` when the outline arm fired.
+**Enrichment:** `sections_applied` — the sections this response carries, empty when the whole profile came back rather than a named slice. The `notice` that appears on the outline arm is a plain output field from `outlineOnOverflow()`, not routed through enrichment.
 
 ### `inaturalist_get_similar_species`
 
@@ -512,7 +513,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 **Errors:** `unknown_taxon_id`, `invalid_geography` — same strings.
 
-**Enrichment:** `total_results`, `notice`, truncation disclosure when `limit` cut the list.
+**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`, `truncationCeiling`) when `limit` cut the list.
 
 **Zero-hit notice:** `No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.`
 
@@ -538,7 +539,7 @@ Two arms, one of which must be supplied.
 |:--|:--|:--|:--|
 | `invalid_geography` | `ValidationError` | Neither `q` nor a complete bbox was given, or both were. | `Pass q to search place names, or all four of nelat, nelng, swlat and swlng to list the places covering a map area.` |
 
-**Enrichment:** `total_results`, `notice`, truncation disclosure — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps.
+**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps.
 
 **Zero-hit notice:** `No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.`
 
@@ -572,7 +573,7 @@ Top species for an area is not a `kind` here; `inaturalist_get_species_counts` a
 | `unknown_taxon_id` | `ValidationError` | Upstream answered 422 `Unknown taxon_id`. | Same string as `inaturalist_search_observations`. (`thrownBy: 'service'`) |
 | `leaderboard_window_exceeded` | `ValidationError` | `page × per_page` would exceed 500. | `This leaderboard only ranks the top 500 entries; page and per_page must multiply to 500 or less. Narrow the area, date range, or taxon_id to bring a specific user's rank into the top 500 instead.` |
 
-**Enrichment:** `applied_filters`, `total_results`, `notice`, truncation disclosure.
+**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`). `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice:** `Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.`
 
@@ -643,7 +644,7 @@ No rate-limit headers are returned (no `X-RateLimit-*`, no `Retry-After` on the 
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | No | Maximum requests in flight. Default `4`. |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | No | Outbound requests allowed per UTC day. Default `9000`. |
 
-No API key. Both `server.json` (`environmentVariables[]`) and `manifest.json` (`mcp_config.env` + `user_config`) carry all four, since `lint:packaging` checks parity.
+No API key. `server.json` (`environmentVariables[]`) declares all four on both packages. `manifest.json` `user_config` stays empty: `lint:packaging` requires an entry there only for a variable that is required with no default, and all four are optional.
 
 `createApp()` declares `sessionMode: 'stateless'` — no handler calls `ctx.requestInput`, so nothing needs a live session, and the posture belongs in source rather than being left to the `auto` default.
 
