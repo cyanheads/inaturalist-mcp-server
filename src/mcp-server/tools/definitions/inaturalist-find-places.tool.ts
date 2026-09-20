@@ -120,7 +120,11 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     totalCount: z.number().describe('Total places upstream matched, before any page limit.'),
     truncated: z.boolean().describe('True when more places matched than were returned.'),
     shown: z.number().describe('How many places this response carries.'),
-    cap: z.number().describe('The page size that was applied.'),
+    cap: z
+      .number()
+      .describe(
+        'The page size that bounded this response — per_page on the bounding-box arm, the fixed page upstream served on the name-prefix arm.',
+      ),
     notice: z
       .string()
       .optional()
@@ -153,6 +157,10 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       ctx.log.info('Resolving a place name');
       const { total, places } = await service.autocompletePlaces(q, ctx);
       ctx.enrich.total(total);
+      // The baseline disclosure rides every path — the enrichment block declares
+      // these three as required, and `ctx.enrich.truncated` below overwrites them
+      // when the fixed upstream page left matches unreachable.
+      ctx.enrich({ truncated: false, shown: places.length, cap: places.length });
       if (places.length === 0) {
         ctx.enrich.notice(
           'No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.',
@@ -183,6 +191,7 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     );
     const shown = standard.length + community.length;
     ctx.enrich.total(total);
+    ctx.enrich({ truncated: false, shown, cap: input.per_page });
     if (shown === 0) {
       ctx.enrich.notice(
         'No place covers that box. Widen the corners, or resolve a named area with q instead.',

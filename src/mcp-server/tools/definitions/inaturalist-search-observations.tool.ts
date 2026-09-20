@@ -116,9 +116,11 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       .number()
       .int()
       .min(1)
-      .max(200)
-      .default(20)
-      .describe('Records per page, maximum 200.'),
+      .max(25)
+      .default(10)
+      .describe(
+        'Records per page, maximum 25. A projected record costs roughly 1.9 KB across structuredContent and the rendered text together, so 25 is a full page near 49 KB and the default of 10 near 20 KB. Walk further with page or cursor rather than a larger page.',
+      ),
     include: z
       .array(z.enum(['photos', 'annotations', 'sounds']))
       .optional()
@@ -297,6 +299,9 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       ctx,
     );
 
+    // The baseline disclosure rides every path — the enrichment block declares
+    // these three as required, and `ctx.enrich.truncated` below overwrites them
+    // on the one path where the page actually filled.
     ctx.enrich({
       applied_filters: {
         quality_grade: input.quality_grade,
@@ -305,6 +310,9 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
         order,
         ordering_forced_by_cursor: usingCursor,
       },
+      truncated: false,
+      shown: observations.length,
+      cap: input.per_page,
     });
 
     if (observations.length === 0) {

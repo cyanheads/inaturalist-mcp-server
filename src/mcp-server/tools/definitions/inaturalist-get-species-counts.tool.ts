@@ -62,10 +62,10 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(50)
       .default(25)
       .describe(
-        'Species per page, maximum 500. Upstream clamps a larger value silently; the schema refuses it instead.',
+        'Species per page, maximum 50. A ranked species costs roughly 860 bytes across structuredContent and the rendered text together, so 50 is a full page near 43 KB. Upstream would serve 500 in one page — raise page rather than asking for it.',
       ),
   }),
 
@@ -169,8 +169,14 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
 
     const { total, species } = await getINaturalistService().getSpeciesCounts(params, ctx);
 
+    // The baseline disclosure rides every path — the enrichment block declares
+    // these three as required, and `ctx.enrich.truncated` below overwrites them
+    // on the one path where the page actually filled.
     ctx.enrich({
       applied_filters: { quality_grade: input.quality_grade, captive: input.captive },
+      truncated: false,
+      shown: species.length,
+      cap: input.per_page,
     });
 
     if (species.length === 0) {
@@ -188,7 +194,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         shown: species.length,
         cap: input.per_page,
         ...(ceiling === undefined ? {} : { ceiling }),
-        guidance: `${total} distinct species match. Raise page to walk further down the ranking, or raise per_page (max 500).`,
+        guidance: `${total} distinct species match. Raise page to walk further down the ranking, or raise per_page (max 50).`,
       });
     }
 

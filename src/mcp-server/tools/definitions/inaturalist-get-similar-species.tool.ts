@@ -140,6 +140,10 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     const { similar } = await getINaturalistService().getSimilarSpecies(params, ctx);
     const shown = similar.slice(0, input.limit);
     ctx.enrich.total(similar.length);
+    // The baseline disclosure rides every path — the enrichment block declares
+    // these three as required, and `ctx.enrich.truncated` below overwrites them
+    // on the one path where the limit actually cut the set.
+    ctx.enrich({ truncated: false, shown: shown.length, cap: input.limit });
 
     if (shown.length === 0) {
       ctx.enrich.notice(

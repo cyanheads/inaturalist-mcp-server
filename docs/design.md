@@ -174,6 +174,23 @@ Projected to `{ attribute, value, attribute_id, value_id, by }` — e.g. `{ attr
 
 Output is a flat object with a `kind: 'full' | 'outline'` discriminator and presence-based optional arms, per the outline-on-overflow contract; `format()` renders each arm on field presence, never by branching on `kind`.
 
+### Response size budget: the list tools
+
+A single document gets the outline treatment above. A list tool gets a smaller page instead — no outline arm, no truncated records, `structuredContent` and `content[]` both complete for whatever page was asked for. Two thresholds set the caps, and the per-record cost is measured across **both** surfaces, since every record is serialised once as JSON and again as rendered markdown:
+
+- **Default page ≤ 24,000 bytes** — the same budget `outlineOnOverflow` gives one document. A caller who names no `per_page` gets a page that fits it.
+- **Advertised maximum ≤ 50,000 bytes** — a list is not one document, so the ceiling is twice the document budget. Past that, the answer is another page, not a bigger one.
+
+Measured live on 2026-09-19 against `place_id: 97394` (North America):
+
+| Tool | Bytes per record | Upstream would serve | `per_page` max | Full page at the max | Default | Default page |
+|:--|--:|--:|--:|--:|--:|--:|
+| `inaturalist_search_observations` | ~1,973 | 200 | 25 | 49,319 B | 10 | ~19,700 B |
+| `inaturalist_get_species_counts` | ~856 | 500 | 50 | 42,780 B | 25 | ~21,400 B |
+| `inaturalist_get_leaderboard` | ~137 | 500 | 250 | 34,182 B | 25 | ~3,400 B |
+
+Sizes are the whole `tools/call` reply. Nothing is lost at the lower caps: `page` and `cursor` reach the same records, and two leaderboard pages of 250 cover the whole 500-entry window those endpoints rank. `inaturalist_find_places` (max 30; ten places measured 6,752 bytes, so ~675 each) and `inaturalist_get_similar_species` (max 50, over look-alikes projected to roughly 250 bytes each) already sit inside both thresholds and are unchanged. `include: ["photos"]` on an observation search multiplies the per-record cost and is the caller's own call to make — the field's description says as much.
+
 ### Places: geometry stripped to a bounding box
 
 Every place payload embeds `geometry_geojson`, and it dominates: `/places/nearby` returned 246,887 bytes of `standard` results for two places. Each record also carries `bounding_box_geojson`, a five-point polygon of ~196 bytes.
@@ -215,7 +232,7 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `radius` alone | 200, `total_results: 387,389,093` — went global | Same rule, enforced from both directions. |
 | `d1=notadate` | 200, `total_results: 4,660,461` — identical to the unfiltered place total, so the date filter was dropped entirely | `d1` and `d2` must match `^\d{4}-\d{2}-\d{2}$`. Anything else is rejected before the request. A blank string is the one exception: form clients submit every optional string field, blank when untouched, so a blank `d1`, `d2`, `q`, or `cursor` is treated as unset rather than as a malformed value. |
 | `term_value_id` without `term_id` | 200, `total_results: 4,660,477` — the filter was ignored | `term_value_id` requires `term_id`; the pair is validated together. |
-| `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | `per_page` capped in the schema: 200 for observation search, 500 for leaderboards and species counts — verified live: `/observations/observers?per_page=999` and `/observations/identifiers?per_page=999` both clamp to 500, not 200. |
+| `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | `per_page` capped in the schema well below the upstream clamp — 25 for observation search, 50 for species counts, 250 for leaderboards. The caps are sized by response bytes, not by what upstream will serve; see Response size budget. Upstream's own clamps, verified live: `/observations` clamps to 200, and `/observations/observers?per_page=999` and `/observations/identifiers?per_page=999` both clamp to 500, not 200. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the cursor. |
 | `place_id=abc` | **500** `{"error":"Error","status":500}` | `place_id` is a positive integer in the schema. |
 | `taxon_id=999999999` (as a filter) | **422** `{"error":"Unknown taxon_id 999999999","status":422}` | Mapped to a typed `unknown_taxon_id` routing to `inaturalist_resolve_name`. |
@@ -257,6 +274,8 @@ Photos are linked, never proxied or re-hosted.
 ## Tools — detail
 
 Shared conventions below: every param table's `maps to` column names the verified upstream parameter; a blank means the parameter is handled in-process. Every tool that accepts an area accepts it in exactly one of three forms — `place_id`, the `lat`+`lng`+`radius` triple, or the `nelat`+`nelng`+`swlat`+`swlng` bbox — validated as a unit and refused when mixed or partial.
+
+**Truncation disclosure is unconditional.** Every tool that caps a list declares `truncated`, `shown`, and `cap` as *required* enrichment, and writes all three on every path the handler can take — a zero-hit page and an under-cap page both report `truncated: false` alongside what they did return. `ctx.enrich.truncated(...)` overwrites those three, and supplies the guidance notice, only where the cap actually bit. The framework validates the merged enrichment against `output.extend(enrichment)`, so a required field written on one branch only is not a missing field on the others — it is a failed call.
 
 ### `inaturalist_list_reference`
 
@@ -359,7 +378,7 @@ The spine of the surface.
 | `order` | enum, default `desc` | `order` | |
 | `page` | int ≥ 1, default 1 | `page` | Refused in-process when `page × per_page > 10000`. |
 | `cursor` | string, optional | `id_below` | The `next_cursor` from a previous page. Mutually exclusive with `page`. |
-| `per_page` | int 1–200, default 20 | `per_page` | Upstream clamps 999 to 200 silently; the schema refuses it instead. |
+| `per_page` | int 1–25, default 10 | `per_page` | Bounded by the response budget, not by upstream — see Response size budget. A full page of 25 measured 49,319 bytes; the default of 10 lands near 19,700. Upstream would serve 200 and clamps 999 to it silently; the schema refuses anything past 25. |
 | `include` | enum array, optional | — | `photos` \| `annotations` \| `sounds`. |
 
 **Output:** `total_results`, `observations[]` (the projected record), `next_cursor` (string, optional), `has_more` (boolean).
@@ -377,7 +396,7 @@ The spine of the surface.
 | `unknown_taxon_id` | `ValidationError` | Upstream answered 422 `Unknown taxon_id`. | `Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.` (`thrownBy: 'service'`) |
 | `search_on_without_query` | `ValidationError` | `search_on` without `q`. | `Pass q alongside search_on, or drop search_on to search every observation property.` |
 
-**Enrichment:** `applied_filters` (echo of the server-applied defaults — `quality_grade`, `captive`, and the forced ordering under a cursor), `notice`, and truncation disclosure (`truncated`, `shown`, `cap`) when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
+**Enrichment:** `applied_filters` (echo of the server-applied defaults — `quality_grade`, `captive`, and the forced ordering under a cursor), `notice`, and truncation disclosure (`truncated`, `shown`, `cap`) on every response. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice fragments, composed by condition:**
 
@@ -390,7 +409,7 @@ The spine of the surface.
 | A radius was given | `No sightings within {radius} km of that point. Raise radius, or search a named area with a place_id from inaturalist_find_places.` |
 | Nothing else applies | `No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.` |
 
-**Truncation:** when the page fills `per_page`, `ctx.enrich.truncated({ shown, cap, guidance })` with the guidance naming `next_cursor`.
+**Truncation:** `truncated: false` with `shown` and `cap` on every other path; when the page fills `per_page`, `ctx.enrich.truncated({ shown, cap, guidance })` with the guidance naming `next_cursor`.
 
 ### `inaturalist_get_observation`
 
@@ -426,7 +445,7 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 | `captive` | boolean, default `false` | `captive` | |
 | `term_id` / `term_value_id` | int arrays, optional | same | Same pairing rule. |
 | `iconic_taxa` | enum array, optional | `iconic_taxa` | |
-| `per_page` | int 1–500, default 25 | `per_page` | Upstream caps at 500 (501 clamped silently); 500 species measured 662 KB raw. |
+| `per_page` | int 1–50, default 25 | `per_page` | Bounded by the response budget, not by upstream — see Response size budget. A full page of 50 measured 42,780 bytes. Upstream caps at 500 (501 clamped silently) and 500 species measured 662 KB raw; the schema refuses anything past 50. |
 | `page` | int ≥ 1, default 1 | `page` | |
 
 **Output:** `total_results` (distinct species matching), `species[]` — `{ taxon_id, name, common_name, rank, iconic_taxon_name, observation_count, photo }`, from `results[].count` and `results[].taxon`.
@@ -435,7 +454,7 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 
 **Errors:** `invalid_geography`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
 
-**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`, `truncationCeiling`) when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
+**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice:** `No species recorded for that area and period. Widen the date range or the area, or set quality_grade to include "needs_id".`
 
@@ -513,7 +532,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 **Errors:** `unknown_taxon_id`, `invalid_geography` — same strings.
 
-**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`, `truncationCeiling`) when `limit` cut the list.
+**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when `limit` cut the list.
 
 **Zero-hit notice:** `No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.`
 
@@ -539,7 +558,7 @@ Two arms, one of which must be supplied.
 |:--|:--|:--|:--|
 | `invalid_geography` | `ValidationError` | Neither `q` nor a complete bbox was given, or both were. | `Pass q to search place names, or all four of nelat, nelng, swlat and swlng to list the places covering a map area.` |
 
-**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps.
+**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps. `cap` means different things per arm: `per_page` on the nearby arm, the fixed page upstream served on the autocomplete arm, which publishes no page size to report.
 
 **Zero-hit notice:** `No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.`
 
@@ -552,7 +571,7 @@ Two arms, one of which must be supplied.
 | `taxon_id` | int ≥ 1, optional | `taxon_id` | |
 | `d1` / `d2` | `YYYY-MM-DD`, optional | same | |
 | `quality_grade` | enum array, default `["research"]` | `quality_grade` | |
-| `per_page` | int 1–500, default 25 | `per_page` | Verified live: `per_page=999` clamps to 500 on both `/observations/observers` and `/observations/identifiers`. |
+| `per_page` | int 1–250, default 25 | `per_page` | Bounded by the response budget, not by upstream — see Response size budget. A full page of 250 measured 34,182 bytes, and two such pages cover the whole 500-entry window. Verified live: `per_page=999` clamps to 500 on both `/observations/observers` and `/observations/identifiers`; the schema refuses anything past 250. |
 | `page` | int ≥ 1, default 1 | `page` | Refused in-process when `page × per_page > 500` — see below. |
 
 The two endpoints return different shapes and are normalised: `observers` gives `{ user_id, observation_count, species_count, user }`, `identifiers` gives `{ user_id, count, user }`.
@@ -573,7 +592,7 @@ Top species for an area is not a `kind` here; `inaturalist_get_species_counts` a
 | `unknown_taxon_id` | `ValidationError` | Upstream answered 422 `Unknown taxon_id`. | Same string as `inaturalist_search_observations`. (`thrownBy: 'service'`) |
 | `leaderboard_window_exceeded` | `ValidationError` | `page × per_page` would exceed 500. | `This leaderboard only ranks the top 500 entries; page and per_page must multiply to 500 or less. Narrow the area, date range, or taxon_id to bring a specific user's rank into the top 500 instead.` |
 
-**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`). `total_results` is not duplicated into enrichment — it already rides `output`.
+**Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice:** `Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.`
 
@@ -787,3 +806,6 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **No `title` on any tool or resource; `name` is the display surface.** | The server's own identity is the bare hyphenated repo name on every surface, and a Title Case tool or resource title would reintroduce exactly the display-name convention the identity rule exists to prevent. |
 | **Upstream free text renders inside a blockquote.** | `wikipedia_summary`, identification and comment bodies, `place_guess`, tags, and attribution strings are all written by third parties. Quoting them in `format()` marks them as content to report on rather than instruction to follow. |
 | **`/controlled_terms/for_taxon` is not used.** | It matched zero terms for a butterfly, a fern, and Insecta, and one term for Plantae — it tests exact `taxon_ids` membership rather than ancestry. `popular_field_values` answers the real question with real counts. |
+| **Truncation disclosure is required enrichment and is written on every path, not only where the cap bit.** | The framework validates merged enrichment against `output.extend(enrichment)`, so a required field written on one branch only does not degrade to a missing field on the others — every other path fails the call outright, and a zero-hit page returns a validation error in place of its own zero-hit notice. Writing `truncated: false` with `shown` and `cap` unconditionally also earns its keep on its own terms: a page states what it returned against what was asked for whether or not anything was cut. |
+| **List caps are sized by response bytes, not by what upstream will serve.** | Upstream's own limits (200 observations, 500 species, 500 leaderboard entries) are limits on upstream, and a full page at them measured 388 KB, 419 KB, and 68 KB — an agent spending a call at the advertised maximum had no way to know that before it arrived. Caps now come from the measured per-record cost across `structuredContent` and the rendered text together: the default page fits the 24,000-byte budget `outlineOnOverflow` gives one document, the advertised maximum fits 50,000. Bounding beats disclosing here because paging already reaches every record an uncapped page would have carried, so the smaller page costs nothing but a second call. |
+| **A caller-facing error carries no upstream path.** | `unknown_taxon_id` reaches the agent on `structuredContent.error.data`, and the REST path it came from names nothing the caller can act on that the declared recovery does not already say. The endpoint stays on the request's own log line, which is where triage wants it. The server- and upstream-fault errors keep theirs — an allowlist violation, an HTML error page, an unparseable body — because there the path *is* the diagnostic and the caller is not its audience. |

@@ -48,7 +48,7 @@ describe('definition smoke test', () => {
       captive: false,
       order_by: 'observed_on',
       order: 'desc',
-      per_page: 20,
+      per_page: 10,
     });
     expect(inaturalistGetObservation.input.parse({ observation_id: [401617560] })).toMatchObject({
       include: ['identifications'],

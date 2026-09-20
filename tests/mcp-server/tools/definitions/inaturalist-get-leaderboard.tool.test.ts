@@ -7,9 +7,10 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetLeaderboard } from '@/mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.js';
+import { LEADERBOARD_WINDOW } from '@/mcp-server/tools/observation-filters.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import {
   asService,
@@ -34,6 +35,19 @@ beforeEach(() => {
 function entries(count: number) {
   return Array.from({ length: count }, (_, i) => leaderboardEntry({ rank: i + 1 }));
 }
+
+describe('input validation', () => {
+  it('bounds per_page and its default to the response budget, two pages covering the window', () => {
+    expect(inaturalistGetLeaderboard.input.parse({ kind: 'observers' }).per_page).toBe(25);
+    expect(
+      inaturalistGetLeaderboard.input.safeParse({ kind: 'observers', per_page: 250 }).success,
+    ).toBe(true);
+    expect(
+      inaturalistGetLeaderboard.input.safeParse({ kind: 'observers', per_page: 251 }).success,
+    ).toBe(false);
+    expect(250 * 2).toBe(LEADERBOARD_WINDOW);
+  });
+});
 
 describe('area validation', () => {
   it('rejects a partial bounding box', async () => {
@@ -170,6 +184,41 @@ describe('zero-hit and truncation enrichment', () => {
     const enrichment = getEnrichment(ctx);
     expect(enrichment.truncated).toBe(true);
     expect(enrichment.notice).toContain('This page ends at the 500-entry ceiling');
+  });
+
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    // getEnrichment reads an unvalidated accumulator, so only the result builder
+    // — which parses output.extend(enrichment) — catches a required enrichment
+    // field the handler never wrote.
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+
+    const result = await runToolContract(inaturalistGetLeaderboard, { kind: 'identifiers' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      entries: [],
+      truncated: false,
+      shown: 0,
+      cap: 25,
+      notice:
+        'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(
+      'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
+    );
+  });
+
+  it('reports truncated: false on a partial page that never reached per_page', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 3, entries: entries(3) });
+    const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
+    const input = inaturalistGetLeaderboard.input.parse({ kind: 'observers', per_page: 25 });
+
+    await inaturalistGetLeaderboard.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 3, cap: 25 });
   });
 
   it('echoes the applied quality_grade default', async () => {

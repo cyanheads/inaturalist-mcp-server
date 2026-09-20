@@ -8,7 +8,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -37,6 +37,12 @@ function observations(count: number, idOffset = 0) {
 }
 
 describe('input validation', () => {
+  it('bounds per_page and its default to the response budget', () => {
+    expect(inaturalistSearchObservations.input.parse({}).per_page).toBe(10);
+    expect(inaturalistSearchObservations.input.safeParse({ per_page: 25 }).success).toBe(true);
+    expect(inaturalistSearchObservations.input.safeParse({ per_page: 26 }).success).toBe(false);
+  });
+
   it('rejects an area given in two forms at once', async () => {
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     const input = inaturalistSearchObservations.input.parse({
@@ -274,6 +280,44 @@ describe('zero-hit notice composition', () => {
     await inaturalistSearchObservations.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toContain('No sightings within 10 km of that point.');
+  });
+
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    // getEnrichment reads an unvalidated accumulator, so only the result builder
+    // — which parses output.extend(enrichment) — catches a required enrichment
+    // field the handler never wrote.
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+
+    const result = await runToolContract(inaturalistSearchObservations, {
+      quality_grade: ['research', 'needs_id'],
+      captive: true,
+      per_page: 5,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observations: [],
+      has_more: false,
+      truncated: false,
+      shown: 0,
+      cap: 5,
+      notice:
+        'No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.',
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('No sightings matched. Relax one filter at a time');
+  });
+
+  it('reports truncated: false on a partial page that never reached per_page', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 3, observations: observations(3) });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({ per_page: 20 });
+
+    await inaturalistSearchObservations.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 3, cap: 20 });
   });
 
   it('falls back to the generic notice when no specific condition applies', async () => {

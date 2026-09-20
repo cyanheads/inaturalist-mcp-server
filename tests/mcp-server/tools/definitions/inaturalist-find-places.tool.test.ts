@@ -6,7 +6,7 @@
  * @module tests/mcp-server/tools/definitions/inaturalist-find-places.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistFindPlaces } from '@/mcp-server/tools/definitions/inaturalist-find-places.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -53,6 +53,41 @@ describe('name-prefix arm', () => {
     expect(getEnrichment(ctx).notice).toContain('No place name starts with that text');
   });
 
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    // getEnrichment reads an unvalidated accumulator, so only the result builder
+    // — which parses output.extend(enrichment) — catches a required enrichment
+    // field the handler never wrote.
+    fake.autocompletePlaces.mockResolvedValue({ total: 0, places: [] });
+
+    const result = await runToolContract(inaturalistFindPlaces, { q: 'zzzznotaplace' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      places: [],
+      totalCount: 0,
+      truncated: false,
+      shown: 0,
+      cap: 0,
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('No place name starts with that text');
+  });
+
+  it('reports the fixed upstream page as the cap when it did not truncate', async () => {
+    fake.autocompletePlaces.mockResolvedValue({
+      total: 2,
+      places: [projectedPlace({ id: 1 }), projectedPlace({ id: 2 })],
+    });
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({ q: 'Seattle' });
+
+    await inaturalistFindPlaces.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 2, cap: 2 });
+  });
+
   it('discloses truncation when the fixed page of 10 is smaller than the total matched', async () => {
     fake.autocompletePlaces.mockResolvedValue({
       total: 45,
@@ -97,6 +132,26 @@ describe('bounding-box arm', () => {
     await inaturalistFindPlaces.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toContain('No place covers that box');
+  });
+
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    fake.nearbyPlaces.mockResolvedValue({ total: 0, standard: [], community: [] });
+
+    const result = await runToolContract(inaturalistFindPlaces, { ...bbox, per_page: 10 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      standard: [],
+      community: [],
+      totalCount: 0,
+      truncated: false,
+      shown: 0,
+      cap: 10,
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('No place covers that box');
   });
 
   it('discloses truncation once the page fills per_page', async () => {

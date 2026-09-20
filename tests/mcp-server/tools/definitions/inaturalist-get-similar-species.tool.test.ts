@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -118,15 +118,43 @@ describe('zero-hit and limit-truncation enrichment', () => {
     expect(enrichment.totalCount).toBe(24);
   });
 
-  it('does not disclose truncation when the whole confusion set fits under the limit', async () => {
+  it('reports truncated: false when the whole confusion set fits under the limit', async () => {
     fake.getSimilarSpecies.mockResolvedValue({ total: 3, similar: candidates(3) });
     const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
     const input = inaturalistGetSimilarSpecies.input.parse({ taxon_id: 48662 });
 
     await inaturalistGetSimilarSpecies.handler(input, ctx);
 
-    expect(getEnrichment(ctx).truncated).toBeUndefined();
-    expect(getEnrichment(ctx).totalCount).toBe(3);
+    expect(getEnrichment(ctx)).toMatchObject({
+      truncated: false,
+      shown: 3,
+      cap: 20,
+      totalCount: 3,
+    });
+  });
+
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    // getEnrichment reads an unvalidated accumulator, so only the result builder
+    // — which parses output.extend(enrichment) — catches a required enrichment
+    // field the handler never wrote.
+    fake.getSimilarSpecies.mockResolvedValue({ total: 0, similar: [] });
+
+    const result = await runToolContract(inaturalistGetSimilarSpecies, { taxon_id: 48662 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      similar_species: [],
+      totalCount: 0,
+      truncated: false,
+      shown: 0,
+      cap: 20,
+      notice:
+        'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.',
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('No look-alikes are recorded for this taxon');
   });
 });
 

@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetSpeciesCounts } from '@/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -35,6 +35,14 @@ function species(count: number) {
     speciesCount({ taxon_id: i + 1, observation_count: 100 - i }),
   );
 }
+
+describe('input validation', () => {
+  it('bounds per_page and its default to the response budget', () => {
+    expect(inaturalistGetSpeciesCounts.input.parse({}).per_page).toBe(25);
+    expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 50 }).success).toBe(true);
+    expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 51 }).success).toBe(false);
+  });
+});
 
 describe('area validation', () => {
   it('rejects a partial coordinate triple', async () => {
@@ -133,14 +141,37 @@ describe('zero-hit and truncation enrichment', () => {
     expect(enrichment.truncationCeiling).toBe(species(25).at(-1)?.observation_count);
   });
 
-  it('does not disclose truncation when the full result set fits on one page', async () => {
+  it('reports truncated: false when the full result set fits on one page', async () => {
     fake.getSpeciesCounts.mockResolvedValue({ total: 3, species: species(3) });
     const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
     const input = inaturalistGetSpeciesCounts.input.parse({ per_page: 25, page: 1 });
 
     await inaturalistGetSpeciesCounts.handler(input, ctx);
 
-    expect(getEnrichment(ctx).truncated).toBeUndefined();
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 3, cap: 25 });
+  });
+
+  it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
+    // getEnrichment reads an unvalidated accumulator, so only the result builder
+    // — which parses output.extend(enrichment) — catches a required enrichment
+    // field the handler never wrote.
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+
+    const result = await runToolContract(inaturalistGetSpeciesCounts, { per_page: 25 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      species: [],
+      truncated: false,
+      shown: 0,
+      cap: 25,
+      notice:
+        'No species recorded for that area and period. Widen the date range or the area, or set quality_grade to include "needs_id".',
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('No species recorded for that area and period.');
   });
 
   it('echoes the applied quality_grade and captive defaults on every response', async () => {

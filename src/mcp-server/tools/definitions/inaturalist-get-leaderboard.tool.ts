@@ -48,10 +48,10 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(250)
       .default(25)
       .describe(
-        'Entries per page, maximum 500. Upstream clamps a larger value silently; the schema refuses it instead.',
+        'Entries per page, maximum 250. An entry costs roughly 140 bytes across structuredContent and the rendered text together, so 250 is a full page near 34 KB — and two such pages cover the whole 500-entry window these endpoints rank.',
       ),
   }),
 
@@ -171,7 +171,15 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       ctx,
     );
 
-    ctx.enrich({ applied_filters: { quality_grade: input.quality_grade } });
+    // The baseline disclosure rides every path — the enrichment block declares
+    // these three as required, and `ctx.enrich.truncated` below overwrites them
+    // on the one path where the page actually filled.
+    ctx.enrich({
+      applied_filters: { quality_grade: input.quality_grade },
+      truncated: false,
+      shown: entries.length,
+      cap: input.per_page,
+    });
 
     const countMetric =
       input.kind === 'observers' ? ('observations' as const) : ('identifications' as const);
