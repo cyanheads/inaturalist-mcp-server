@@ -19,11 +19,17 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://inaturalist.caseyjhand.com/mcp](https://inaturalist.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-iNaturalist's index of 380M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the community identification thread behind a record; chart when a taxon appears in a place; rank the species of an area; and check what a look-alike is most often confused with. Keyless and read-only, running as a stdio process or a local Streamable HTTP server.
+iNaturalist's index of 380M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the community identification thread behind a record; chart when a taxon appears in a place; rank the species of an area; and check what a look-alike is most often confused with. Keyless and read-only, running as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 Composes with servers covering institutional specimen records, botanical nomenclature, and geocoding — this one contributes the observation, identification-thread, and phenology layer.
 
@@ -207,10 +213,27 @@ Each default page fits the 24,000-byte budget a single document gets, and each f
 - A place crossing the antimeridian has a degenerate bounding box upstream. It is relayed as computed, not repaired.
 - Obscured coordinates cannot be resolved, by design. A threatened-taxon record reports a locality with an accuracy radius in the tens of kilometres.
 - A section named in `inaturalist_get_taxon` comes back whole however large it is — truncating a section the caller asked for by name is the failure the outline exists to prevent.
-- The daily request counter is per process. A restart resets it, and two processes behind one egress IP do not share it.
+- The daily request counter is per process. A restart resets it, and two processes behind one egress IP do not share it. Every caller of the public hosted instance draws on that one process's budget.
 - `inaturalist_get_leaderboard` can address only the top 500 entries, against the 10,000-result window on observation search.
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://inaturalist.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "inaturalist-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://inaturalist.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
