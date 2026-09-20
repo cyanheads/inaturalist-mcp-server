@@ -5,22 +5,22 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
-**Zod:** ^4.4.3
+**Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
 ---
 
-## First Session
+## Domain
 
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
+Read-only, keyless access to the iNaturalist v1 API (`https://api.inaturalist.org/v1/`) — georeferenced citizen-science sightings, the community identification thread behind each record, taxon profiles, phenology histograms, the similar-species confusion graph, places, controlled vocabularies, and observer/identifier leaderboards. Ten tools, two resources, no prompts, one service.
 
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
+`docs/design.md` is the as-built contract: the response projection tables, the measured payload sizes the page caps derive from, the input-validation rules, the licensing posture, and a Decisions Log explaining why each is the way it is. Read it before changing a tool's surface — most of what looks arbitrary was measured against the live API.
 
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+Two upstream properties shape every decision and are treated as engineering constraints rather than caveats:
+
+- **Responses are enormous and cannot be trimmed upstream.** The `fields=` partial-response parameter is accepted and ignored, so every response is projected in-process.
+- **The API silently widens a query it does not understand.** An unknown parameter name returns HTTP 200 and the entire global index; a malformed date drops the date filter. Every parameter is sent from a per-endpoint allowlist, and anything upstream would widen, narrow to zero, or 500 on is rejected in-process first.
 
 ---
 
@@ -59,28 +59,54 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+Abridged from `src/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.ts` — the shared area shape, the typed error contract, unconditional truncation disclosure, and `format()` parity.
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { areaInputShape, resolveArea } from '@/mcp-server/tools/observation-filters.js';
+import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_species', {
+  description: 'List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    taxon_id: z.number().int().min(1).describe('Numeric taxon id to find look-alikes for.'),
+    ...areaInputShape,
+    limit: z.number().int().min(1).max(50).default(20).describe('Maximum look-alikes to return.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    taxon_id: z.number().describe('The taxon the look-alikes were found for.'),
+    similar_species: z.array(SimilarSpeciesSchema).describe('Ranked most-confused first.'),
   }),
-  auth: ['inventory:read'],
+  enrichment: {
+    truncated: z.boolean().describe('True when the limit cut the confusion set.'),
+    shown: z.number().describe('How many look-alikes this response carries.'),
+    cap: z.number().describe('The limit that was applied.'),
+  },
+  errors: [
+    { reason: 'invalid_geography', code: JsonRpcErrorCode.ValidationError,
+      when: 'An area was given partially or in two forms at once.',
+      recovery: 'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.' },
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const area = resolveArea(input);
+    if (!area.ok) {
+      throw ctx.fail('invalid_geography', area.message, { ...ctx.recoveryFor('invalid_geography') });
+    }
+
+    const { similar } = await getINaturalistService().getSimilarSpecies(
+      { ...area.value, taxon_id: input.taxon_id },
+      ctx,
+    );
+    const shown = similar.slice(0, input.limit);
+    ctx.log.info('Fetched a confusion set', { taxonId: input.taxon_id, shown: shown.length });
+
+    // Declared required, so written on every path — `ctx.enrich.truncated()`
+    // overwrites these only where the limit actually cut the set.
+    ctx.enrich({ truncated: false, shown: shown.length, cap: input.limit });
+    return { taxon_id: input.taxon_id, similar_species: shown };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
@@ -89,71 +115,85 @@ export const searchItems = tool('search_items', {
   // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: result.similar_species
+      .map((s, i) => `${i + 1}. **${s.common_name ?? 'no common name'}** (*${s.name}*) — corrected ${s.misidentification_count} times · taxon_id ${s.taxon_id}`)
+      .join('\n'),
   }],
 });
 ```
 
 ### Resource
 
+Abridged from `src/mcp-server/resources/definitions/inaturalist-taxon.resource.ts`. A URI param arrives as a string, so the numeric shape is enforced by regex and converted in the handler; `cacheHint` matches the service's own TTL for that surface.
+
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { TaxonDocumentSchema } from '@/mcp-server/tools/taxon-document.js';
+import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
+export const inaturalistTaxonResource = resource('inaturalist://taxa/{taxon_id}', {
+  name: 'inaturalist-taxon',
+  description: 'Taxon profile by numeric iNaturalist taxon id — taxonomic path, conservation listings, encyclopedia summary, photos, and children.',
+  mimeType: 'application/json',
+  cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
+  params: z.object({
+    taxon_id: z.string().regex(/^[1-9]\d*$/).describe('Numeric iNaturalist taxon id, e.g. 48662.'),
+  }),
+  output: TaxonDocumentSchema,
+
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+    const taxonId = Number(params.taxon_id);
+    const doc = await getINaturalistService().getTaxon(taxonId, ctx);
+    if (!doc) {
+      throw notFound(`iNaturalist holds no taxon with id ${taxonId}.`, {
+        taxon_id: taxonId,
+        recovery: { hint: 'Resolve the organism name with inaturalist_resolve_name and read the resource at the taxon id it returns.' },
+      });
+    }
+    return doc;
   },
 });
 ```
 
-### Prompt
+### Prompts
 
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+None, deliberately. The server is lookup- and discovery-oriented: the workflow chain lives in the `createApp()` `instructions` string and the tool descriptions, where every client sees it, rather than in a template most clients never surface. Adding one is a design change — see the Decisions Log in `docs/design.md`.
 
 ### Server config
+
+Abridged from `src/config/server-config.ts`. There is no API key — the four vars are the outbound traffic posture against `api.inaturalist.org`, and all four are optional with defaults.
 
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { config, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  userAgent: z
+    .string()
+    .default(() => `inaturalist-mcp-server/${config.mcpServerVersion} (+https://github.com/cyanheads/inaturalist-mcp-server)`)
+    .describe('User-Agent sent on every request. Keep a contact URL in any override.'),
+  minRequestIntervalMs: z.coerce.number().int().min(0).default(1100).describe('Minimum spacing between outbound request starts, ms.'),
+  maxConcurrentRequests: z.coerce.number().int().min(1).default(4).describe('Maximum outbound requests in flight.'),
+  dailyRequestBudget: z.coerce.number().int().min(1).default(9000).describe('Outbound requests allowed per UTC day.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    userAgent: 'INATURALIST_USER_AGENT',
+    minRequestIntervalMs: 'INATURALIST_MIN_REQUEST_INTERVAL_MS',
+    maxConcurrentRequests: 'INATURALIST_MAX_CONCURRENT_REQUESTS',
+    dailyRequestBudget: 'INATURALIST_DAILY_REQUEST_BUDGET',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`INATURALIST_USER_AGENT`) not the path (`userAgent`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+
+Adding a var means three files: this schema, `server.json` `environmentVariables[]` on **both** package entries, and `.env.example`. `lint:packaging` checks the `server.json` ↔ `manifest.json` pairing.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -173,6 +213,8 @@ await createApp({
 ```
 
 `instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+
+**This server's identity is `name: 'inaturalist-mcp-server'` and `title: 'inaturalist-mcp-server'` — the bare hyphenated repo name on both, never a Title Case display name.** `lint:packaging` enforces the pair against the unscoped `package.json` name. `description` is never set here: `package.json` is the canonical source and the framework derives the served description from it. The `instructions` string in `src/index.ts` carries the workflow chain — resolve names to ids first, one area form, the research-grade and wild-only defaults, cursor past 10,000, and the licensing posture — and is the reason this server ships no prompts.
 
 ### Session posture and shutdown
 
@@ -200,11 +242,8 @@ Handlers receive a unified `ctx` object. Key properties:
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
+| `ctx.enrich` | Success-path agent context — `ctx.enrich(...)` or `.notice()` / `.total()` / `.truncated()`. Carries the applied-filter echo, the zero-hit guidance, and the truncation trio every list tool declares as **required** enrichment and therefore writes on every path. Reaches `structuredContent` and `content[]`. |
+| `ctx.signal` | `AbortSignal` for cancellation, threaded into every upstream fetch. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
@@ -258,21 +297,28 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                                  # createApp() — identity, instructions, registration, service init
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                        # INATURALIST_* env vars (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    inaturalist/
+      inaturalist-service.ts                # Allowlisted client, pacer, concurrency cap, daily budget, TTL cache
+      projections.ts                        # Raw upstream payload → projected domain record
+      types.ts                              # Domain types
+      vocabularies.ts                       # Spec-derived static tables (ranks, iconic taxa, csi, licences)
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+    tools/
+      definitions/
+        inaturalist-*.tool.ts               # Ten tool definitions
+      observation-filters.ts                # Shared area/date/filter Zod shapes + in-process validators
+      observation-record.ts                 # ObservationSchema, PhotoSchema, and their renderers
+      taxon-document.ts                     # TaxonDocumentSchema, section names, document renderer
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      inaturalist-taxon.resource.ts         # inaturalist://taxa/{taxon_id}
+      inaturalist-observation.resource.ts   # inaturalist://observations/{observation_id}
 ```
+
+No `prompts/` directory — see Prompts above. `tests/` mirrors this layout file for file.
 
 ---
 
@@ -356,6 +402,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with Istanbul coverage |
+| `bun run release:github` | Create the GitHub Release from the annotated tag (driven by `release-and-publish`) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
@@ -435,6 +483,11 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] Every new upstream parameter is added to that endpoint's allowlist in `inaturalist-service.ts` and probed live first — an unlisted name is never sent, and an unknown one returns the whole global index with HTTP 200
+- [ ] An area is accepted in exactly one form, validated as a unit through `resolveArea()` — never a bare `lat`, and never two forms at once
+- [ ] A new `per_page` or `limit` cap is sized by measured response bytes across `structuredContent` and the rendered text together, not by what upstream will serve
+- [ ] Truncation enrichment (`truncated`, `shown`, `cap`) is declared required and written on every branch, zero-hit pages included
+- [ ] `license_code` and photo `attribution` are relayed verbatim and nullable — a null licence is never coerced, attribution is never reformatted, photos are linked rather than proxied, and an obscured coordinate is rendered as a locality
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`

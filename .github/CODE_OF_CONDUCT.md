@@ -23,6 +23,6 @@ If you're running an agent that files issues here, you're accountable for what i
 
 ## Reporting
 
-Email **[your-contact-email]**. Reports are handled privately, and your identity won't be shared with the person you're reporting.
+Email **casey@caseyjhand.com**. Reports are handled privately, and your identity won't be shared with the person you're reporting.
 
 Maintainers may edit, remove, or lock any contribution that doesn't fit these guidelines, and block accounts that repeatedly ignore them. For anything egregious, that happens immediately and without warning.

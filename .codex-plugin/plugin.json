@@ -1,7 +1,7 @@
 {
   "name": "inaturalist-mcp-server",
   "version": "0.1.0",
-  "description": "Global citizen-science biodiversity observations from iNaturalist — sightings, photos, identification threads, phenology, similar species, annotations, places, and projects via MCP. STDIO or Streamable HTTP.",
+  "description": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -14,8 +14,8 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "inaturalist-mcp-server",
-    "shortDescription": "Global citizen-science biodiversity observations from iNaturalist via MCP.",
-    "longDescription": "Provides tools for querying iNaturalist — wildlife sightings with photos, the community identification thread behind each record, per-taxon phenology, similar-species confusion data, annotations, places, projects, and observer leaderboards.",
+    "shortDescription": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist.",
+    "longDescription": "Query iNaturalist's index of 380M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, quality grade, annotation, and conservation status; read the community identification thread behind a record; rank the distinct species of an area; chart a taxon's phenology by month, week, or year; list the look-alikes a taxon is most often misidentified as; fetch taxon profiles with conservation listings and photos; and resolve organism, place, project, and observer names to the ids every tool takes. Records carry their own licence and attribution, which are relayed verbatim, and obscured coordinates stay obscured. Keyless and read-only. Runs over STDIO or Streamable HTTP.",
     "developerName": "cyanheads",
     "category": "science",
     "capabilities": ["Read"],

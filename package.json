@@ -2,7 +2,7 @@
   "name": "@cyanheads/inaturalist-mcp-server",
   "version": "0.1.0",
   "mcpName": "io.github.cyanheads/inaturalist-mcp-server",
-  "description": "Global citizen-science biodiversity observations from iNaturalist — sightings, photos, identification threads, phenology, similar species, annotations, places, and projects via MCP. STDIO or Streamable HTTP.",
+  "description": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
   "homepage": "https://github.com/cyanheads/inaturalist-mcp-server#readme",
   "bugs": {

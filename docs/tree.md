@@ -1,6 +1,6 @@
 # inaturalist-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 02:46:09
+Generated on: 2026-09-20 03:43:23
 
 ```text
 inaturalist-mcp-server/
@@ -210,6 +210,7 @@ inaturalist-mcp-server/
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
