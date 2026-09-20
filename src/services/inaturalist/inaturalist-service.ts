@@ -441,7 +441,7 @@ export class INaturalistService {
       });
       text = await response.text();
     } catch (err) {
-      throw mapUpstreamError(err, endpoint, ctx);
+      throw mapUpstreamError(err, ctx);
     }
 
     // An edge or maintenance page is upstream degradation, not malformed data,
@@ -610,11 +610,10 @@ export class INaturalistService {
     include: ReadonlySet<ObservationExpansion>,
     ctx: Context,
   ): Promise<{ total: number; observations: ProjectedObservation[] }> {
-    const terms = include.has('annotations') ? await this.getControlledTermIndex(ctx) : undefined;
-    const payload = await this.request<INaturalistEnvelope<RawObservation>>(
-      { endpoint: 'observations', params },
-      ctx,
-    );
+    const [terms, payload] = await Promise.all([
+      include.has('annotations') ? this.getControlledTermIndex(ctx) : undefined,
+      this.request<INaturalistEnvelope<RawObservation>>({ endpoint: 'observations', params }, ctx),
+    ]);
     const observations = (payload.results ?? []).map((raw) =>
       projectObservation(raw, { include, ...(terms ? { terms } : {}) }),
     );
@@ -631,11 +630,13 @@ export class INaturalistService {
     include: ReadonlySet<ObservationExpansion>,
     ctx: Context,
   ): Promise<{ observations: ProjectedObservation[]; unresolved: number[] }> {
-    const terms = include.has('annotations') ? await this.getControlledTermIndex(ctx) : undefined;
-    const payload = await this.request<INaturalistEnvelope<RawObservation>>(
-      { endpoint: 'observations', path: ids.join(',') },
-      ctx,
-    );
+    const [terms, payload] = await Promise.all([
+      include.has('annotations') ? this.getControlledTermIndex(ctx) : undefined,
+      this.request<INaturalistEnvelope<RawObservation>>(
+        { endpoint: 'observations', path: ids.join(',') },
+        ctx,
+      ),
+    ]);
 
     const observations = (payload.results ?? []).map((raw) =>
       projectObservation(raw, { include, detail: true, ...(terms ? { terms } : {}) }),
@@ -735,8 +736,14 @@ export class INaturalistService {
  * Turns the two upstream failures that carry meaning into typed ones. A 422
  * whose body names an unknown taxon id is a caller-fixable input error, and the
  * reason it carries is what routes the agent to `inaturalist_resolve_name`.
+ *
+ * The upstream path stays out of the returned `data`: that object reaches the
+ * caller on `structuredContent.error.data`, where the REST path names nothing
+ * the caller can act on that the recovery hint does not already say. `request`
+ * already logs the endpoint against this same request, which is where triage
+ * reads it.
  */
-function mapUpstreamError(err: unknown, endpoint: Endpoint, ctx: Context): unknown {
+function mapUpstreamError(err: unknown, ctx: Context): unknown {
   if (!(err instanceof McpError)) return err;
   const status = err.data?.status;
   const body = err.data?.body;
@@ -744,7 +751,6 @@ function mapUpstreamError(err: unknown, endpoint: Endpoint, ctx: Context): unkno
     return validationError('iNaturalist does not recognize that taxon_id.', {
       reason: 'unknown_taxon_id',
       retryable: false,
-      endpoint,
       ...ctx.recoveryFor('unknown_taxon_id'),
     });
   }

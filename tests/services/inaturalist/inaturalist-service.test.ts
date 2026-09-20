@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import type { Endpoint, QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import { INaturalistService } from '@/services/inaturalist/inaturalist-service.js';
-import { rawControlledTerm } from '../../helpers/fixtures.js';
+import { rawControlledTerm, rawObservation } from '../../helpers/fixtures.js';
 
 /** Matches the private `buildUrl`/`cacheKey` methods for direct invocation in tests. */
 type ServiceInternals = {
@@ -296,6 +296,36 @@ describe('upstream error mapping', () => {
     }
   });
 
+  it('keeps the upstream path out of the caller-facing unknown_taxon_id data', async () => {
+    // error.data reaches structuredContent.error.data on the wire. The recovery
+    // hint already names the fix, so the internal REST path adds nothing a
+    // caller can act on.
+    const http = createFetchMock([
+      {
+        match: /\/identifications\/similar_species/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Unknown taxon_id 999999999', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext();
+
+      const error = await service
+        .getSimilarSpecies({ taxon_id: 999_999_999 }, ctx)
+        .then(() => undefined)
+        .catch((err: unknown) => err);
+
+      expect(error).toMatchObject({ data: { reason: 'unknown_taxon_id' } });
+      expect((error as McpError).data).not.toHaveProperty('endpoint');
+    } finally {
+      http.restore();
+    }
+  });
+
   it("resolves the unknown_taxon_id recovery hint from the calling tool's own error contract", async () => {
     // getObservedUsage (behind inaturalist_list_reference's taxon_id param)
     // hits the same taxon_id-filtered endpoint shape as searchObservations, so
@@ -380,6 +410,36 @@ describe('getObservations id resolution', () => {
 
       expect(observations.map((o) => o.id)).toEqual([1, 2]);
       expect(unresolved).toEqual([999_999_999_999]);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('fetches the observation and the controlled-term vocabulary concurrently when annotations are included', async () => {
+    // Both requests are independent, so they run through Promise.all rather
+    // than one after the other — this exercises that the vocabulary from the
+    // second request still lands in the decoded annotation.
+    const http = createFetchMock([
+      {
+        match: /\/observations\/1$/,
+        respond: () => Response.json({ total_results: 1, results: [rawObservation({ id: 1 })] }),
+      },
+      {
+        match: /\/controlled_terms/,
+        respond: () => Response.json({ results: [rawControlledTerm()] }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext();
+
+      const { observations } = await service.getObservations([1], new Set(['annotations']), ctx);
+
+      expect(observations[0]?.annotations).toEqual([
+        expect.objectContaining({ attribute: 'Life Stage', value: 'Larva' }),
+      ]);
+      expect(http.calls).toHaveLength(2);
     } finally {
       http.restore();
     }
