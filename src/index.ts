@@ -5,30 +5,44 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
+import { inaturalistObservationResource } from './mcp-server/resources/definitions/inaturalist-observation.resource.js';
+import { inaturalistTaxonResource } from './mcp-server/resources/definitions/inaturalist-taxon.resource.js';
+import { inaturalistFindPlaces } from './mcp-server/tools/definitions/inaturalist-find-places.tool.js';
+import { inaturalistGetHistogram } from './mcp-server/tools/definitions/inaturalist-get-histogram.tool.js';
+import { inaturalistGetLeaderboard } from './mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.js';
+import { inaturalistGetObservation } from './mcp-server/tools/definitions/inaturalist-get-observation.tool.js';
+import { inaturalistGetSimilarSpecies } from './mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
+import { inaturalistGetSpeciesCounts } from './mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
+import { inaturalistGetTaxon } from './mcp-server/tools/definitions/inaturalist-get-taxon.tool.js';
+import { inaturalistListReference } from './mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
+import { inaturalistResolveName } from './mcp-server/tools/definitions/inaturalist-resolve-name.tool.js';
+import { inaturalistSearchObservations } from './mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
+import { initINaturalistService } from './services/inaturalist/inaturalist-service.js';
 
 await createApp({
   name: 'inaturalist-mcp-server',
   title: 'inaturalist-mcp-server',
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
-  // Server-level orientation forwarded to the model on every initialize: two to three
-  // cohesive sentences in one string literal, written for the calling agent (which tool
-  // opens a workflow, what chains into what). Operator configuration stays in the README.
-  // instructions: 'Resolve a name to an id with example_search, then pass that id to example_get for the full record. Results are paged; follow nextOffset until it is absent.',
-
-  // Session posture in code rather than in a Dockerfile. MCP_SESSION_MODE still
-  // wins when it is set. Add `require: 'stateful'` — `{ default: 'stateful',
-  // require: 'stateful' }` — when a tool asks the caller for input mid-handler,
-  // so a stateless deployment fails at startup instead of losing that tool.
-  // sessionMode: 'stateless',
-
-  // Release what setup() allocated: a watcher, a socket, a timer the framework
-  // cannot see. Runs after the transport stops and before the logger closes.
-  // teardown(core) { core.logger.info('bye', { requestId: 'shutdown', timestamp: new Date().toISOString() }); },
+  instructions:
+    'Citizen-science wildlife observations from iNaturalist — sightings with photos, community identification threads, phenology, look-alike species, places, and annotations. Keyless and read-only. Identifiers are integers and are not names: resolve an organism name to a taxon id with inaturalist_resolve_name and a place name or map area to a place id with inaturalist_find_places before searching, since an unrecognised filter value silently returns either the whole global index or nothing at all. Every area filter takes exactly one form — a place_id, a lat/lng/radius triple in kilometres, or a four-corner bounding box. inaturalist_search_observations defaults to research-grade, wild-only records and echoes those defaults in every response; widen them deliberately. Results past 10,000 need the cursor from the previous page rather than a higher page number. inaturalist_list_reference decodes every controlled vocabulary the other tools accept. Records carry their own licence: a null license_code means all rights reserved, photo attribution strings are relayed verbatim and must be reproduced with any image, photos are linked rather than proxied, and an obscured coordinate is a locality, not a sighting position. The upstream asks clients to stay under 60 requests a minute, so this server paces its own traffic and may queue a burst.',
+  // No handler asks the caller for input mid-request, so nothing needs a live
+  // session. Declared in source rather than left to MCP_SESSION_MODE's `auto`
+  // default, which resolves to stateful.
+  sessionMode: 'stateless',
+  tools: [
+    inaturalistListReference,
+    inaturalistResolveName,
+    inaturalistFindPlaces,
+    inaturalistSearchObservations,
+    inaturalistGetObservation,
+    inaturalistGetSpeciesCounts,
+    inaturalistGetHistogram,
+    inaturalistGetLeaderboard,
+    inaturalistGetSimilarSpecies,
+    inaturalistGetTaxon,
+  ],
+  resources: [inaturalistTaxonResource, inaturalistObservationResource],
+  prompts: [],
+  setup() {
+    initINaturalistService();
+  },
 });
