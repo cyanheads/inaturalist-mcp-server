@@ -13,7 +13,7 @@ import {
   resolveAnnotation,
   resolveArea,
 } from '@/mcp-server/tools/observation-filters.js';
-import { PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
+import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import {
   getINaturalistService,
   type QueryParams,
@@ -206,7 +206,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     for (const [index, species] of result.species.entries()) {
       lines.push(
         '',
-        `${index + 1}. **${species.common_name ?? 'no common name'}** (*${species.name ?? 'name not recorded'}*) — ${species.observation_count} observations · ${species.rank ?? 'rank not recorded'} · ${species.iconic_taxon_name ?? 'no iconic group'} · taxon_id ${species.taxon_id}`,
+        `${index + 1}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — ${species.observation_count} observations · ${inlineText(species.rank ?? 'rank not recorded')} · ${inlineText(species.iconic_taxon_name ?? 'no iconic group')} · taxon_id ${species.taxon_id}`,
       );
       if (species.photo) lines.push(...renderPhoto(species.photo, 'Photo'));
     }

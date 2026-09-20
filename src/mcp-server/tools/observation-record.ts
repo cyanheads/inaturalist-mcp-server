@@ -5,7 +5,9 @@
  *
  * Everything an observation carries from a third party — `place_guess`, photo
  * attributions, identification and comment bodies — renders inside a blockquote,
- * so a reading model sees it as quoted content rather than instruction.
+ * so a reading model sees it as quoted content rather than instruction. Upstream
+ * text rendered inline instead of quoted — names, logins, URLs, timestamps —
+ * goes through {@link inlineText} so it cannot end the line it was placed in.
  *
  * @module mcp-server/tools/observation-record
  */
@@ -239,29 +241,52 @@ export type ObservationOutput = z.infer<typeof ObservationSchema>;
 type TaxonSummaryOutput = z.infer<typeof TaxonSummarySchema>;
 type PhotoOutput = z.infer<typeof PhotoSchema>;
 
+/**
+ * Every separator a markdown reader treats as a line ending. CommonMark ends a
+ * line on a bare carriage return as well as on a newline, so splitting on the
+ * newline alone leaves the tail of a CR-separated string outside the structure
+ * it was rendered into.
+ */
+const LINE_BREAK = /\r\n|[\n\r]/g;
+
+/**
+ * Flattens an upstream string so it cannot escape the line it is rendered into.
+ *
+ * Inline slots interpolate third-party text — member-created place and project
+ * names, community-editable common names, logins, authority status text, media
+ * URLs — into a single rendered line. A line break inside one of those values
+ * ends that line early and lets the remainder read as markdown structure this
+ * server never emitted, which is the injection the blockquote rule prevents for
+ * the free-text fields. `structuredContent` keeps every value verbatim; only the
+ * rendered twin is flattened.
+ */
+export function inlineText(text: string): string {
+  return text.replace(LINE_BREAK, ' ');
+}
+
 /** A null licence is a fact about the record, so it renders in words rather than as a blank. */
 export function licenceLabel(code: string | null): string {
-  return code ?? 'All rights reserved';
+  return inlineText(code ?? 'All rights reserved');
 }
 
 /** Quotes third-party text so a reading model treats it as content, not instruction. */
 export function blockquote(text: string): string[] {
-  return text.split('\n').map((line) => `> ${line}`);
+  return text.split(LINE_BREAK).map((line) => `> ${line}`);
 }
 
 function taxonLine(taxon: TaxonSummaryOutput): string {
-  const common = taxon.common_name ?? 'no common name';
-  const scientific = taxon.name ?? 'name not recorded';
-  const rank = taxon.rank ?? 'rank not recorded';
-  const iconic = taxon.iconic_taxon_name ?? 'no iconic group';
+  const common = inlineText(taxon.common_name ?? 'no common name');
+  const scientific = inlineText(taxon.name ?? 'name not recorded');
+  const rank = inlineText(taxon.rank ?? 'rank not recorded');
+  const iconic = inlineText(taxon.iconic_taxon_name ?? 'no iconic group');
   return `${common} (${scientific}) · taxon_id ${taxon.id} · ${rank} · ${iconic}`;
 }
 
 export function renderPhoto(photo: PhotoOutput, label: string): string[] {
-  const link = photo.medium_url ?? photo.square_url ?? 'no image URL published';
+  const link = inlineText(photo.medium_url ?? photo.square_url ?? 'no image URL published');
   const lines = [
     `**${label}:** ${link}`,
-    `square_url ${photo.square_url ?? 'not published'} · ${licenceLabel(photo.license_code)} · ${photo.open ? 'open licence' : 'licence not open'}`,
+    `square_url ${inlineText(photo.square_url ?? 'not published')} · ${licenceLabel(photo.license_code)} · ${photo.open ? 'open licence' : 'licence not open'}`,
   ];
   if (photo.attribution) lines.push(...blockquote(photo.attribution));
   else lines.push('_No attribution string published._');
@@ -271,8 +296,11 @@ export function renderPhoto(photo: PhotoOutput, label: string): string[] {
 function observationHeading(observation: ObservationOutput): string {
   const taxon = observation.taxon;
   if (!taxon) return UNIDENTIFIED;
-  if (taxon.common_name && taxon.name) return `${taxon.common_name} (${taxon.name})`;
-  return taxon.common_name ?? taxon.name ?? UNNAMED_TAXON;
+  if (taxon.common_name && taxon.name) {
+    return `${inlineText(taxon.common_name)} (${inlineText(taxon.name)})`;
+  }
+  const single = taxon.common_name ?? taxon.name;
+  return single === null ? UNNAMED_TAXON : inlineText(single);
 }
 
 /**
@@ -284,11 +312,11 @@ export function renderObservation(observation: ObservationOutput): string[] {
   const lines: string[] = [`## ${observationHeading(observation)}`];
 
   lines.push(
-    `**id** ${observation.id} · **uuid** ${observation.uuid ?? 'not published'} · ${observation.url ?? 'no page URL published'}`,
+    `**id** ${observation.id} · **uuid** ${inlineText(observation.uuid ?? 'not published')} · ${inlineText(observation.url ?? 'no page URL published')}`,
   );
   if (observation.taxon) lines.push(`**Identified as:** ${taxonLine(observation.taxon)}`);
   lines.push(
-    `**Observed:** ${observation.observed_on ?? 'date not recorded'} · ${observation.observed_at ?? 'no timestamp recorded'}`,
+    `**Observed:** ${inlineText(observation.observed_on ?? 'date not recorded')} · ${inlineText(observation.observed_at ?? 'no timestamp recorded')}`,
   );
 
   const coordinate = observation.coordinate;
@@ -309,13 +337,13 @@ export function renderObservation(observation: ObservationOutput): string[] {
   }
 
   lines.push(
-    `**Status:** ${observation.quality_grade} · captive: ${observation.captive} · geoprivacy ${observation.geoprivacy ?? 'not set'} · taxon_geoprivacy ${observation.taxon_geoprivacy ?? 'not set'} · ${licenceLabel(observation.license_code)}`,
+    `**Status:** ${observation.quality_grade} · captive: ${observation.captive} · geoprivacy ${inlineText(observation.geoprivacy ?? 'not set')} · taxon_geoprivacy ${inlineText(observation.taxon_geoprivacy ?? 'not set')} · ${licenceLabel(observation.license_code)}`,
   );
   lines.push(
     `**Identifications:** ${observation.identifications_count} · ${observation.agreements} agree · ${observation.disagreements} disagree · community_taxon_id ${observation.community_taxon_id ?? 'none yet'}`,
   );
   lines.push(
-    `**Observer:** ${observation.observer ?? 'login not published'} · ${observation.photo_count} photos · ${observation.sound_count} sounds`,
+    `**Observer:** ${inlineText(observation.observer ?? 'login not published')} · ${observation.photo_count} photos · ${observation.sound_count} sounds`,
   );
 
   if (observation.photo) lines.push(...renderPhoto(observation.photo, 'Photo'));
@@ -343,7 +371,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
     lines.push('### Annotations');
     for (const annotation of observation.annotations) {
       lines.push(
-        `- **${annotation.attribute ?? 'undecoded attribute'}** = ${annotation.value ?? 'undecoded value'} (term_id ${annotation.attribute_id}, term_value_id ${annotation.value_id}) — by ${annotation.by ?? 'unknown'}`,
+        `- **${inlineText(annotation.attribute ?? 'undecoded attribute')}** = ${inlineText(annotation.value ?? 'undecoded value')} (term_id ${annotation.attribute_id}, term_value_id ${annotation.value_id}) — by ${inlineText(annotation.by ?? 'unknown')}`,
       );
     }
   }
@@ -352,7 +380,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
     lines.push('### Sounds');
     for (const sound of observation.sounds) {
       lines.push(
-        `- ${sound.url ?? 'no audio URL published'} — ${licenceLabel(sound.license_code)}`,
+        `- ${inlineText(sound.url ?? 'no audio URL published')} — ${licenceLabel(sound.license_code)}`,
       );
       if (sound.attribution) lines.push(...blockquote(sound.attribution));
     }
@@ -365,15 +393,15 @@ export function renderObservation(observation: ObservationOutput): string[] {
         ? taxonLine(identification.taxon)
         : 'no taxon on this identification';
       const flags = [
-        identification.category ?? 'category not recorded',
+        inlineText(identification.category ?? 'category not recorded'),
         `disagreement: ${identification.disagreement ?? 'not recorded'}`,
         `from image classifier: ${identification.from_vision}`,
         `current: ${identification.current}`,
         `id ${identification.id}`,
-        identification.created_at ?? 'no timestamp',
+        inlineText(identification.created_at ?? 'no timestamp'),
       ];
       lines.push(
-        `- **${identification.by ?? 'unknown identifier'}** → ${taxon} — ${flags.join(' · ')}`,
+        `- **${inlineText(identification.by ?? 'unknown identifier')}** → ${taxon} — ${flags.join(' · ')}`,
       );
       if (identification.body) lines.push(...blockquote(identification.body));
     }
@@ -383,7 +411,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
     lines.push('### Comments');
     for (const comment of observation.comments) {
       lines.push(
-        `- **${comment.by ?? 'unknown'}** · id ${comment.id} · ${comment.created_at ?? 'no timestamp'}`,
+        `- **${inlineText(comment.by ?? 'unknown')}** · id ${comment.id} · ${inlineText(comment.created_at ?? 'no timestamp')}`,
       );
       if (comment.body) lines.push(...blockquote(comment.body));
     }

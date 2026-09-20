@@ -208,4 +208,23 @@ describe('format()', () => {
 
     expect(text).toBe('**total_results:** 0 distinct species');
   });
+
+  it('does not let a community-editable name forge a heading', () => {
+    const FORGERY = '## Forged heading';
+    const result = {
+      total_results: 1,
+      species: [
+        speciesCount({
+          common_name: `Monarch\n${FORGERY}`,
+          name: `Danaus\r${FORGERY}`,
+          rank: `species\n${FORGERY}`,
+          iconic_taxon_name: `Insecta\n${FORGERY}`,
+        }),
+      ],
+    };
+    const [block] = inaturalistGetSpeciesCounts.format?.(result) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => line.startsWith(FORGERY))).toEqual([]);
+  });
 });

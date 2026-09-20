@@ -177,3 +177,70 @@ describe('renderTaxonDocument — a single-section selection renders only that s
     expect(renderTaxonDocument({})).toEqual([]);
   });
 });
+
+/**
+ * Conservation status text, authority names, and community-editable common
+ * names are third-party strings rendered inline. A line break inside one ends
+ * its line and lets the remainder read as structure this renderer never
+ * emitted.
+ */
+describe('line breaks in taxon text cannot forge markdown structure', () => {
+  const FORGERY = '## Forged heading';
+
+  const forgedLines = (lines: readonly string[]): string[] =>
+    lines
+      .join('\n')
+      .split(/\r\n|[\r\n]/)
+      .filter((line) => line.startsWith(FORGERY));
+
+  it('does not let a common name break out of the document heading', () => {
+    const doc = projectedTaxonDocument({ common_name: `Monarch\n${FORGERY}` });
+    expect(forgedLines(renderTaxonDocument(doc))).toEqual([]);
+  });
+
+  it('does not let a conservation authority break out of its listing line', () => {
+    const doc = projectedTaxonDocument({
+      conservation: {
+        statuses: [
+          {
+            status: `Special Concern\r${FORGERY}`,
+            authority: `Some Authority\n${FORGERY}`,
+            iucn: 30,
+            place: null,
+            url: null,
+          },
+        ],
+        global_status: null,
+      },
+    });
+    expect(forgedLines(renderTaxonDocument(doc))).toEqual([]);
+  });
+
+  it('does not let an ancestor or child name break out of its line', () => {
+    const doc = projectedTaxonDocument({
+      taxonomy: [{ id: 1, name: `Animalia\n${FORGERY}`, rank: 'kingdom', common_name: null }],
+      children: [
+        {
+          id: 2,
+          name: `Danaus\n${FORGERY}`,
+          rank: 'genus',
+          common_name: null,
+          observations_count: 5,
+        },
+      ],
+    });
+    expect(forgedLines(renderTaxonDocument(doc))).toEqual([]);
+  });
+
+  it('keeps the encyclopedia summary quoted across a bare CR', () => {
+    const doc = projectedTaxonDocument({
+      encyclopedia: {
+        wikipedia_summary: `A butterfly.\r${FORGERY}`,
+        wikipedia_url: `https://example.test\n${FORGERY}`,
+      },
+    });
+    const lines = renderTaxonDocument(doc);
+    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(forgedLines(lines)).toEqual([]);
+  });
+});

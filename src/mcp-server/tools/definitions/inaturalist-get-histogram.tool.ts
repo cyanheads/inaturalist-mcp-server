@@ -29,6 +29,18 @@ const INTERVALS = [
 
 const { quality_grade, captive } = observationFilterInputShape;
 
+/**
+ * A fine interval (day, hour) over a wide date range is unbounded upstream —
+ * `interval=day&d1=1900-01-01` measured 25,531 buckets / 388,530 bytes,
+ * against the design's 50,000-byte advertised maximum for a list tool. A
+ * bucket costs at most ~58 bytes combined across structuredContent and the
+ * rendered markdown row (a 10-char day key, a JSON entry plus trailing comma,
+ * and a `| key | count |` row up to a 5-digit count), so 800 buckets lands
+ * near 46,800 bytes worst case — under budget with headroom for the fixed
+ * header, table heading, and enrichment trailer.
+ */
+const HISTOGRAM_BUCKET_CAP = 800;
+
 export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
   description:
     'Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in. The default month_of_year interval answers "when does this bloom or appear here" in twelve buckets; the absolute intervals (year, month, week, day, hour) bucket real dates and upstream applies a default start date to them. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Omit taxon_id to chart every taxon in the area. Defaults to research-grade, wild-only records and echoes those defaults back.',
@@ -48,7 +60,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       .enum(INTERVALS)
       .default('month_of_year')
       .describe(
-        'Bucketing. month_of_year and week_of_year fold every year together into a seasonal curve; the rest bucket absolute dates.',
+        `Bucketing. month_of_year and week_of_year fold every year together into a seasonal curve; the rest bucket absolute dates. day and hour over a wide date range can generate thousands of buckets — the response is capped at ${HISTOGRAM_BUCKET_CAP}, kept from the start of the range; narrow d1/d2 or use a coarser interval to see the rest.`,
       ),
     date_field: z
       .enum(['observed', 'created'])
@@ -57,6 +69,9 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         'Which date to bucket by: when the organism was observed, or when the record was uploaded.',
       ),
     ...dateRangeInputShape,
+    d1: dateRangeInputShape.d1.describe(
+      `Earliest observation date, YYYY-MM-DD. Inclusive. With interval set to day or hour, a wide range can exceed the ${HISTOGRAM_BUCKET_CAP}-bucket cap — narrow d1/d2 to reach buckets past it.`,
+    ),
     quality_grade,
     captive,
   }),
@@ -76,8 +91,14 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
           })
           .describe('One histogram bucket.'),
       )
-      .describe('Every bucket upstream returned, in order, including the zero ones.'),
-    total: z.number().describe('Sum of every bucket count.'),
+      .describe(
+        `Every bucket upstream returned, in order, including the zero ones — up to ${HISTOGRAM_BUCKET_CAP}, the first in upstream key order. See the truncated/shown/cap enrichment when more exist.`,
+      ),
+    total: z
+      .number()
+      .describe(
+        'Sum of every bucket count upstream returned, including buckets past the cap that are not in the buckets array.',
+      ),
   }),
 
   enrichment: {
@@ -88,7 +109,15 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         date_field: z.string().describe('Which date the buckets were built from.'),
       })
       .describe('The server-applied defaults that determine what this answer means.'),
-    notice: z.string().optional().describe('Guidance when every bucket came back zero.'),
+    truncated: z
+      .boolean()
+      .describe(`True when upstream returned more than ${HISTOGRAM_BUCKET_CAP} buckets.`),
+    shown: z.number().describe('How many buckets this response carries.'),
+    cap: z.number().describe('The bucket cap that was applied.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when every bucket came back zero, or when the cap was reached.'),
   },
 
   enrichmentTrailer: {
@@ -140,17 +169,36 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       hasTaxon: input.taxon_id !== undefined,
     });
 
-    const buckets = await getINaturalistService().getHistogram(params, ctx);
-    const total = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    const allBuckets = await getINaturalistService().getHistogram(params, ctx);
+    const total = allBuckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    const buckets = allBuckets.slice(0, HISTOGRAM_BUCKET_CAP);
+    const truncated = allBuckets.length > HISTOGRAM_BUCKET_CAP;
 
+    // Declared required, so written on every path — the truncated() call below
+    // overwrites these only where the cap actually bit.
     ctx.enrich({
       applied_filters: {
         quality_grade: input.quality_grade,
         captive: input.captive,
         date_field: input.date_field,
       },
+      truncated: false,
+      shown: buckets.length,
+      cap: HISTOGRAM_BUCKET_CAP,
     });
 
+    if (truncated) {
+      ctx.enrich.truncated({
+        shown: buckets.length,
+        cap: HISTOGRAM_BUCKET_CAP,
+        guidance: `Upstream returned ${allBuckets.length} buckets; only the first ${HISTOGRAM_BUCKET_CAP} are shown. Narrow d1/d2, or choose a coarser interval, to bring the rest into range.`,
+      });
+    }
+
+    // Reflects total across every bucket upstream returned, not just the shown
+    // window, so it stays accurate even when the cap bites. It also wins over
+    // the truncation guidance above (last-wins) when the answer really is zero
+    // everywhere — narrowing the date range would not help in that case.
     if (total === 0) {
       ctx.enrich.notice(
         'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',

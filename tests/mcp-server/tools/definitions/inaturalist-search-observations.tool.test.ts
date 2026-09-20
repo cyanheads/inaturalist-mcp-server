@@ -127,6 +127,43 @@ describe('input validation', () => {
   });
 });
 
+describe('cursor format validation', () => {
+  it('accepts a positive-integer cursor', () => {
+    const result = inaturalistSearchObservations.input.safeParse({ cursor: '401666942' });
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.cursor).toBe('401666942');
+  });
+
+  it('treats a blank cursor as unset rather than rejecting it', () => {
+    const result = inaturalistSearchObservations.input.safeParse({ cursor: '' });
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.cursor).toBeUndefined();
+  });
+
+  it('rejects zero and a leading-zero cursor — observation ids start at 1', () => {
+    expect(inaturalistSearchObservations.input.safeParse({ cursor: '0' }).success).toBe(false);
+    expect(inaturalistSearchObservations.input.safeParse({ cursor: '007' }).success).toBe(false);
+  });
+
+  it('rejects a non-numeric cursor at the schema, before the handler or the service ever sees it', async () => {
+    expect(inaturalistSearchObservations.input.safeParse({ cursor: 'notanumber' }).success).toBe(
+      false,
+    );
+
+    const result = await runToolContract(inaturalistSearchObservations, {
+      cursor: 'notanumber',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(fake.searchObservations).not.toHaveBeenCalled();
+  });
+});
+
 describe('cursor forces id ordering', () => {
   it('sends order_by id / order desc under a cursor regardless of the requested ordering', async () => {
     fake.searchObservations.mockResolvedValue({ total: 100, observations: observations(20) });

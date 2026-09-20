@@ -14,6 +14,7 @@ import {
   observationFilterInputShape,
   resolveArea,
 } from '@/mcp-server/tools/observation-filters.js';
+import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import {
   getINaturalistService,
   type QueryParams,
@@ -213,7 +214,7 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       const species =
         entry.species_count === undefined ? '' : ` · ${entry.species_count} species_count`;
       lines.push(
-        `${entry.rank}. **${entry.login ?? 'login not published'}** — ${entry.count} ${result.count_metric}${species}`,
+        `${entry.rank}. **${inlineText(entry.login ?? 'login not published')}** — ${entry.count} ${result.count_metric}${species}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

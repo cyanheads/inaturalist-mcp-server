@@ -24,6 +24,33 @@ import {
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import type { ProjectedTaxonDocument } from '@/services/inaturalist/types.js';
 
+/** How many rejected section names the failure message repeats back, and how much of each. */
+const ECHOED_UNKNOWN_SECTIONS = 3;
+const ECHOED_SECTION_CHARS = 40;
+
+/**
+ * Names the rejected sections without mirroring the request back.
+ *
+ * `sections` is an unbounded array of unbounded strings, so echoing every
+ * unknown entry lets one call inflate its own failure into an arbitrarily large
+ * message — and that message is rendered into `content[]` and
+ * `structuredContent.error` alike, straight into the agent's context. A handful
+ * of names is all a caller needs to spot the typo; the valid list follows it
+ * either way.
+ */
+function describeUnknownSections(unknown: readonly string[]): string {
+  const shown = unknown
+    .slice(0, ECHOED_UNKNOWN_SECTIONS)
+    .map((section) =>
+      section.length > ECHOED_SECTION_CHARS
+        ? `${section.slice(0, ECHOED_SECTION_CHARS)}…`
+        : section,
+    )
+    .join(', ');
+  const rest = unknown.length - ECHOED_UNKNOWN_SECTIONS;
+  return rest > 0 ? `${shown} and ${rest} more` : shown;
+}
+
 /**
  * Measures the document as the six named sections rather than as one section
  * per top-level key: the eleven root scalars are one thing an agent asks for,
@@ -125,7 +152,7 @@ export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
     if (unknown.length > 0) {
       throw ctx.fail(
         'unknown_section',
-        `This profile carries no section named ${unknown.join(', ')}. The sections are ${TAXON_SECTIONS.join(', ')}.`,
+        `This profile carries no section named ${describeUnknownSections(unknown)}. The sections are ${TAXON_SECTIONS.join(', ')}.`,
         { ...ctx.recoveryFor('unknown_section') },
       );
     }

@@ -277,4 +277,18 @@ describe('format()', () => {
 
     expect(text).toContain('1. **login not published** — 5 observations');
   });
+
+  it('does not let a member login forge a heading', () => {
+    const FORGERY = '## Forged heading';
+    const result = {
+      kind: 'observers' as const,
+      count_metric: 'observations' as const,
+      total_results: 1,
+      entries: [{ rank: 1, login: `someone\n${FORGERY}`, count: 5 }],
+    };
+    const [block] = inaturalistGetLeaderboard.format?.(result) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => line.startsWith(FORGERY))).toEqual([]);
+  });
 });

@@ -12,7 +12,7 @@ import {
   observationFilterInputShape,
   resolveArea,
 } from '@/mcp-server/tools/observation-filters.js';
-import { PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
+import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import {
   getINaturalistService,
   type QueryParams,
@@ -171,7 +171,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     for (const [index, species] of result.similar_species.entries()) {
       lines.push(
         '',
-        `${index + 1}. **${species.common_name ?? 'no common name'}** (*${species.name ?? 'name not recorded'}*) — corrected ${species.misidentification_count} times · ${species.rank ?? 'rank not recorded'} · ${species.observations_count ?? 'observation count not published'} observations · taxon_id ${species.taxon_id}`,
+        `${index + 1}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — corrected ${species.misidentification_count} times · ${inlineText(species.rank ?? 'rank not recorded')} · ${species.observations_count ?? 'observation count not published'} observations · taxon_id ${species.taxon_id}`,
       );
       if (species.photo) lines.push(...renderPhoto(species.photo, 'Photo'));
     }

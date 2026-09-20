@@ -12,7 +12,12 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { blockquote, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
+import {
+  blockquote,
+  inlineText,
+  PhotoSchema,
+  renderPhoto,
+} from '@/mcp-server/tools/observation-record.js';
 
 /** Heading stand-in for a taxon whose name and common name are both absent. */
 const UNNAMED_TAXON = '*(taxon name not recorded)*';
@@ -171,11 +176,11 @@ export const TAXON_ALWAYS_KEEP = ['id', 'name', 'rank'] as const;
 
 function conservationLine(status: z.infer<typeof ConservationStatusSchema>): string {
   return [
-    `status ${status.status ?? 'not published'}`,
-    `authority ${status.authority ?? 'not published'}`,
+    `status ${inlineText(status.status ?? 'not published')}`,
+    `authority ${inlineText(status.authority ?? 'not published')}`,
     `iucn ${status.iucn ?? 'not published'}`,
-    `place ${status.place ?? 'global'}`,
-    `url ${status.url ?? 'none published'}`,
+    `place ${inlineText(status.place ?? 'global')}`,
+    `url ${inlineText(status.url ?? 'none published')}`,
   ].join(' · ');
 }
 
@@ -189,17 +194,17 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
   const lines: string[] = [];
 
   if (doc.id !== undefined) {
-    const common = doc.common_name ?? 'no common name';
-    const scientific = doc.name ?? 'name not recorded';
+    const common = inlineText(doc.common_name ?? 'no common name');
+    const scientific = inlineText(doc.name ?? 'name not recorded');
     lines.push(
       `## ${doc.common_name || doc.name ? `${common} (${scientific})` : UNNAMED_TAXON}`,
       [
         `id ${doc.id}`,
         `name ${scientific}`,
         `common_name ${common}`,
-        `rank ${doc.rank ?? 'not recorded'}`,
+        `rank ${inlineText(doc.rank ?? 'not recorded')}`,
         `rank_level ${doc.rank_level ?? 'not published'}`,
-        `iconic_taxon_name ${doc.iconic_taxon_name ?? 'none assigned'}`,
+        `iconic_taxon_name ${inlineText(doc.iconic_taxon_name ?? 'none assigned')}`,
         `is_active ${doc.is_active ?? 'not published'}`,
         `extinct ${doc.extinct ?? 'not published'}`,
         `observations_count ${doc.observations_count ?? 'not published'}`,
@@ -217,7 +222,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
         : doc.taxonomy
             .map(
               (rung) =>
-                `${rung.rank ?? 'rank not recorded'} ${rung.name ?? 'name not recorded'} (${rung.common_name ?? 'no common name'}, id ${rung.id})`,
+                `${inlineText(rung.rank ?? 'rank not recorded')} ${inlineText(rung.name ?? 'name not recorded')} (${inlineText(rung.common_name ?? 'no common name')}, id ${rung.id})`,
             )
             .join(' › '),
     );
@@ -228,7 +233,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
     if (doc.children.length === 0) lines.push('_No child taxa published._');
     for (const child of doc.children) {
       lines.push(
-        `- **${child.common_name ?? 'no common name'}** (${child.name ?? 'name not recorded'}) — ${child.rank ?? 'rank not recorded'} · taxon_id ${child.id} · ${child.observations_count ?? 'observation count not published'} observations`,
+        `- **${inlineText(child.common_name ?? 'no common name')}** (${inlineText(child.name ?? 'name not recorded')}) — ${inlineText(child.rank ?? 'rank not recorded')} · taxon_id ${child.id} · ${child.observations_count ?? 'observation count not published'} observations`,
       );
     }
   }
@@ -249,7 +254,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
     if (doc.photos.length === 0) lines.push('_No gallery photos published._');
     for (const [index, photo] of doc.photos.entries()) {
       lines.push(...renderPhoto(photo, `Photo ${index + 1}`));
-      lines.push(`large_url ${photo.large_url ?? 'not published'}`);
+      lines.push(`large_url ${inlineText(photo.large_url ?? 'not published')}`);
     }
   }
 
@@ -260,7 +265,9 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
     } else {
       lines.push('_No encyclopedia summary published._');
     }
-    lines.push(`**wikipedia_url:** ${doc.encyclopedia.wikipedia_url ?? 'none published'}`);
+    lines.push(
+      `**wikipedia_url:** ${inlineText(doc.encyclopedia.wikipedia_url ?? 'none published')}`,
+    );
   }
 
   return lines;

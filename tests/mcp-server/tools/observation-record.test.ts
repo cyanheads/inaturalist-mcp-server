@@ -250,3 +250,93 @@ describe('renderObservation', () => {
     expect(lines).toContain('> Nice shot!');
   });
 });
+
+/**
+ * Upstream free text is member-authored, and a line break inside it escapes the
+ * line it was rendered into — a blockquote stops quoting, and an inline slot
+ * emits a forged heading. Every line of a rendered block must stay a line this
+ * renderer chose to emit.
+ */
+describe('line breaks in upstream text cannot forge markdown structure', () => {
+  const FORGERY = '## Forged heading';
+
+  /**
+   * The rendered surface is the joined text, not the line array — a break
+   * smuggled inside one array element only becomes a line once `format()`
+   * joins. Split the way a CommonMark reader does (CRLF, bare CR, and LF are
+   * all line endings) and report any line that opens with the forgery.
+   */
+  const forgedLines = (lines: readonly string[]): string[] =>
+    lines
+      .join('\n')
+      .split(/\r\n|[\r\n]/)
+      .filter((line) => line.startsWith(FORGERY));
+
+  it('quotes every physical line, including CRLF and bare CR separators', () => {
+    expect(blockquote('one\r\ntwo\rthree\nfour')).toEqual(['> one', '> two', '> three', '> four']);
+  });
+
+  it('leaves no unquoted line when a bare CR splits an attribution', () => {
+    const lines = renderPhoto(projectedPhoto({ attribution: `(c) Someone\r${FORGERY}` }), 'Photo');
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('leaves no unquoted line when a newline splits an identification body', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: [projectedIdentification({ body: `Looks right.\n${FORGERY}` })],
+      }),
+    );
+    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let a common name break out of the record heading', () => {
+    const lines = renderObservation(
+      projectedObservation({ taxon: taxonSummary({ common_name: `Monarch\n${FORGERY}` }) }),
+    );
+    expect(forgedLines(lines)).toEqual([]);
+    expect(
+      lines
+        .join('\n')
+        .split('\n')
+        .filter((line) => line.startsWith('## ')),
+    ).toHaveLength(1);
+  });
+
+  it('does not let a locality string break out of its blockquote', () => {
+    const lines = renderObservation(
+      projectedObservation({ place_guess: `Seattle, WA\n${FORGERY}` }),
+    );
+    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let an observer login break out of its line', () => {
+    const lines = renderObservation(projectedObservation({ observer: `someone\n${FORGERY}` }));
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let a photo URL break out of its line', () => {
+    const lines = renderPhoto(
+      projectedPhoto({ medium_url: `https://example.test/a.jpg\n${FORGERY}` }),
+      'Photo',
+    );
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let a comment body or its author break out', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        comments: [projectedComment({ by: `someone\n${FORGERY}`, body: `Hi\n${FORGERY}` })],
+      }),
+    );
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('leaves single-line text byte-identical', () => {
+    const lines = renderObservation(projectedObservation());
+    expect(lines.join('\n')).toContain('> Seattle, WA');
+    expect(lines.join('\n')).toContain('## Monarch (Danaus plexippus)');
+  });
+});

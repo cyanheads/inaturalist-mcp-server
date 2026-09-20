@@ -59,6 +59,22 @@ describe('not_found', () => {
   });
 });
 
+/**
+ * The handler's return type is a union (the outline arm resolves synchronously),
+ * so awaiting it in a try/catch is what reaches the thrown message.
+ */
+async function rejectionMessage(
+  input: Parameters<typeof inaturalistGetTaxon.handler>[0],
+  ctx: Parameters<typeof inaturalistGetTaxon.handler>[1],
+): Promise<string> {
+  try {
+    await inaturalistGetTaxon.handler(input, ctx);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('Expected the handler to reject.');
+}
+
 describe('unknown_section', () => {
   it('throws unknown_section for a name the projected document does not carry, without calling the service', async () => {
     const ctx = createMockContext({ errors: inaturalistGetTaxon.errors });
@@ -71,6 +87,38 @@ describe('unknown_section', () => {
       data: { reason: 'unknown_section' },
     });
     expect(fake.getTaxon).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `sections` is an unbounded array of unbounded strings, and the rejection
+   * message named every unknown entry — mirroring the caller's whole input back
+   * into `content[]` and `structuredContent.error` for the agent to read.
+   */
+  it('bounds the rejection message instead of echoing the whole rejected array', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetTaxon.errors });
+    const input = inaturalistGetTaxon.input.parse({
+      taxon_id: 48662,
+      sections: Array.from({ length: 500 }, (_, i) => `bogus-${i}-${'x'.repeat(200)}`),
+    });
+
+    const message = await rejectionMessage(input, ctx);
+
+    expect(message.length).toBeLessThan(600);
+    // It still has to say what the caller may ask for.
+    expect(message).toContain('summary');
+    expect(message).toContain('encyclopedia');
+  });
+
+  it('still names the unknown section when there is only one', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetTaxon.errors });
+    const input = inaturalistGetTaxon.input.parse({
+      taxon_id: 48662,
+      sections: ['nonexistent'],
+    });
+
+    const message = await rejectionMessage(input, ctx);
+
+    expect(message).toContain('nonexistent');
   });
 });
 

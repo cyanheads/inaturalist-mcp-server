@@ -192,4 +192,30 @@ describe('format()', () => {
     expect(text).toContain('No match');
     expect(text.trim().endsWith('No match at all.')).toBe(true);
   });
+
+  /**
+   * The cross-kind search reaches member-created projects and places, so a
+   * candidate's name, display name, and matched term are all third-party text
+   * rendered into a heading and an inline metadata line.
+   */
+  it('does not let a member-created record name forge a heading', () => {
+    const FORGERY = '## Forged heading';
+    const result = {
+      found: true,
+      candidates: [
+        {
+          kind: 'project' as const,
+          id: 7,
+          name: `Bioblitz\n${FORGERY}`,
+          display_name: `Bioblitz\r${FORGERY}`,
+          slug: `bioblitz\n${FORGERY}`,
+          matched_term: `Bioblitz\n${FORGERY}`,
+        },
+      ],
+    };
+    const [block] = inaturalistResolveName.format?.(result) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => line.startsWith(FORGERY))).toEqual([]);
+  });
 });

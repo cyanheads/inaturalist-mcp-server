@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
 const PlaceSchema = z
@@ -224,12 +225,13 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
 function renderPlaces(places: readonly PlaceOutput[]): string[] {
   const lines: string[] = [];
   for (const place of places) {
-    lines.push('', `## ${place.display_name ?? place.name ?? '*(name not published)*'}`);
+    const heading = place.display_name ?? place.name;
+    lines.push('', `## ${heading === null ? '*(name not published)*' : inlineText(heading)}`);
     lines.push(
       [
-        `name ${place.name ?? 'not published'}`,
+        `name ${inlineText(place.name ?? 'not published')}`,
         `id ${place.id}`,
-        `slug ${place.slug ?? 'none'}`,
+        `slug ${inlineText(place.slug ?? 'none')}`,
         `place_type ${place.place_type ?? 'none'}`,
         `admin_level ${place.admin_level ?? 'none'}`,
       ].join(' · '),

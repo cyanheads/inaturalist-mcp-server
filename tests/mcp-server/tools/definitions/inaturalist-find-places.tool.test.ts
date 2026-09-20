@@ -246,4 +246,21 @@ describe('format()', () => {
     expect(text).toContain('**Centre:** not published');
     expect(text).toContain('no containment chain recorded');
   });
+
+  /**
+   * The community arm of a nearby lookup is member-created place records, so
+   * their names are third-party strings rendered straight into a heading.
+   */
+  it('does not let a member-created place name forge a heading', () => {
+    const FORGERY = '## Forged heading';
+    const hostile = projectedPlace({
+      display_name: `Marsh\n${FORGERY}`,
+      name: `Marsh\r${FORGERY}`,
+      slug: `marsh\n${FORGERY}`,
+    });
+    const [block] = inaturalistFindPlaces.format?.({ standard: [], community: [hostile] }) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => line.startsWith(FORGERY))).toEqual([]);
+  });
 });

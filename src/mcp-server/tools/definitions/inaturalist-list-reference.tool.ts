@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { STATIC_VOCABULARIES } from '@/services/inaturalist/vocabularies.js';
 
@@ -181,15 +182,15 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
     const lines: string[] = [`**${result.topic}** — source: ${result.source}`];
 
     for (const entry of result.entries) {
-      const parts: string[] = [`**${entry.label ?? 'label not published'}**`];
-      if (entry.code !== undefined) parts.push(`code \`${entry.code}\``);
+      const parts: string[] = [`**${inlineText(entry.label ?? 'label not published')}**`];
+      if (entry.code !== undefined) parts.push(`code \`${inlineText(entry.code)}\``);
       if (entry.id !== undefined) parts.push(`id ${entry.id}`);
       if (entry.multivalued !== undefined) parts.push(`multivalued: ${entry.multivalued}`);
       lines.push(`- ${parts.join(' · ')}`);
-      if (entry.notes) lines.push(`  ${entry.notes}`);
+      if (entry.notes) lines.push(`  ${inlineText(entry.notes)}`);
       for (const value of entry.values ?? []) {
         lines.push(
-          `  - ${value.label ?? 'label not published'} (id ${value.id}, blocking: ${value.blocking})`,
+          `  - ${inlineText(value.label ?? 'label not published')} (id ${value.id}, blocking: ${value.blocking})`,
         );
       }
     }
@@ -198,7 +199,7 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
       lines.push('', '### Observed usage');
       for (const usage of result.observed_usage) {
         lines.push(
-          `- ${usage.attribute ?? 'undecoded attribute'} = ${usage.value ?? 'undecoded value'} — ${usage.count} observations`,
+          `- ${inlineText(usage.attribute ?? 'undecoded attribute')} = ${inlineText(usage.value ?? 'undecoded value')} — ${usage.count} observations`,
         );
       }
     }

@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
+import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { RANKS } from '@/services/inaturalist/vocabularies.js';
 
@@ -159,19 +159,24 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
     ];
 
     for (const candidate of result.candidates) {
+      const other = candidate.display_name ?? candidate.name;
       const heading =
         candidate.kind === 'taxon'
-          ? `${candidate.common_name ?? 'no common name'} (${candidate.name ?? 'name not published'})`
-          : (candidate.display_name ?? candidate.name ?? '*(name not published)*');
+          ? `${inlineText(candidate.common_name ?? 'no common name')} (${inlineText(candidate.name ?? 'name not published')})`
+          : other === null || other === undefined
+            ? '*(name not published)*'
+            : inlineText(other);
       lines.push('', `## ${heading}`);
 
       const parts = [`kind ${candidate.kind}`, `id ${candidate.id}`];
-      if (candidate.name) parts.push(`name ${candidate.name}`);
-      if (candidate.common_name) parts.push(`common name ${candidate.common_name}`);
-      if (candidate.rank) parts.push(`rank ${candidate.rank}`);
-      if (candidate.display_name) parts.push(`display name ${candidate.display_name}`);
-      if (candidate.slug) parts.push(`slug ${candidate.slug}`);
-      if (candidate.matched_term) parts.push(`matched on "${candidate.matched_term}"`);
+      if (candidate.name) parts.push(`name ${inlineText(candidate.name)}`);
+      if (candidate.common_name) parts.push(`common name ${inlineText(candidate.common_name)}`);
+      if (candidate.rank) parts.push(`rank ${inlineText(candidate.rank)}`);
+      if (candidate.display_name) parts.push(`display name ${inlineText(candidate.display_name)}`);
+      if (candidate.slug) parts.push(`slug ${inlineText(candidate.slug)}`);
+      if (candidate.matched_term) {
+        parts.push(`matched on "${inlineText(candidate.matched_term)}"`);
+      }
       if (candidate.score !== undefined) parts.push(`score ${candidate.score}`);
       if (candidate.observations_count !== undefined) {
         parts.push(`${candidate.observations_count} observations`);

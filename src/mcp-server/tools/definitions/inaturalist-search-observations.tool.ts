@@ -109,8 +109,13 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       .describe(
         'Page number within the first 10,000 results. Defaults to 1. Mutually exclusive with cursor.',
       ),
-    cursor: blankAsUnset(z.string().min(1).optional()).describe(
-      'next_cursor from a previous page, to continue past the 10,000-result window. Mutually exclusive with page, and forces an id ordering.',
+    cursor: blankAsUnset(
+      z
+        .string()
+        .regex(/^[1-9]\d*$/)
+        .optional(),
+    ).describe(
+      'next_cursor from a previous page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces an id ordering.',
     ),
     per_page: z
       .number()

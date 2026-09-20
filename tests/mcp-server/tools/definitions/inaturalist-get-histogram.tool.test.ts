@@ -5,7 +5,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetHistogram } from '@/mcp-server/tools/definitions/inaturalist-get-histogram.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -139,6 +139,84 @@ describe('zero-hit notice', () => {
       captive: false,
       date_field: 'created',
     });
+  });
+});
+
+describe('bucket cap', () => {
+  function buckets(n: number) {
+    return Array.from({ length: n }, (_, i) => ({ key: `bucket-${i}`, count: 1 }));
+  }
+
+  it('declares truncated: false with shown/cap when there are zero buckets', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({});
+
+    const result = await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(result.buckets).toEqual([]);
+    expect(result.total).toBe(0);
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 0, cap: 800 });
+  });
+
+  it('does not truncate when the bucket count sits exactly at the cap', async () => {
+    fake.getHistogram.mockResolvedValue(buckets(800));
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
+
+    const result = await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(result.buckets).toHaveLength(800);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(false);
+    expect(enrichment.shown).toBe(800);
+    expect(enrichment.cap).toBe(800);
+    expect(enrichment.notice).toBeUndefined();
+  });
+
+  it('truncates to the first 800 buckets, in upstream order, one past the cap', async () => {
+    fake.getHistogram.mockResolvedValue(buckets(801));
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
+
+    const result = await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(result.buckets).toHaveLength(800);
+    expect(result.buckets[0]).toEqual({ key: 'bucket-0', count: 1 });
+    expect(result.buckets.at(-1)).toEqual({ key: 'bucket-799', count: 1 });
+    // total sums every bucket upstream returned, including the one past the cap.
+    expect(result.total).toBe(801);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(800);
+    expect(enrichment.cap).toBe(800);
+    expect(enrichment.notice).toContain('Narrow d1/d2');
+  });
+
+  it('carries the cap through structuredContent and content[] together', async () => {
+    fake.getHistogram.mockResolvedValue(buckets(801));
+
+    const result = await runToolContract(inaturalistGetHistogram, { interval: 'day' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 800, cap: 800 });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('across 800 buckets');
+  });
+
+  it('lets the zero-hit notice win over the truncation guidance when the full set sums to zero', async () => {
+    fake.getHistogram.mockResolvedValue(buckets(801).map((bucket) => ({ ...bucket, count: 0 })));
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
+
+    const result = await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(result.total).toBe(0);
+    expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
+    );
   });
 });
 

@@ -181,4 +181,22 @@ describe('format()', () => {
 
     expect(text).toContain('observation count not published');
   });
+
+  it('does not let a community-editable name forge a heading', () => {
+    const FORGERY = '## Forged heading';
+    const result = {
+      taxon_id: 48662,
+      similar_species: [
+        similarSpecies({
+          common_name: `Viceroy\n${FORGERY}`,
+          name: `Limenitis\r${FORGERY}`,
+          rank: `species\n${FORGERY}`,
+        }),
+      ],
+    };
+    const [block] = inaturalistGetSimilarSpecies.format?.(result) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text.split(/\r\n|[\r\n]/).filter((line) => line.startsWith(FORGERY))).toEqual([]);
+  });
 });

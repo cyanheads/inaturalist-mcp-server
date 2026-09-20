@@ -188,8 +188,9 @@ Measured live on 2026-09-19 against `place_id: 97394` (North America):
 | `inaturalist_search_observations` | ~1,973 | 200 | 25 | 49,319 B | 10 | ~19,700 B |
 | `inaturalist_get_species_counts` | ~856 | 500 | 50 | 42,780 B | 25 | ~21,400 B |
 | `inaturalist_get_leaderboard` | ~137 | 500 | 250 | 34,182 B | 25 | ~3,400 B |
+| `inaturalist_get_histogram` | ~58 (10-char day key + up to a 5-digit count, JSON entry plus one markdown row) | unbounded — `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 B | 800 (a bucket cap, not a `per_page`) | ~46,800 B | — (one uncapped response; no smaller default page) | — |
 
-Sizes are the whole `tools/call` reply. Nothing is lost at the lower caps: `page` and `cursor` reach the same records, and two leaderboard pages of 250 cover the whole 500-entry window those endpoints rank. `inaturalist_find_places` (max 30; ten places measured 6,752 bytes, so ~675 each) and `inaturalist_get_similar_species` (max 50, over look-alikes projected to roughly 250 bytes each) already sit inside both thresholds and are unchanged. `include: ["photos"]` on an observation search multiplies the per-record cost and is the caller's own call to make — the field's description says as much.
+Sizes are the whole `tools/call` reply. Nothing is lost at the lower caps: `page` and `cursor` reach the same records, and two leaderboard pages of 250 cover the whole 500-entry window those endpoints rank. `inaturalist_find_places` (max 30; ten places measured 6,752 bytes, so ~675 each) and `inaturalist_get_similar_species` (max 50, over look-alikes projected to roughly 250 bytes each) already sit inside both thresholds and are unchanged. `include: ["photos"]` on an observation search multiplies the per-record cost and is the caller's own call to make — the field's description says as much. `inaturalist_get_histogram` has no page/default split — it is a single response, so the cap targets the 50,000-byte advertised maximum directly rather than the smaller default; the first 800 buckets in upstream key order are kept, `total` still sums every bucket upstream returned, and the `truncated`/`shown`/`cap` enrichment discloses the cut the way every other list tool does.
 
 ### Places: geometry stripped to a bounding box
 
@@ -235,6 +236,7 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | `per_page` capped in the schema well below the upstream clamp — 25 for observation search, 50 for species counts, 250 for leaderboards. The caps are sized by response bytes, not by what upstream will serve; see Response size budget. Upstream's own clamps, verified live: `/observations` clamps to 200, and `/observations/observers?per_page=999` and `/observations/identifiers?per_page=999` both clamp to 500, not 200. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the cursor. |
 | `place_id=abc` | **500** `{"error":"Error","status":500}` | `place_id` is a positive integer in the schema. |
+| `id_below=notanumber` (`cursor`) | **500** `{"error":"Error","status":500}` | `cursor` is validated against `^[1-9]\d*$` in the schema — the server's own `next_cursor` is always a decimal observation id, the same way `place_id` enforces an integer. |
 | `taxon_id=999999999` (as a filter) | **422** `{"error":"Unknown taxon_id 999999999","status":422}` | Mapped to a typed `unknown_taxon_id` routing to `inaturalist_resolve_name`. |
 | `/taxa/abc` (path) | **422** `{"error":"Error","status":422}` — no usable message | `taxon_id` is a positive integer in the schema; the server authors the message. |
 | `/taxa/999999999` (path) | 200, `total_results: 0` — not a 404 | Empty `results` is the not-found signal for every by-id path. |
@@ -377,7 +379,7 @@ The spine of the surface.
 | `order_by` | enum, default `observed_on` | `order_by` | `created_at` \| `geo_score` \| `id` \| `observed_on` \| `random` \| `species_guess` \| `updated_at` \| `votes`. Forced to `id` when `cursor` is supplied. |
 | `order` | enum, default `desc` | `order` | |
 | `page` | int ≥ 1, default 1 | `page` | Refused in-process when `page × per_page > 10000`. |
-| `cursor` | string, optional | `id_below` | The `next_cursor` from a previous page. Mutually exclusive with `page`. |
+| `cursor` | string, `^[1-9]\d*$`, optional | `id_below` | The `next_cursor` from a previous page — always a decimal observation id. A non-numeric value 500s upstream, so the schema enforces the pattern, the same way `place_id` enforces an integer. Mutually exclusive with `page`. |
 | `per_page` | int 1–25, default 10 | `per_page` | Bounded by the response budget, not by upstream — see Response size budget. A full page of 25 measured 49,319 bytes; the default of 10 lands near 19,700. Upstream would serve 200 and clamps 999 to it silently; the schema refuses anything past 25. |
 | `include` | enum array, optional | — | `photos` \| `annotations` \| `sounds`. |
 
@@ -452,7 +454,7 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 
 **format():** `total_results` as a header line, then a numbered list ranked by `observation_count` — `{n}. **{common_name}** (*{name}*) — {observation_count} observations · {rank} · {iconic_taxon_name} · taxon_id {taxon_id}` — with the photo block indented under each entry.
 
-**Errors:** `invalid_geography`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
+**Errors:** `invalid_geography`, `unpaired_annotation_value`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
 
 **Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
@@ -464,21 +466,23 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 |:--|:--|:--|:--|
 | `taxon_id` | int ≥ 1, optional | `taxon_id` | Omit for all taxa in the area. |
 | area params | as above | same | |
-| `interval` | enum, default `month_of_year` | `interval` | `year` \| `month` \| `week` \| `day` \| `hour` \| `month_of_year` \| `week_of_year`. The spec notes the absolute intervals set a default `d1`. |
+| `interval` | enum, default `month_of_year` | `interval` | `year` \| `month` \| `week` \| `day` \| `hour` \| `month_of_year` \| `week_of_year`. The spec notes the absolute intervals set a default `d1`. `day` and `hour` over a wide range can generate thousands of buckets, so the `.describe()` names the 800-bucket cap. |
 | `date_field` | enum, default `observed` | `date_field` | `observed` \| `created`. |
-| `d1` / `d2` | `YYYY-MM-DD`, optional | same | |
+| `d1` / `d2` | `YYYY-MM-DD`, optional | same | `d1`'s `.describe()` also names the 800-bucket cap, since a wide range under `day`/`hour` is what triggers it. |
 | `quality_grade` | enum array, default `["research"]` | `quality_grade` | |
 | `captive` | boolean, default `false` | `captive` | |
 
-**Output:** `interval`, `buckets[]` — `{ key, count }` in upstream key order — and `total` (the summed counts). Upstream returns `results: { month_of_year: { "1": 0, …, "12": 2 } }` in 153 bytes; the array form keeps ordering explicit for a reading model.
+**Output:** `interval`, `buckets[]` — `{ key, count }` in upstream key order, capped at 800 buckets (see below) — and `total` (the summed counts across *every* bucket upstream returned, including any past the cap). Upstream returns `results: { month_of_year: { "1": 0, …, "12": 2 } }` in 153 bytes; the array form keeps ordering explicit for a reading model.
 
-**format():** a header line naming `interval` and `total`, then a two-column markdown table of `key` and `count` — small enough at every interval (12 rows for `month_of_year`, 53 for `week_of_year`) to render whole, with no cap.
+**format():** a header line naming `interval` and `total`, then a two-column markdown table of `key` and `count` — small enough at every interval other than `day`/`hour` over a wide range (12 rows for `month_of_year`, 53 for `week_of_year`) to render whole.
 
 **Errors:** `invalid_geography`, `unknown_taxon_id` — same strings.
 
-**Enrichment:** `applied_filters`, `notice`.
+**Enrichment:** `applied_filters`, `truncated`/`shown`/`cap` (required, written on every path — the same unconditional-disclosure pattern as the other list tools), `notice`.
 
-**Zero-hit notice** (every bucket zero): `Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.`
+**Bucket cap:** `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 bytes against the design's 50,000-byte advertised maximum for a list tool. Capped at 800 buckets, the first in upstream key order — a bucket costs at most ~58 bytes combined across `structuredContent` and its rendered markdown row (a 10-char day key, a JSON entry, and a `| key | count |` row up to a 5-digit count), so a full 800-bucket response lands near 46,800 bytes worst case. `ctx.enrich.truncated()` fires when upstream returned more than 800, with guidance to narrow `d1`/`d2` or choose a coarser interval; `total` still sums every bucket upstream returned, not just the shown 800, so the figure stays accurate even when the array is cut.
+
+**Zero-hit notice** (every bucket zero, computed over the full unclipped set): `Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.` This wins over the truncation guidance (last-wins) when the answer is genuinely zero everywhere, since narrowing the range would not help in that case.
 
 ### `inaturalist_get_taxon`
 
@@ -809,3 +813,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **Truncation disclosure is required enrichment and is written on every path, not only where the cap bit.** | The framework validates merged enrichment against `output.extend(enrichment)`, so a required field written on one branch only does not degrade to a missing field on the others — every other path fails the call outright, and a zero-hit page returns a validation error in place of its own zero-hit notice. Writing `truncated: false` with `shown` and `cap` unconditionally also earns its keep on its own terms: a page states what it returned against what was asked for whether or not anything was cut. |
 | **List caps are sized by response bytes, not by what upstream will serve.** | Upstream's own limits (200 observations, 500 species, 500 leaderboard entries) are limits on upstream, and a full page at them measured 388 KB, 419 KB, and 68 KB — an agent spending a call at the advertised maximum had no way to know that before it arrived. Caps now come from the measured per-record cost across `structuredContent` and the rendered text together: the default page fits the 24,000-byte budget `outlineOnOverflow` gives one document, the advertised maximum fits 50,000. Bounding beats disclosing here because paging already reaches every record an uncapped page would have carried, so the smaller page costs nothing but a second call. |
 | **A caller-facing error carries no upstream path.** | `unknown_taxon_id` reaches the agent on `structuredContent.error.data`, and the REST path it came from names nothing the caller can act on that the declared recovery does not already say. The endpoint stays on the request's own log line, which is where triage wants it. The server- and upstream-fault errors keep theirs — an allowlist violation, an HTML error page, an unparseable body — because there the path *is* the diagnostic and the caller is not its audience. |
+| **Upstream text rendered inline is flattened to a single line; only quoted text keeps its own line structure.** | The blockquote rule covers the free-text fields, but names, logins, media URLs, and authority status text are interpolated into a rendered line rather than quoted — and member-created place and project names, community-editable common names, and `matched_term` are all third-party strings. A line break inside one ends its line and lets the remainder read as a heading or list item this server never emitted. `inlineText()` collapses CR, LF, and CRLF at every inline slot, and `blockquote()` splits on the same set so a bare CR cannot leave a tail outside the quote. `structuredContent` keeps every value verbatim — the flattening is render-only, so the licensing rule that attribution is never reformatted still holds on the surface that carries it. |
+| **The unknown-section rejection names a bounded sample of what it rejected.** | `sections` is an unbounded array of unbounded strings, and naming every unknown entry let one call inflate its own failure message to 106 KB — mirrored into `content[]` and `structuredContent.error` alike, straight into the agent's context. Three names, 40 characters each, plus a count of the rest is all a caller needs to find the typo, and the valid section list follows it regardless. The bound sits in the handler rather than on the schema so the typed `unknown_section` contract and its recovery hint still fire; a `maxItems` on the input would pre-empt them with a framework `invalid_arguments` rejection instead. |
+| **`inaturalist_get_histogram` caps `buckets[]` at 800, kept from the start of upstream key order.** | `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 bytes, past the design's 50,000-byte advertised maximum for a list tool. A bucket costs at most ~58 bytes combined across `structuredContent` and its rendered markdown row, so 800 lands near 46,800 bytes worst case — under budget with headroom. `total` still sums every bucket upstream returned, including any past the cap, so the one number that costs nothing to keep accurate stays accurate; only the array is cut, disclosed through the same `truncated`/`shown`/`cap` enrichment every other list tool declares. |
+| **`cursor` on `inaturalist_search_observations` is validated against `^[1-9]\d*$`, the same way `place_id` enforces an integer.** | `cursor` is forwarded verbatim as upstream `id_below`, and the server's own `next_cursor` is always a decimal observation id — a caller-supplied non-numeric value 500s upstream, which the service maps to an upstream-unavailable error and retries against a fault that a schema rejection would have caught for free. `blankAsUnset` still runs first, so a form client's blank cursor is unset rather than rejected. |
