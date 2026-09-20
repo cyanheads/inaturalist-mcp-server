@@ -1,6 +1,6 @@
 # inaturalist-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 03:43:23
+Generated on: 2026-09-20 04:27:36
 
 ```text
 inaturalist-mcp-server/
@@ -24,6 +24,7 @@ inaturalist-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -204,6 +205,7 @@ inaturalist-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
