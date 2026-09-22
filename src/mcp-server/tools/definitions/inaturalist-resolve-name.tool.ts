@@ -24,6 +24,8 @@ const NO_TAXON_MATCH_AT_RANK =
   'No taxon of that rank starts with that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.';
 const NO_RECORD_MATCH =
   'No place, project, or observer matched that text. Try fewer words, or set type to any to search every record kind at once.';
+const NO_ANY_MATCH =
+  'Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling; for an organism, type taxon matches a name prefix.';
 
 export const inaturalistResolveName = tool('inaturalist_resolve_name', {
   description:
@@ -50,7 +52,13 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       .describe(
         'Restrict taxon candidates to one rank. Honoured only on type "taxon" — the cross-kind search has no rank filter.',
       ),
-    limit: z.number().int().min(1).max(30).default(10).describe('Maximum candidates to return.'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(10)
+      .describe('Maximum candidates to return, applied to every type.'),
   }),
 
   output: z.object({
@@ -67,7 +75,18 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
               .describe(
                 'The identifier to pass onward — taxon_id, place_id, project id, or user id.',
               ),
-            name: z.string().nullable().describe('Scientific name, place name, or login.'),
+            name: z
+              .string()
+              .nullable()
+              .describe(
+                'Scientific name on taxa, place name, project title, or an observer’s display name — which falls back to the login when the observer set none.',
+              ),
+            login: z
+              .string()
+              .optional()
+              .describe(
+                'Observer login, on users only — the value inaturalist_get_leaderboard entries and an observation’s observer carry.',
+              ),
             common_name: z.string().optional().describe('Preferred common name, on taxa.'),
             rank: z.string().optional().describe('Taxonomic rank, on taxa.'),
             display_name: z
@@ -140,16 +159,20 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
 
     ctx.enrich.total(result.total);
 
+    // The taxon autocomplete returns related taxa past its per_page, so limit
+    // is applied here on every route rather than trusted to upstream.
     if (result.candidates.length > 0) {
-      return { found: true, candidates: result.candidates };
+      return { found: true, candidates: result.candidates.slice(0, input.limit) };
     }
 
     const guidance =
-      input.type !== 'taxon'
-        ? NO_RECORD_MATCH
-        : input.rank === undefined
-          ? NO_TAXON_MATCH
-          : NO_TAXON_MATCH_AT_RANK;
+      input.type === 'any'
+        ? NO_ANY_MATCH
+        : input.type !== 'taxon'
+          ? NO_RECORD_MATCH
+          : input.rank === undefined
+            ? NO_TAXON_MATCH
+            : NO_TAXON_MATCH_AT_RANK;
     return { found: false, candidates: [], guidance };
   },
 
@@ -170,6 +193,7 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
 
       const parts = [`kind ${candidate.kind}`, `id ${candidate.id}`];
       if (candidate.name) parts.push(`name ${inlineText(candidate.name)}`);
+      if (candidate.login) parts.push(`login ${inlineText(candidate.login)}`);
       if (candidate.common_name) parts.push(`common name ${inlineText(candidate.common_name)}`);
       if (candidate.rank) parts.push(`rank ${inlineText(candidate.rank)}`);
       if (candidate.display_name) parts.push(`display name ${inlineText(candidate.display_name)}`);

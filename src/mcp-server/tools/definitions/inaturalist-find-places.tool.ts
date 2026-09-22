@@ -6,8 +6,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { blankAsUnset, checkBoundingBox } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+
+const PER_PAGE_MAX = 30;
 
 const PlaceSchema = z
   .object({
@@ -60,26 +63,25 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
-    q: z
-      .string()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe(
-        'Place-name prefix to search. Matches the start of a name, not words inside it. Mutually exclusive with the bounding box.',
-      ),
+    q: blankAsUnset(z.string().min(1).max(100).optional()).describe(
+      'Place-name prefix to search. Matches the start of a name, not words inside it. Mutually exclusive with the bounding box.',
+    ),
     nelat: z
       .number()
       .min(-90)
       .max(90)
       .optional()
-      .describe('North-east corner latitude of the map area. All four corners or none.'),
+      .describe(
+        'North-east corner latitude of the map area, at or north of swlat. All four corners or none.',
+      ),
     nelng: z
       .number()
       .min(-180)
       .max(180)
       .optional()
-      .describe('North-east corner longitude of the map area. All four corners or none.'),
+      .describe(
+        'North-east corner longitude of the map area. All four corners or none. West of swlng is accepted: it describes a box crossing the antimeridian.',
+      ),
     swlat: z
       .number()
       .min(-90)
@@ -96,10 +98,10 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       .number()
       .int()
       .min(1)
-      .max(30)
+      .max(PER_PAGE_MAX)
       .default(10)
       .describe(
-        'Maximum places to return. Honoured on the bounding-box arm only — the name-prefix endpoint publishes no page size and returns a fixed page.',
+        'Maximum places per list. Honoured on the bounding-box arm only, where it bounds the standard and community lists separately, so up to twice this many places come back. The name-prefix endpoint publishes no page size and returns a fixed page.',
       ),
   }),
 
@@ -118,13 +120,21 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
   }),
 
   enrichment: {
-    totalCount: z.number().describe('Total places upstream matched, before any page limit.'),
-    truncated: z.boolean().describe('True when more places matched than were returned.'),
+    totalCount: z
+      .number()
+      .describe(
+        'Places upstream reports. On the name-prefix arm, every match before the fixed page; on the bounding-box arm, only the places returned (standard plus community), so it is bounded by the page size rather than a full count.',
+      ),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when more places may exist than were returned — on the bounding-box arm, when the standard or community list reached per_page.',
+      ),
     shown: z.number().describe('How many places this response carries.'),
     cap: z
       .number()
       .describe(
-        'The page size that bounded this response — per_page on the bounding-box arm, the fixed page upstream served on the name-prefix arm.',
+        'The most places this response could carry — per_page × 2 on the bounding-box arm, where per_page bounds each list separately; the fixed page upstream served on the name-prefix arm.',
       ),
     notice: z
       .string()
@@ -136,9 +146,9 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither q nor a complete bounding box was given, or both were.',
+      when: 'Neither q nor a complete bounding box was given, both were, or the box has nelat south of swlat.',
       recovery:
-        'Pass q to search place names, or all four of nelat, nelng, swlat and swlng to list the places covering a map area.',
+        'Pass q to search place names, or all four of nelat, nelng, swlat and swlng, with nelat at or north of swlat, to list the places covering a map area.',
     },
   ],
 
@@ -184,24 +194,43 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       );
     }
 
+    const boxProblem = checkBoundingBox({ nelat, swlat });
+    if (boxProblem) {
+      throw ctx.fail('invalid_geography', boxProblem, { ...ctx.recoveryFor('invalid_geography') });
+    }
+
     ctx.log.info('Listing places covering a map area');
     const { total, standard, community } = await service.nearbyPlaces(
       { nelat, nelng, swlat, swlng },
       input.per_page,
       ctx,
     );
+    // per_page bounds each list on its own, so the response ceiling is twice
+    // it, and only a list that reached per_page can have been cut.
     const shown = standard.length + community.length;
+    const cap = input.per_page * 2;
+    const filled = [
+      ...(standard.length >= input.per_page ? ['standard'] : []),
+      ...(community.length >= input.per_page ? ['community'] : []),
+    ];
     ctx.enrich.total(total);
-    ctx.enrich({ truncated: false, shown, cap: input.per_page });
+    ctx.enrich({ truncated: false, shown, cap });
     if (shown === 0) {
       ctx.enrich.notice(
         'No place covers that box. Widen the corners, or resolve a named area with q instead.',
       );
-    } else if (shown >= input.per_page) {
+    } else if (filled.length > 0) {
+      const which =
+        filled.length === 2
+          ? `The standard and community lists each reached per_page ${input.per_page}`
+          : `The ${filled[0]} list reached per_page ${input.per_page}`;
       ctx.enrich.truncated({
         shown,
-        cap: input.per_page,
-        guidance: 'Raise per_page (max 30) to list more of the places covering this area.',
+        cap,
+        guidance:
+          input.per_page < PER_PAGE_MAX
+            ? `${which}, so more places may cover this area. Raise per_page (max ${PER_PAGE_MAX}) to list more.`
+            : `${which}, so more places may cover this area. Shrink the box to list the rest.`,
       });
     }
     return { standard, community };

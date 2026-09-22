@@ -12,6 +12,8 @@ import {
   observationFilterInputShape,
   resolveAnnotation,
   resolveArea,
+  resolveDateRange,
+  wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import {
@@ -113,9 +115,16 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
       recovery:
-        'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.',
+        'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.',
+    },
+    {
+      reason: 'inverted_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'd1 is after d2.',
+      recovery:
+        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
     },
     {
       reason: 'unpaired_annotation_value',
@@ -142,6 +151,13 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       });
     }
 
+    const dates = resolveDateRange(input);
+    if (!dates.ok) {
+      throw ctx.fail('inverted_date_range', dates.message, {
+        ...ctx.recoveryFor('inverted_date_range'),
+      });
+    }
+
     const annotation = resolveAnnotation(input);
     if (!annotation.ok) {
       throw ctx.fail('unpaired_annotation_value', annotation.message, {
@@ -152,9 +168,8 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     const params: QueryParams = {
       ...area.value,
       ...annotation.value,
+      ...dates.value,
       taxon_id: input.taxon_id,
-      d1: input.d1,
-      d2: input.d2,
       quality_grade: input.quality_grade,
       captive: input.captive,
       iconic_taxa: input.iconic_taxa,
@@ -162,10 +177,8 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       per_page: input.per_page,
     };
 
-    ctx.log.info('Ranking species for an area', {
-      perPage: input.per_page,
-      hasArea: Object.keys(area.value).length > 0,
-    });
+    const hasArea = Object.keys(area.value).length > 0;
+    ctx.log.info('Ranking species for an area', { perPage: input.per_page, hasArea });
 
     const { total, species } = await getINaturalistService().getSpeciesCounts(params, ctx);
 
@@ -180,9 +193,9 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     });
 
     if (species.length === 0) {
-      ctx.enrich.notice(
-        'No species recorded for that area and period. Widen the date range or the area, or set quality_grade to include "needs_id".',
-      );
+      const lead = 'No species recorded for those filters.';
+      const guidance = wideningGuidance(input, hasArea);
+      ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
       return { total_results: total, species };
     }
 

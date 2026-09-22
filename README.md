@@ -69,26 +69,27 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 
 ### `inaturalist_resolve_name` <sub>tool</sub>
 
-- `type`: `taxon` (name-prefix autocomplete) or `place` / `project` / `user` / `any` (scored cross-kind search); `rank` narrows taxa only; `limit` 1–30 (default 10)
+- `type`: `taxon` (name-prefix autocomplete) or `place` / `project` / `user` / `any` (scored cross-kind search); `rank` narrows taxa only; `limit` 1–30 (default 10), applied in-process on every type
 - Taxon lookup matches a name **prefix**, not words inside a name — "monarch" hits where "monarch butterfly" misses
 - A miss is a result: `found: false` with `guidance` naming why, rather than an error
-- Each candidate carries `kind` and `id` — the identifier every other tool takes
+- Each candidate carries `kind` and `id` — the identifier every other tool takes. A `user` candidate also carries `login`, the value leaderboard entries and an observation's `observer` relay; its `name` is the display name
 
 ---
 
 ### `inaturalist_find_places` <sub>tool</sub>
 
-- Exactly one of `q` (place-name prefix) or all four of `nelat`, `nelng`, `swlat`, `swlng`; neither or both fails as `invalid_geography`
+- Exactly one of `q` (place-name prefix) or all four of `nelat`, `nelng`, `swlat`, `swlng`; neither or both fails as `invalid_geography`, as does a box with `nelat` south of `swlat`. A blank `q` reads as unset, and `nelng` west of `swlng` is an antimeridian-crossing box, not an error
 - `q` returns `places[]`; the bounding box returns `standard[]` and `community[]` as separate lists
 - Each place carries `bbox`, `place_type`, `admin_level`, `ancestor_place_ids`, `location`, and `slug`; boundary polygons are stripped, since one upstream response carries 247 KB of them
-- `per_page` (1–30, default 10) binds the bounding-box arm only — the name-prefix endpoint publishes no page size, and its fixed page is disclosed through the truncation enrichment
+- `per_page` (1–30, default 10) binds the bounding-box arm only, where it bounds `standard[]` and `community[]` separately, so `cap` is `per_page × 2`. The name-prefix endpoint publishes no page size, and its fixed page is disclosed through the truncation enrichment
 
 ---
 
 ### `inaturalist_search_observations` <sub>tool</sub>
 
-- An area is given in exactly one form — `place_id`, the `lat`+`lng`+`radius` triple in kilometres (radius ≤ 500), or the four-corner bounding box; partial or mixed fails as `invalid_geography`
+- An area is given in exactly one form — `place_id`, the `lat`+`lng`+`radius` triple in kilometres (0 < radius ≤ 500), or the four-corner bounding box with `nelat` at or north of `swlat`; partial, mixed, a zero radius, or an inverted box fails as `invalid_geography`
 - Filters: `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `licensed`/`photo_licensed`, and `q`+`search_on`
+- Ordered pairs are checked before the request: `d1` after `d2` fails as `inverted_date_range` (on every tool that takes dates), and an `hrank` finer than `lrank` as `inverted_rank_range`. Equal pairs are valid
 - Defaults to `quality_grade: ["research"]` and `captive: false`, echoed back as `applied_filters` on every call
 - `per_page` 1–25 (default 10); `page` walks the first 10,000 results and `cursor` continues past it — passing both fails, and a cursor forces an id ordering, which is echoed
 - `include` expands `photos`, `annotations`, `sounds`. `identifications` and `comments` are deliberately absent — one thread measures 28 KB, so the thread lives on `inaturalist_get_observation`
@@ -168,7 +169,7 @@ iNaturalist-specific:
 - Keyless, read-only cover of the iNaturalist v1 API — observations, taxa, places, controlled terms, the similar-species graph, and the observer and identifier leaderboards
 - Every response is projected in-process. Upstream accepts and ignores its own `fields=` parameter, so a two-record observation search arrives at 95 KB, a full upstream page of 200 at 4.3 MB, and a common taxon record at 95 KB before anything is trimmed
 - Per-endpoint parameter allowlist — an unknown parameter name returns HTTP 200 and the entire global index, so nothing outside the allowlist is ever sent
-- In-process rejection of every input upstream would silently widen: a lone `lat`, an unparseable `d1`, a `term_value_id` without its `term_id`, a page past the result window
+- In-process rejection of every input upstream would silently widen, narrow to zero, or fail on: a lone `lat`, an unparseable or impossible `d1` such as `2026-02-30`, `d1` after `d2`, a `term_value_id` without its `term_id`, a zero radius, a box with `nelat` south of `swlat`, a page past the result window
 - Self-paced outbound traffic with a per-UTC-day request budget, since the API returns no rate-limit headers to react to
 
 Agent-friendly output:

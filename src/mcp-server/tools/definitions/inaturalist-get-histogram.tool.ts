@@ -11,6 +11,7 @@ import {
   dateRangeInputShape,
   observationFilterInputShape,
   resolveArea,
+  resolveDateRange,
 } from '@/mcp-server/tools/observation-filters.js';
 import {
   getINaturalistService,
@@ -70,7 +71,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       ),
     ...dateRangeInputShape,
     d1: dateRangeInputShape.d1.describe(
-      `Earliest observation date, YYYY-MM-DD. Inclusive. With interval set to day or hour, a wide range can exceed the ${HISTOGRAM_BUCKET_CAP}-bucket cap — narrow d1/d2 to reach buckets past it.`,
+      `Earliest observation date, YYYY-MM-DD. Inclusive. Must be on or before d2. With interval set to day or hour, a wide range can exceed the ${HISTOGRAM_BUCKET_CAP}-bucket cap — narrow d1/d2 to reach buckets past it.`,
     ),
     quality_grade,
     captive,
@@ -131,9 +132,16 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
       recovery:
-        'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.',
+        'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.',
+    },
+    {
+      reason: 'inverted_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'd1 is after d2.',
+      recovery:
+        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
     },
     {
       reason: 'unknown_taxon_id',
@@ -153,11 +161,17 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       });
     }
 
+    const dates = resolveDateRange(input);
+    if (!dates.ok) {
+      throw ctx.fail('inverted_date_range', dates.message, {
+        ...ctx.recoveryFor('inverted_date_range'),
+      });
+    }
+
     const params: QueryParams & { interval: string } = {
       ...area.value,
+      ...dates.value,
       taxon_id: input.taxon_id,
-      d1: input.d1,
-      d2: input.d2,
       quality_grade: input.quality_grade,
       captive: input.captive,
       interval: input.interval,
@@ -187,22 +201,22 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       cap: HISTOGRAM_BUCKET_CAP,
     });
 
+    // `total` covers every bucket upstream returned, not just the shown window,
+    // so a genuinely empty answer is recognised even when the cap bites — and
+    // its notice replaces the truncation guidance, since narrowing the range
+    // would not help. The notice is written once, on whichever call applies.
+    const notice =
+      total === 0 ? zeroHitNotice(input, Object.keys(area.value).length > 0) : undefined;
     if (truncated) {
       ctx.enrich.truncated({
         shown: buckets.length,
         cap: HISTOGRAM_BUCKET_CAP,
-        guidance: `Upstream returned ${allBuckets.length} buckets; only the first ${HISTOGRAM_BUCKET_CAP} are shown. Narrow d1/d2, or choose a coarser interval, to bring the rest into range.`,
+        guidance:
+          notice ??
+          `Upstream returned ${allBuckets.length} buckets; only the first ${HISTOGRAM_BUCKET_CAP} are shown. Narrow d1/d2, or choose a coarser interval, to bring the rest into range.`,
       });
-    }
-
-    // Reflects total across every bucket upstream returned, not just the shown
-    // window, so it stays accurate even when the cap bites. It also wins over
-    // the truncation guidance above (last-wins) when the answer really is zero
-    // everywhere — narrowing the date range would not help in that case.
-    if (total === 0) {
-      ctx.enrich.notice(
-        'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
-      );
+    } else if (notice) {
+      ctx.enrich.notice(notice);
     }
 
     return { interval: input.interval, buckets, total };
@@ -219,3 +233,23 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Names what most likely emptied every bucket: the date range when one was
+ * set, the taxon only when one was given, and the area only when one was named.
+ */
+function zeroHitNotice(
+  input: { taxon_id?: number | undefined; d1?: string | undefined; d2?: string | undefined },
+  hasArea: boolean,
+): string {
+  const where = hasArea ? ' in that area' : '';
+  const hasTaxon = input.taxon_id !== undefined;
+  const finding =
+    input.d1 !== undefined || input.d2 !== undefined
+      ? `Every bucket is zero — no records${hasTaxon ? ' of this taxon' : ''}${where} fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen or drop d1/d2.`
+      : `Every bucket is zero — ${hasTaxon ? 'this taxon has no records' : 'nothing is recorded'}${where}.`;
+  const remedy = hasTaxon
+    ? `Confirm the taxon with inaturalist_resolve_name${hasArea ? ', or widen the area' : ''}.`
+    : `${hasArea ? 'Widen the area, or relax' : 'Relax'} quality_grade or captive.`;
+  return `${finding} ${remedy}`;
+}

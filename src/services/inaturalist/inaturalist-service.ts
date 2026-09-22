@@ -552,7 +552,9 @@ export class INaturalistService {
       candidates.push({
         kind,
         id: record.id,
-        name: record.name ?? record.title ?? record.login ?? null,
+        // `||`, not `??`: a member with no display name arrives as null or "".
+        name: record.name || record.title || record.login || null,
+        ...(kind === 'user' && record.login ? { login: record.login } : {}),
         ...(record.preferred_common_name ? { common_name: record.preferred_common_name } : {}),
         ...(record.rank ? { rank: record.rank } : {}),
         ...(record.display_name ? { display_name: record.display_name } : {}),

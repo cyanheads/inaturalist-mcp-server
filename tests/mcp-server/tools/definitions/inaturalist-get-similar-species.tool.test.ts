@@ -67,6 +67,26 @@ describe('area validation', () => {
   });
 });
 
+describe('ordered date range', () => {
+  it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+    const input = inaturalistGetSimilarSpecies.input.parse({
+      taxon_id: 48662,
+      d1: '2026-01-01',
+      d2: '2025-01-01',
+    });
+
+    await expect(inaturalistGetSimilarSpecies.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'inverted_date_range',
+        recovery: { hint: expect.stringContaining('on or before d2') },
+      },
+    });
+    expect(fake.getSimilarSpecies).not.toHaveBeenCalled();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+});
+
 describe('unknown_taxon_id passthrough from the service', () => {
   it('propagates the service-thrown unknown_taxon_id error unchanged', async () => {
     fake.getSimilarSpecies.mockRejectedValue(
@@ -98,7 +118,35 @@ describe('zero-hit and limit-truncation enrichment', () => {
 
     expect(result).toEqual({ taxon_id: 48662, similar_species: [] });
     expect(getEnrichment(ctx).notice).toBe(
+      'No look-alikes are recorded for this taxon — it is rarely misidentified.',
+    );
+  });
+
+  it('names the area filter as a cause only when an area was given', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 0, similar: [] });
+    const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+    const input = inaturalistGetSimilarSpecies.input.parse({ taxon_id: 48662, place_id: 14 });
+
+    await inaturalistGetSimilarSpecies.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
       'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.',
+    );
+  });
+
+  it('names the date range and the area together when both were given', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 0, similar: [] });
+    const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+    const input = inaturalistGetSimilarSpecies.input.parse({
+      taxon_id: 48662,
+      place_id: 14,
+      d1: '2090-01-01',
+    });
+
+    await inaturalistGetSimilarSpecies.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter and the d1/d2 range are too narrow. Re-run without them to see the global confusion set.',
     );
   });
 
@@ -148,8 +196,7 @@ describe('zero-hit and limit-truncation enrichment', () => {
       truncated: false,
       shown: 0,
       cap: 20,
-      notice:
-        'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.',
+      notice: 'No look-alikes are recorded for this taxon — it is rarely misidentified.',
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))

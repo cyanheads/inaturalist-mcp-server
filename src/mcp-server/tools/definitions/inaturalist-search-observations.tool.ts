@@ -15,6 +15,8 @@ import {
   RESULT_WINDOW,
   resolveAnnotation,
   resolveArea,
+  resolveDateRange,
+  resolveRankRange,
 } from '@/mcp-server/tools/observation-filters.js';
 import { ObservationSchema, renderObservation } from '@/mcp-server/tools/observation-record.js';
 import {
@@ -55,11 +57,15 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     hrank: z
       .enum(RANKS)
       .optional()
-      .describe('Highest taxonomic rank of the identification to accept.'),
+      .describe(
+        'Highest (coarsest) taxonomic rank of the identification to accept. Must be at or above lrank; ranks compare by rank level.',
+      ),
     lrank: z
       .enum(RANKS)
       .optional()
-      .describe('Lowest taxonomic rank of the identification to accept.'),
+      .describe(
+        'Lowest (finest) taxonomic rank of the identification to accept. Equal to hrank for an exact-rank match.',
+      ),
     csi: z
       .array(z.enum(CONSERVATION_STATUS_CODES))
       .optional()
@@ -180,9 +186,23 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
       recovery:
-        'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.',
+        'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.',
+    },
+    {
+      reason: 'inverted_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'd1 is after d2.',
+      recovery:
+        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
+    },
+    {
+      reason: 'inverted_rank_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'hrank is a finer rank than lrank.',
+      recovery:
+        'Set hrank to the coarser rank and lrank to the finer one, or pass the same rank to both for an exact-rank match; list the ranks with inaturalist_list_reference topic ranks.',
     },
     {
       reason: 'result_window_exceeded',
@@ -230,6 +250,20 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       });
     }
 
+    const dates = resolveDateRange(input);
+    if (!dates.ok) {
+      throw ctx.fail('inverted_date_range', dates.message, {
+        ...ctx.recoveryFor('inverted_date_range'),
+      });
+    }
+
+    const ranks = resolveRankRange(input);
+    if (!ranks.ok) {
+      throw ctx.fail('inverted_rank_range', ranks.message, {
+        ...ctx.recoveryFor('inverted_rank_range'),
+      });
+    }
+
     const annotation = resolveAnnotation(input);
     if (!annotation.ok) {
       throw ctx.fail('unpaired_annotation_value', annotation.message, {
@@ -268,14 +302,12 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     const params: QueryParams = {
       ...area.value,
       ...annotation.value,
+      ...dates.value,
+      ...ranks.value,
       taxon_id: input.taxon_id,
-      d1: input.d1,
-      d2: input.d2,
       quality_grade: input.quality_grade,
       captive: input.captive,
       iconic_taxa: input.iconic_taxa,
-      hrank: input.hrank,
-      lrank: input.lrank,
       csi: input.csi,
       threatened: input.threatened,
       native: input.native,
@@ -366,11 +398,12 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
 /**
  * Names the filter most likely to be responsible for an empty page, so the agent
  * relaxes one thing rather than guessing. Composed by condition, most specific
- * first.
+ * first, and never naming a filter the call did not supply.
  */
 function zeroHitNotice(input: {
   quality_grade: readonly string[];
   captive: boolean;
+  taxon_id?: number | undefined;
   d1?: string | undefined;
   d2?: string | undefined;
   term_id?: readonly number[] | undefined;
@@ -390,12 +423,14 @@ function zeroHitNotice(input: {
   }
   if (input.d1 !== undefined || input.d2 !== undefined) {
     fragments.push(
-      `No sightings fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen the range, or call inaturalist_get_histogram to see which months this taxon is recorded in here.`,
+      `No sightings fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen the range, or call inaturalist_get_histogram with the same filters to see which months have records.`,
     );
   }
   if (input.term_id?.length) {
     fragments.push(
-      'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
+      input.taxon_id === undefined
+        ? 'No sightings carry that annotation. Check the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.'
+        : 'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
     );
   }
   if (input.radius !== undefined) {
@@ -404,7 +439,8 @@ function zeroHitNotice(input: {
     );
   }
 
-  return fragments.length > 0
-    ? fragments.join(' ')
-    : 'No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.';
+  if (fragments.length > 0) return fragments.join(' ');
+  return input.taxon_id === undefined
+    ? 'No sightings matched. Relax one filter at a time.'
+    : 'No sightings matched. Relax one filter at a time. Confirm taxon_id with inaturalist_resolve_name, or drop it.';
 }

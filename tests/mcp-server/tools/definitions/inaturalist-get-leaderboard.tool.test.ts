@@ -80,6 +80,26 @@ describe('area validation', () => {
   });
 });
 
+describe('ordered date range', () => {
+  it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
+    const input = inaturalistGetLeaderboard.input.parse({
+      kind: 'observers',
+      d1: '2026-01-01',
+      d2: '2025-01-01',
+    });
+
+    await expect(inaturalistGetLeaderboard.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'inverted_date_range',
+        recovery: { hint: expect.stringContaining('on or before d2') },
+      },
+    });
+    expect(fake.getLeaderboard).not.toHaveBeenCalled();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+});
+
 describe('the 500-entry leaderboard window', () => {
   it('allows page × per_page exactly at 500', async () => {
     fake.getLeaderboard.mockResolvedValue({ total: 5000, entries: entries(10) });
@@ -150,8 +170,59 @@ describe('zero-hit and truncation enrichment', () => {
       entries: [],
     });
     expect(getEnrichment(ctx).notice).toBe(
-      'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
+      'Nobody has made identifications matching those filters. Set quality_grade to include "needs_id".',
     );
+  });
+
+  it('names no date range, area, or taxon_id the call did not supply', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+    const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
+    const input = inaturalistGetLeaderboard.input.parse({
+      kind: 'observers',
+      quality_grade: ['research', 'needs_id'],
+    });
+
+    await inaturalistGetLeaderboard.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Nobody has recorded observations matching those filters.',
+    );
+  });
+
+  it('names taxon_id only when it was supplied', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+    const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
+    const input = inaturalistGetLeaderboard.input.parse({
+      kind: 'observers',
+      taxon_id: 47126,
+      quality_grade: ['research', 'needs_id'],
+    });
+
+    await inaturalistGetLeaderboard.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Nobody has recorded observations matching those filters. Drop taxon_id or confirm it with inaturalist_resolve_name.',
+    );
+  });
+
+  it('names every narrowing filter the call supplied, on both surfaces', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'observers',
+      place_id: 14,
+      taxon_id: 47126,
+      d1: '2090-01-01',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const expected =
+      'Nobody has recorded observations matching those filters. Widen or drop d1/d2, widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".';
+    expect(result.structuredContent).toMatchObject({ entries: [], notice: expected });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(expected);
   });
 
   it('discloses truncation with "raise page" guidance when the next page is still reachable', async () => {
@@ -201,13 +272,13 @@ describe('zero-hit and truncation enrichment', () => {
       shown: 0,
       cap: 25,
       notice:
-        'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
+        'Nobody has made identifications matching those filters. Set quality_grade to include "needs_id".',
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
     expect(text).toContain(
-      'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
+      'Nobody has made identifications matching those filters. Set quality_grade to include "needs_id".',
     );
   });
 

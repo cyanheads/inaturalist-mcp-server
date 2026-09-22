@@ -13,6 +13,8 @@ import {
   LEADERBOARD_WINDOW,
   observationFilterInputShape,
   resolveArea,
+  resolveDateRange,
+  wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import {
@@ -115,9 +117,16 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
       recovery:
-        'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.',
+        'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.',
+    },
+    {
+      reason: 'inverted_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'd1 is after d2.',
+      recovery:
+        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
     },
     {
       reason: 'leaderboard_window_exceeded',
@@ -144,6 +153,13 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       });
     }
 
+    const dates = resolveDateRange(input);
+    if (!dates.ok) {
+      throw ctx.fail('inverted_date_range', dates.message, {
+        ...ctx.recoveryFor('inverted_date_range'),
+      });
+    }
+
     // Past 500 both endpoints answer 200 with an empty page, which an agent
     // reads as "nobody matched" rather than as the end of the window.
     if (exceedsWindow(input.page, input.per_page, LEADERBOARD_WINDOW)) {
@@ -156,9 +172,8 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
 
     const params: QueryParams & { page: number; per_page: number } = {
       ...area.value,
+      ...dates.value,
       taxon_id: input.taxon_id,
-      d1: input.d1,
-      d2: input.d2,
       quality_grade: input.quality_grade,
       page: input.page,
       per_page: input.per_page,
@@ -186,9 +201,12 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       input.kind === 'observers' ? ('observations' as const) : ('identifications' as const);
 
     if (entries.length === 0) {
-      ctx.enrich.notice(
-        'Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.',
-      );
+      const lead =
+        input.kind === 'observers'
+          ? 'Nobody has recorded observations matching those filters.'
+          : 'Nobody has made identifications matching those filters.';
+      const guidance = wideningGuidance(input, Object.keys(area.value).length > 0);
+      ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
       return { kind: input.kind, count_metric: countMetric, total_results: total, entries };
     }
 

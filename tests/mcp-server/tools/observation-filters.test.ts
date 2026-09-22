@@ -7,10 +7,13 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
+  areaInputShape,
   dateRangeInputShape,
   exceedsWindow,
   resolveAnnotation,
   resolveArea,
+  resolveDateRange,
+  resolveRankRange,
 } from '@/mcp-server/tools/observation-filters.js';
 
 describe('dateRangeInputShape', () => {
@@ -30,6 +33,52 @@ describe('dateRangeInputShape', () => {
   it('rejects anything else that is not YYYY-MM-DD', () => {
     expect(() => schema.parse({ d1: 'notadate' })).toThrow();
     expect(() => schema.parse({ d2: '2024-3-1' })).toThrow();
+  });
+
+  it('reports a malformed date once, as a pattern failure, without a calendar complaint on top', () => {
+    const result = schema.safeParse({ d1: 'notadate' });
+    expect(result.error?.issues).toHaveLength(1);
+    expect(result.error?.issues[0]?.code).toBe('invalid_format');
+  });
+
+  it('rejects a well-shaped date that does not exist on the calendar, on either bound', () => {
+    expect(schema.safeParse({ d1: '2026-02-30' }).success).toBe(false);
+    expect(schema.safeParse({ d2: '2026-02-30' }).success).toBe(false);
+    expect(schema.safeParse({ d1: '2025-13-01' }).success).toBe(false);
+    expect(schema.safeParse({ d2: '2025-00-10' }).success).toBe(false);
+    expect(schema.safeParse({ d1: '2025-04-31' }).success).toBe(false);
+    expect(schema.safeParse({ d1: '2025-02-29' }).success).toBe(false);
+  });
+
+  it('keeps the valid neighbours of an impossible date, leap days included', () => {
+    expect(schema.safeParse({ d1: '2026-02-28', d2: '2026-03-05' }).success).toBe(true);
+    expect(schema.safeParse({ d1: '2024-02-29' }).success).toBe(true);
+    expect(schema.safeParse({ d1: '2000-02-29' }).success).toBe(true);
+    expect(schema.safeParse({ d2: '2025-12-31' }).success).toBe(true);
+  });
+
+  it('rejects a calendar-invalid date with a message naming the problem', () => {
+    const result = schema.safeParse({ d1: '2026-02-30' });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toContain('not a real calendar date');
+  });
+
+  /**
+   * Verified 2026-09-22: upstream narrows d2=0000-02-29 to zero results (a real
+   * day — year 0 is a leap year) and drops d2=0100-02-29 and d2=1900-02-29.
+   * JavaScript's Date.UTC reads years 0–99 as 1900–1999, so it must not decide.
+   */
+  it('follows the proleptic Gregorian calendar for years 0–99', () => {
+    expect(schema.safeParse({ d2: '0000-02-29' }).success).toBe(true);
+    expect(schema.safeParse({ d2: '0004-02-29' }).success).toBe(true);
+    expect(schema.safeParse({ d2: '0000-02-30' }).success).toBe(false);
+    expect(schema.safeParse({ d2: '0100-02-29' }).success).toBe(false);
+    expect(schema.safeParse({ d2: '1900-02-29' }).success).toBe(false);
+  });
+
+  it('rejects month 00 and day 00', () => {
+    expect(schema.safeParse({ d2: '2020-00-10' }).success).toBe(false);
+    expect(schema.safeParse({ d2: '2020-01-00' }).success).toBe(false);
   });
 
   it('still advertises the date pattern in JSON Schema', () => {
@@ -91,6 +140,154 @@ describe('resolveArea', () => {
     const result = resolveArea({ radius: 10 });
     expect(result.ok).toBe(false);
     expect(!result.ok && result.message).toContain('coordinate triple is incomplete');
+  });
+});
+
+describe('areaInputShape radius', () => {
+  const schema = z.object(areaInputShape);
+
+  it('leaves the lower bound to resolveArea, so 0 and negatives reach invalid_geography with its hint', () => {
+    expect(schema.safeParse({ lat: 37, lng: -120, radius: 0 }).success).toBe(true);
+    expect(schema.safeParse({ lat: 37, lng: -120, radius: -5 }).success).toBe(true);
+    expect(schema.safeParse({ lat: 37, lng: -120, radius: 501 }).success).toBe(false);
+  });
+
+  it('advertises only the 500 km ceiling in JSON Schema', () => {
+    const json = z.toJSONSchema(schema) as { properties: Record<string, Record<string, unknown>> };
+    expect(json.properties.radius).toMatchObject({ type: 'number', maximum: 500 });
+    expect(json.properties.radius).not.toHaveProperty('minimum');
+    expect(json.properties.radius).not.toHaveProperty('exclusiveMinimum');
+  });
+});
+
+describe('resolveArea — values upstream answers with HTTP 500', () => {
+  it('rejects a zero radius', () => {
+    const result = resolveArea({ lat: 37, lng: -120, radius: 0 });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('radius must be greater than 0');
+  });
+
+  it('rejects a negative radius the same way', () => {
+    const result = resolveArea({ lat: 37, lng: -120, radius: -5 });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('radius must be greater than 0');
+  });
+
+  it('accepts a small positive radius', () => {
+    expect(resolveArea({ lat: 37, lng: -120, radius: 0.001 })).toEqual({
+      ok: true,
+      value: { lat: 37, lng: -120, radius: 0.001 },
+    });
+  });
+
+  it('rejects a bounding box whose nelat is south of swlat', () => {
+    const result = resolveArea({ nelat: 37, nelng: -120, swlat: 38, swlng: -121 });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('nelat 37 is south of swlat 38');
+  });
+
+  it('accepts a box whose corners share a latitude', () => {
+    expect(resolveArea({ nelat: 37, nelng: -120, swlat: 37, swlng: -121 }).ok).toBe(true);
+  });
+
+  it('accepts an antimeridian-crossing box, where nelng is west of swlng', () => {
+    expect(resolveArea({ nelat: 66, nelng: -170, swlat: 52, swlng: 170 })).toEqual({
+      ok: true,
+      value: { nelat: 66, nelng: -170, swlat: 52, swlng: 170 },
+    });
+  });
+
+  it('still names an incomplete triple before judging the radius value', () => {
+    const result = resolveArea({ radius: 0 });
+    expect(!result.ok && result.message).toContain('coordinate triple is incomplete');
+  });
+});
+
+describe('resolveDateRange', () => {
+  it('resolves to an empty fragment when neither bound is given', () => {
+    expect(resolveDateRange({})).toEqual({ ok: true, value: {} });
+  });
+
+  it('resolves either bound alone', () => {
+    expect(resolveDateRange({ d1: '2025-01-01' })).toEqual({
+      ok: true,
+      value: { d1: '2025-01-01' },
+    });
+    expect(resolveDateRange({ d2: '2025-01-01' })).toEqual({
+      ok: true,
+      value: { d2: '2025-01-01' },
+    });
+  });
+
+  it('resolves an ordered range', () => {
+    expect(resolveDateRange({ d1: '2025-01-01', d2: '2026-01-01' })).toEqual({
+      ok: true,
+      value: { d1: '2025-01-01', d2: '2026-01-01' },
+    });
+  });
+
+  it('keeps equal bounds valid — a single-day range', () => {
+    expect(resolveDateRange({ d1: '2025-06-15', d2: '2025-06-15' }).ok).toBe(true);
+  });
+
+  it('rejects d1 after d2, naming both values', () => {
+    const result = resolveDateRange({ d1: '2026-01-01', d2: '2025-01-01' });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('d1 2026-01-01 is after d2 2025-01-01');
+  });
+
+  it('compares the whole date, not just the year', () => {
+    expect(resolveDateRange({ d1: '2025-03-02', d2: '2025-03-01' }).ok).toBe(false);
+    expect(resolveDateRange({ d1: '2025-02-28', d2: '2025-03-01' }).ok).toBe(true);
+  });
+});
+
+describe('resolveRankRange', () => {
+  it('resolves to an empty fragment when neither rank is given', () => {
+    expect(resolveRankRange({})).toEqual({ ok: true, value: {} });
+  });
+
+  it('resolves either rank alone', () => {
+    expect(resolveRankRange({ hrank: 'family' })).toEqual({ ok: true, value: { hrank: 'family' } });
+    expect(resolveRankRange({ lrank: 'species' })).toEqual({
+      ok: true,
+      value: { lrank: 'species' },
+    });
+  });
+
+  it('resolves a coarse hrank with a finer lrank', () => {
+    expect(resolveRankRange({ hrank: 'order', lrank: 'family' })).toEqual({
+      ok: true,
+      value: { hrank: 'order', lrank: 'family' },
+    });
+  });
+
+  it('keeps an equal pair valid — an exact-rank match', () => {
+    expect(resolveRankRange({ hrank: 'family', lrank: 'family' }).ok).toBe(true);
+  });
+
+  it('rejects hrank finer than lrank, naming both ranks', () => {
+    const result = resolveRankRange({ hrank: 'family', lrank: 'order' });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('hrank "family" is finer than lrank "order"');
+  });
+
+  /**
+   * Upstream compares rank_level, not list position: species and hybrid share
+   * level 10, and subspecies, variety and form share level 5, so either order
+   * of those pairs is an equal-level range.
+   */
+  it('treats ranks sharing a rank_level as equal, in either order', () => {
+    expect(resolveRankRange({ hrank: 'hybrid', lrank: 'species' }).ok).toBe(true);
+    expect(resolveRankRange({ hrank: 'species', lrank: 'hybrid' }).ok).toBe(true);
+    expect(resolveRankRange({ hrank: 'variety', lrank: 'subspecies' }).ok).toBe(true);
+    expect(resolveRankRange({ hrank: 'form', lrank: 'variety' }).ok).toBe(true);
+    expect(resolveRankRange({ hrank: 'genushybrid', lrank: 'genus' }).ok).toBe(true);
+  });
+
+  it('rejects across the whole scale, from the finest hrank to the coarsest lrank', () => {
+    expect(resolveRankRange({ hrank: 'form', lrank: 'stateofmatter' }).ok).toBe(false);
+    expect(resolveRankRange({ hrank: 'subspecies', lrank: 'hybrid' }).ok).toBe(false);
   });
 });
 

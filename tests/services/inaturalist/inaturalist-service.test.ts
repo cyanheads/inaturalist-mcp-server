@@ -13,7 +13,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import type { Endpoint, QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import { INaturalistService } from '@/services/inaturalist/inaturalist-service.js';
-import { rawControlledTerm, rawObservation } from '../../helpers/fixtures.js';
+import {
+  rawControlledTerm,
+  rawObservation,
+  rawSearchResult,
+  rawTaxon,
+} from '../../helpers/fixtures.js';
 
 /** Matches the private `buildUrl`/`cacheKey` methods for direct invocation in tests. */
 type ServiceInternals = {
@@ -440,6 +445,150 @@ describe('getObservations id resolution', () => {
         expect.objectContaining({ attribute: 'Life Stage', value: 'Larva' }),
       ]);
       expect(http.calls).toHaveLength(2);
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('name resolution field mapping', () => {
+  it('maps a user record to its display name and its login separately', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/search\?/,
+        respond: () =>
+          Response.json({
+            total_results: 1,
+            results: [
+              rawSearchResult({
+                type: 'User',
+                score: 9.750655,
+                matches: ['kueda'],
+                record: {
+                  id: 1,
+                  login: 'kueda',
+                  name: 'Ken-ichi Ueda',
+                  observations_count: 56317,
+                },
+              }),
+            ],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { candidates } = await newService().searchRecords(
+        { q: 'kueda', sources: 'users', limit: 10 },
+        createMockContext(),
+      );
+
+      expect(candidates).toEqual([
+        {
+          kind: 'user',
+          id: 1,
+          name: 'Ken-ichi Ueda',
+          login: 'kueda',
+          matched_term: 'kueda',
+          score: 9.750655,
+          observations_count: 56317,
+        },
+      ]);
+    } finally {
+      http.restore();
+    }
+  });
+
+  /**
+   * Upstream sends a missing display name both ways — `/search?q=xx&sources=users`
+   * returned `name: null` on some members and `name: ""` on others (2026-09-22).
+   */
+  it.each([
+    ['null', null],
+    ['an empty string', ''],
+  ])('falls back to the login for name when the display name is %s', async (_label, name) => {
+    const http = createFetchMock([
+      {
+        match: /\/search\?/,
+        respond: () =>
+          Response.json({
+            total_results: 1,
+            results: [rawSearchResult({ type: 'User', record: { id: 7, login: 'solo', name } })],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { candidates } = await newService().searchRecords(
+        { q: 'solo', sources: 'users', limit: 10 },
+        createMockContext(),
+      );
+
+      expect(candidates[0]).toMatchObject({ kind: 'user', name: 'solo', login: 'solo' });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('carries no login on a taxon, place, or project candidate', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/search\?/,
+        respond: () =>
+          Response.json({
+            total_results: 3,
+            results: [
+              rawSearchResult(),
+              rawSearchResult({
+                type: 'Place',
+                record: { id: 14, name: 'California', display_name: 'California, US' },
+              }),
+              rawSearchResult({
+                type: 'Project',
+                record: { id: 5, title: 'City Nature Challenge', slug: 'cnc' },
+              }),
+            ],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { candidates } = await newService().searchRecords(
+        { q: 'c', limit: 10 },
+        createMockContext(),
+      );
+
+      expect(candidates.map((candidate) => candidate.kind)).toEqual(['taxon', 'place', 'project']);
+      for (const candidate of candidates) expect(candidate).not.toHaveProperty('login');
+    } finally {
+      http.restore();
+    }
+  });
+
+  /**
+   * /taxa/autocomplete returns related taxa past the requested per_page, and
+   * the service relays what it is given — the tool applies limit itself.
+   */
+  it('relays every taxon autocomplete result, without slicing to limit', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/taxa\/autocomplete\?/,
+        respond: () =>
+          Response.json({
+            total_results: 198,
+            results: [1, 2, 3, 4].map((id) => rawTaxon({ id })),
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { total, candidates } = await newService().autocompleteTaxa(
+        { q: 'monarch', limit: 1 },
+        createMockContext(),
+      );
+
+      expect(http.calls[0]?.request.url).toContain('per_page=1');
+      expect(total).toBe(198);
+      expect(candidates.map((candidate) => candidate.id)).toEqual([1, 2, 3, 4]);
     } finally {
       http.restore();
     }

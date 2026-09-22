@@ -11,6 +11,7 @@ import {
   dateRangeInputShape,
   observationFilterInputShape,
   resolveArea,
+  resolveDateRange,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import {
@@ -101,9 +102,16 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
       recovery:
-        'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.',
+        'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.',
+    },
+    {
+      reason: 'inverted_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'd1 is after d2.',
+      recovery:
+        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
     },
     {
       reason: 'unknown_taxon_id',
@@ -123,11 +131,17 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       });
     }
 
+    const dates = resolveDateRange(input);
+    if (!dates.ok) {
+      throw ctx.fail('inverted_date_range', dates.message, {
+        ...ctx.recoveryFor('inverted_date_range'),
+      });
+    }
+
     const params: QueryParams = {
       ...area.value,
+      ...dates.value,
       taxon_id: input.taxon_id,
-      d1: input.d1,
-      d2: input.d2,
       quality_grade: input.quality_grade,
       captive: input.captive,
     };
@@ -146,8 +160,15 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     ctx.enrich({ truncated: false, shown: shown.length, cap: input.limit });
 
     if (shown.length === 0) {
+      // Names only the scoping filters the call supplied.
+      const scope = [
+        ...(Object.keys(area.value).length > 0 ? ['the area filter'] : []),
+        ...(input.d1 !== undefined || input.d2 !== undefined ? ['the d1/d2 range'] : []),
+      ];
       ctx.enrich.notice(
-        'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.',
+        scope.length === 0
+          ? 'No look-alikes are recorded for this taxon — it is rarely misidentified.'
+          : `No look-alikes are recorded for this taxon — either it is rarely misidentified, or ${scope.join(' and ')} ${scope.length > 1 ? 'are' : 'is'} too narrow. Re-run without ${scope.length > 1 ? 'them' : scope[0]} to see the global confusion set.`,
       );
     } else if (similar.length > shown.length) {
       // The ranking is descending, so the last count shown bounds every

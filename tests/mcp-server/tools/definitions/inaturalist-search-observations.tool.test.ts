@@ -12,6 +12,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import { failingUpstream } from '../../../helpers/failing-upstream.js';
 import {
   asService,
   createFakeService,
@@ -124,6 +125,153 @@ describe('input validation', () => {
     const input = inaturalistSearchObservations.input.parse({ page: 500, per_page: 20 });
 
     await expect(inaturalistSearchObservations.handler(input, ctx)).resolves.toBeDefined();
+  });
+});
+
+describe('ordered pairs', () => {
+  it('rejects an hrank finer than lrank before any request, without a zero-hit notice', async () => {
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      place_id: 1,
+      hrank: 'family',
+      lrank: 'order',
+    });
+
+    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'inverted_rank_range',
+        recovery: { hint: expect.stringContaining('coarser rank') },
+      },
+    });
+    expect(fake.searchObservations).not.toHaveBeenCalled();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      place_id: 1,
+      taxon_id: 48662,
+      d1: '2026-01-01',
+      d2: '2025-01-01',
+    });
+
+    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'inverted_date_range',
+        recovery: { hint: expect.stringContaining('on or before d2') },
+      },
+    });
+    expect(fake.searchObservations).not.toHaveBeenCalled();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('sends equal rank and date pairs through unchanged', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 1, observations: observations(1) });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      place_id: 1,
+      hrank: 'family',
+      lrank: 'family',
+      d1: '2025-06-15',
+      d2: '2025-06-15',
+    });
+
+    await inaturalistSearchObservations.handler(input, ctx);
+
+    expect(fake.searchObservations.mock.calls[0]?.[0]).toMatchObject({
+      hrank: 'family',
+      lrank: 'family',
+      d1: '2025-06-15',
+      d2: '2025-06-15',
+    });
+  });
+
+  it('sends a correctly ordered range through', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 1, observations: observations(1) });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      hrank: 'order',
+      lrank: 'family',
+      d1: '2025-01-01',
+      d2: '2026-01-01',
+    });
+
+    await inaturalistSearchObservations.handler(input, ctx);
+
+    expect(fake.searchObservations.mock.calls[0]?.[0]).toMatchObject({
+      hrank: 'order',
+      lrank: 'family',
+      d1: '2025-01-01',
+      d2: '2026-01-01',
+    });
+  });
+
+  it('rejects a calendar-invalid date at the schema, like a malformed one', () => {
+    expect(inaturalistSearchObservations.input.safeParse({ d1: '2026-02-30' }).success).toBe(false);
+    expect(inaturalistSearchObservations.input.safeParse({ d2: '2025-13-01' }).success).toBe(false);
+  });
+});
+
+describe('areas upstream answers with HTTP 500', () => {
+  /**
+   * The real service runs here against an upstream that answers 500, so a
+   * missing check shows up as fetch attempts (four, with the retries) and a
+   * service error in place of invalid_geography.
+   */
+  it('rejects radius 0 as invalid_geography with no request and no retry', {
+    timeout: 30_000,
+  }, async () => {
+    const { http, service } = failingUpstream();
+    vi.mocked(getINaturalistService).mockReturnValue(service);
+    http.install();
+    try {
+      const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+      const input = inaturalistSearchObservations.input.parse({
+        lat: 37,
+        lng: -120,
+        radius: 0,
+        per_page: 1,
+      });
+
+      await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
+        data: {
+          reason: 'invalid_geography',
+          recovery: { hint: expect.stringContaining('radius above 0') },
+        },
+      });
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('non-positive radius on the wire', () => {
+  it('fails a negative radius as invalid_geography with the area hint, not a schema error', async () => {
+    const result = await runToolContract(inaturalistSearchObservations, {
+      lat: 37,
+      lng: -120,
+      radius: -1,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'invalid_geography' },
+      },
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(
+      'radius must be greater than 0 kilometres; -1 was supplied. Upstream fails on a radius of 0 or less',
+    );
+    expect(text).toContain('a radius above 0');
+    expect(fake.searchObservations).not.toHaveBeenCalled();
   });
 });
 
@@ -287,6 +435,25 @@ describe('zero-hit notice composition', () => {
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain('No sightings fall in 2026-01-01…2026-01-31.');
     expect(notice).not.toContain('Only research-grade records were searched.');
+    // No taxon_id and no area were given, so neither is named.
+    expect(notice).not.toContain('taxon');
+    expect(notice).not.toContain('here');
+  });
+
+  it('names taxon_id in the fallback only when it was supplied, and never the absent date range', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      quality_grade: ['research', 'needs_id'],
+      captive: true,
+      taxon_id: 47126,
+    });
+
+    await inaturalistSearchObservations.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'No sightings matched. Relax one filter at a time. Confirm taxon_id with inaturalist_resolve_name, or drop it.',
+    );
   });
 
   it('names the annotation filter when a term_id was supplied', async () => {
@@ -300,7 +467,26 @@ describe('zero-hit notice composition', () => {
 
     await inaturalistSearchObservations.handler(input, ctx);
 
-    expect(getEnrichment(ctx).notice).toContain('No sightings carry that annotation.');
+    expect(getEnrichment(ctx).notice).toBe(
+      'No sightings carry that annotation. Check the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.',
+    );
+  });
+
+  it('points the annotation check at the taxon only when taxon_id was supplied', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    const input = inaturalistSearchObservations.input.parse({
+      quality_grade: ['research', 'needs_id'],
+      captive: true,
+      taxon_id: 47126,
+      term_id: [1],
+    });
+
+    await inaturalistSearchObservations.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
+    );
   });
 
   it('names the radius when an area radius was supplied', async () => {
@@ -338,13 +524,12 @@ describe('zero-hit notice composition', () => {
       truncated: false,
       shown: 0,
       cap: 5,
-      notice:
-        'No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.',
+      notice: 'No sightings matched. Relax one filter at a time.',
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
-    expect(text).toContain('No sightings matched. Relax one filter at a time');
+    expect(text).toContain('No sightings matched. Relax one filter at a time.');
   });
 
   it('reports truncated: false on a partial page that never reached per_page', async () => {
@@ -367,9 +552,7 @@ describe('zero-hit notice composition', () => {
 
     await inaturalistSearchObservations.handler(input, ctx);
 
-    expect(getEnrichment(ctx).notice).toBe(
-      'No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.',
-    );
+    expect(getEnrichment(ctx).notice).toBe('No sightings matched. Relax one filter at a time.');
   });
 });
 

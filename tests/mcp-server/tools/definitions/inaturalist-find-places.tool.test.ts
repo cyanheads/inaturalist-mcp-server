@@ -10,6 +10,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistFindPlaces } from '@/mcp-server/tools/definitions/inaturalist-find-places.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import { failingUpstream } from '../../../helpers/failing-upstream.js';
 import {
   asService,
   createFakeService,
@@ -146,7 +147,7 @@ describe('bounding-box arm', () => {
       totalCount: 0,
       truncated: false,
       shown: 0,
-      cap: 10,
+      cap: 20,
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
@@ -154,19 +155,132 @@ describe('bounding-box arm', () => {
     expect(text).toContain('No place covers that box');
   });
 
-  it('discloses truncation once the page fills per_page', async () => {
-    fake.nearbyPlaces.mockResolvedValue({
-      total: 100,
-      standard: Array.from({ length: 10 }, (_, i) => projectedPlace({ id: i })),
-      community: [],
-    });
+  function places(count: number, idOffset = 0) {
+    return Array.from({ length: count }, (_, i) => projectedPlace({ id: idOffset + i }));
+  }
+
+  it('discloses truncation once one list fills per_page, against a cap of per_page × 2', async () => {
+    fake.nearbyPlaces.mockResolvedValue({ total: 10, standard: places(10), community: [] });
     const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
     const input = inaturalistFindPlaces.input.parse({ ...bbox, per_page: 10 });
 
     await inaturalistFindPlaces.handler(input, ctx);
 
-    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: true, shown: 10, cap: 20 });
     expect(getEnrichment(ctx).notice).toContain('Raise per_page');
+  });
+
+  it('flags truncation when both lists independently hit per_page, with shown equal to cap', async () => {
+    fake.nearbyPlaces.mockResolvedValue({
+      total: 10,
+      standard: places(5),
+      community: places(5, 100),
+    });
+
+    const result = await runToolContract(inaturalistFindPlaces, { ...bbox, per_page: 5 });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      totalCount: 10,
+      truncated: true,
+      shown: 10,
+      cap: 10,
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('standard and community lists each reached per_page 5');
+  });
+
+  it('flags truncation on the one list that reached per_page, never exceeding cap', async () => {
+    fake.nearbyPlaces.mockResolvedValue({
+      total: 9,
+      standard: places(4),
+      community: places(5, 100),
+    });
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({ ...bbox, per_page: 5 });
+
+    await inaturalistFindPlaces.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment).toMatchObject({ truncated: true, shown: 9, cap: 10, totalCount: 9 });
+    expect(enrichment.notice).toContain('community list reached per_page 5');
+  });
+
+  it('does not flag truncation when both lists sit below per_page, however large shown is', async () => {
+    fake.nearbyPlaces.mockResolvedValue({
+      total: 7,
+      standard: places(4),
+      community: places(3, 100),
+    });
+
+    const result = await runToolContract(inaturalistFindPlaces, { ...bbox, per_page: 5 });
+
+    expect(result.structuredContent).toMatchObject({ truncated: false, shown: 7, cap: 10 });
+    expect((result.structuredContent as { notice?: string }).notice).toBeUndefined();
+  });
+
+  it('points at shrinking the box rather than raising per_page once per_page is at its maximum', async () => {
+    fake.nearbyPlaces.mockResolvedValue({ total: 30, standard: places(30), community: [] });
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({ ...bbox, per_page: 30 });
+
+    await inaturalistFindPlaces.handler(input, ctx);
+
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: true, shown: 30, cap: 60 });
+    expect(getEnrichment(ctx).notice).not.toContain('Raise per_page');
+    expect(getEnrichment(ctx).notice).toContain('Shrink the box');
+  });
+
+  it('treats a blank q from a form client as unset and serves the bounding-box arm', async () => {
+    fake.nearbyPlaces.mockResolvedValue({ total: 1, standard: places(1), community: [] });
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({ q: '', ...bbox });
+
+    await inaturalistFindPlaces.handler(input, ctx);
+
+    expect(input.q).toBeUndefined();
+    expect(fake.nearbyPlaces).toHaveBeenCalledWith(bbox, 10, ctx);
+    expect(fake.autocompletePlaces).not.toHaveBeenCalled();
+  });
+
+  it('accepts an antimeridian-crossing box, where nelng is west of swlng', async () => {
+    fake.nearbyPlaces.mockResolvedValue({ total: 1, standard: places(1), community: [] });
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const box = { nelat: 66, nelng: -170, swlat: 52, swlng: 170 };
+    const input = inaturalistFindPlaces.input.parse(box);
+
+    await inaturalistFindPlaces.handler(input, ctx);
+
+    expect(fake.nearbyPlaces).toHaveBeenCalledWith(box, 10, ctx);
+  });
+
+  it('rejects a box whose nelat is south of swlat with no request and no retry', {
+    timeout: 30_000,
+  }, async () => {
+    const { http, service } = failingUpstream();
+    vi.mocked(getINaturalistService).mockReturnValue(service);
+    http.install();
+    try {
+      const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+      const input = inaturalistFindPlaces.input.parse({
+        nelat: 37,
+        nelng: -120,
+        swlat: 38,
+        swlng: -121,
+      });
+
+      await expect(inaturalistFindPlaces.handler(input, ctx)).rejects.toMatchObject({
+        data: {
+          reason: 'invalid_geography',
+          recovery: { hint: expect.stringContaining('nelat at or north of swlat') },
+        },
+      });
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
   });
 });
 
@@ -183,6 +297,36 @@ describe('invalid_geography', () => {
   it('rejects a partial bounding box (some but not all four corners)', async () => {
     const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
     const input = inaturalistFindPlaces.input.parse({ nelat: 47.7, nelng: -122.2 });
+
+    await expect(inaturalistFindPlaces.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_geography' },
+    });
+  });
+
+  it('still rejects a non-blank q combined with a bounding-box corner', async () => {
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({
+      q: 'Seattle',
+      nelat: 47.7,
+      nelng: -122.2,
+      swlat: 47.5,
+      swlng: -122.4,
+    });
+
+    await expect(inaturalistFindPlaces.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_geography' },
+    });
+  });
+
+  it('still bounds a non-blank q to 1–100 characters', () => {
+    expect(inaturalistFindPlaces.input.safeParse({ q: 'S' }).success).toBe(true);
+    expect(inaturalistFindPlaces.input.safeParse({ q: 'x'.repeat(100) }).success).toBe(true);
+    expect(inaturalistFindPlaces.input.safeParse({ q: 'x'.repeat(101) }).success).toBe(false);
+  });
+
+  it('treats a blank q with no box as neither arm', async () => {
+    const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
+    const input = inaturalistFindPlaces.input.parse({ q: '' });
 
     await expect(inaturalistFindPlaces.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_geography' },

@@ -452,6 +452,8 @@ export type ResolvedCandidate = {
   kind: CandidateKind;
   id: number;
   name: string | null;
+  /** Present on `kind: 'user'` only — the identifier leaderboards and observations relay. */
+  login?: string;
   common_name?: string;
   rank?: string;
   display_name?: string;

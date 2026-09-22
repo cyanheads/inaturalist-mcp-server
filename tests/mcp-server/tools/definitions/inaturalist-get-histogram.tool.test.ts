@@ -64,6 +64,27 @@ describe('area validation', () => {
   });
 });
 
+describe('ordered date range', () => {
+  it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({
+      place_id: 14,
+      taxon_id: 47126,
+      d1: '2026-01-01',
+      d2: '2025-01-01',
+    });
+
+    await expect(inaturalistGetHistogram.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'inverted_date_range',
+        recovery: { hint: expect.stringContaining('on or before d2') },
+      },
+    });
+    expect(fake.getHistogram).not.toHaveBeenCalled();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+});
+
 describe('unknown_taxon_id passthrough from the service', () => {
   it('propagates the service-thrown unknown_taxon_id error unchanged', async () => {
     fake.getHistogram.mockRejectedValue(
@@ -98,8 +119,77 @@ describe('zero-hit notice', () => {
 
     expect(result.total).toBe(0);
     expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — nothing is recorded. Relax quality_grade or captive.',
+    );
+  });
+
+  it('drops the taxon wording when taxon_id was omitted', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ place_id: 14 });
+
+    await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — nothing is recorded in that area. Widen the area, or relax quality_grade or captive.',
+    );
+  });
+
+  it('keeps the taxon wording when taxon_id was set and no date range was given', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ place_id: 14, taxon_id: 47126 });
+
+    await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
       'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
     );
+  });
+
+  it('drops the area clauses when a taxon was given without an area', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ taxon_id: 47126 });
+
+    await inaturalistGetHistogram.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — this taxon has no records. Confirm the taxon with inaturalist_resolve_name.',
+    );
+  });
+
+  it('names the date range when d1 or d2 was set, on both surfaces', async () => {
+    fake.getHistogram.mockResolvedValue(
+      Array.from({ length: 12 }, (_, i) => ({ key: String(i + 1), count: 0 })),
+    );
+
+    const result = await runToolContract(inaturalistGetHistogram, {
+      place_id: 14,
+      taxon_id: 47126,
+      d1: '2090-01-01',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const expected =
+      'Every bucket is zero — no records of this taxon in that area fall in 2090-01-01…any end. Widen or drop d1/d2. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
+    expect(result.structuredContent).toMatchObject({ total: 0, notice: expected });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('fall in 2090-01-01…any end. Widen or drop d1/d2.');
+  });
+
+  it('names the date range without taxon wording when only d2 was set', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ place_id: 14, d2: '1800-01-01' });
+
+    await inaturalistGetHistogram.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('no records in that area fall in any start…1800-01-01');
+    expect(notice).not.toContain('this taxon');
   });
 
   it('does not fire when at least one bucket is non-zero', async () => {
@@ -209,14 +299,22 @@ describe('bucket cap', () => {
   it('lets the zero-hit notice win over the truncation guidance when the full set sums to zero', async () => {
     fake.getHistogram.mockResolvedValue(buckets(801).map((bucket) => ({ ...bucket, count: 0 })));
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
-    const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
+    const input = inaturalistGetHistogram.input.parse({
+      interval: 'day',
+      place_id: 14,
+      taxon_id: 47126,
+    });
 
     const result = await inaturalistGetHistogram.handler(input, ctx);
 
     expect(result.total).toBe(0);
-    expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
-    );
+    expect(getEnrichment(ctx)).toMatchObject({
+      truncated: true,
+      shown: 800,
+      cap: 800,
+      notice:
+        'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
+    });
   });
 });
 

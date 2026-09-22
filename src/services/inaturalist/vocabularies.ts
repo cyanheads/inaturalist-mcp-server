@@ -75,6 +75,42 @@ export const RANKS = [
   'form',
 ] as const;
 
+export type Rank = (typeof RANKS)[number];
+
+/**
+ * Every rank's `rank_level`, as upstream reports it on a taxon of that rank
+ * (verified live 2026-09-22). `hrank`/`lrank` compare these levels, not list
+ * position, so ranks sharing a level — genus and genushybrid, species and
+ * hybrid, subspecies, variety and form — bound the same band in either order.
+ */
+export const RANK_LEVEL: Readonly<Record<Rank, number>> = {
+  stateofmatter: 100,
+  kingdom: 70,
+  phylum: 60,
+  subphylum: 57,
+  superclass: 53,
+  class: 50,
+  subclass: 47,
+  superorder: 43,
+  order: 40,
+  suborder: 37,
+  infraorder: 35,
+  superfamily: 33,
+  epifamily: 32,
+  family: 30,
+  subfamily: 27,
+  supertribe: 26,
+  tribe: 25,
+  subtribe: 24,
+  genus: 20,
+  genushybrid: 20,
+  species: 10,
+  hybrid: 10,
+  subspecies: 5,
+  variety: 5,
+  form: 5,
+};
+
 export const CONSERVATION_STATUS_CODES = ['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX'] as const;
 
 export const LICENSE_CODES = [
@@ -87,17 +123,17 @@ export const LICENSE_CODES = [
   'cc0',
 ] as const;
 
-/** Rank levels the spec publishes; the remaining ranks sit between these rungs. */
-const RANK_LEVELS: Readonly<Record<string, number>> = {
-  kingdom: 70,
-  phylum: 60,
-  class: 50,
-  order: 40,
-  family: 30,
-  genus: 20,
-  species: 10,
-  subspecies: 5,
-};
+/** The rungs whose rank level the spec documents; the ranks topic notes only these. */
+const DOCUMENTED_RANK_LEVELS: ReadonlySet<Rank> = new Set([
+  'kingdom',
+  'phylum',
+  'class',
+  'order',
+  'family',
+  'genus',
+  'species',
+  'subspecies',
+]);
 
 const QUALITY_GRADE_ENTRIES: readonly VocabularyEntry[] = [
   {
@@ -210,14 +246,11 @@ const CONSERVATION_STATUS_LABELS: Readonly<
 export const STATIC_VOCABULARIES: Readonly<Record<string, readonly VocabularyEntry[]>> = {
   quality_grades: QUALITY_GRADE_ENTRIES,
   licenses: LICENSE_ENTRIES,
-  ranks: RANKS.map((rank) => {
-    const level = RANK_LEVELS[rank];
-    return {
-      code: rank,
-      label: rank,
-      ...(level === undefined ? {} : { notes: `rank_level ${level}.` }),
-    };
-  }),
+  ranks: RANKS.map((rank) => ({
+    code: rank,
+    label: rank,
+    ...(DOCUMENTED_RANK_LEVELS.has(rank) ? { notes: `rank_level ${RANK_LEVEL[rank]}.` } : {}),
+  })),
   iconic_taxa: ICONIC_TAXA.map((code) => ({ code, label: ICONIC_TAXON_LABELS[code] })),
   conservation_status_codes: CONSERVATION_STATUS_CODES.map((code) => ({
     code,

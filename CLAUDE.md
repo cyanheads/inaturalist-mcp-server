@@ -86,8 +86,8 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
   },
   errors: [
     { reason: 'invalid_geography', code: JsonRpcErrorCode.ValidationError,
-      when: 'An area was given partially or in two forms at once.',
-      recovery: 'Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.' },
+      when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
+      recovery: 'Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.' },
   ],
 
   async handler(input, ctx) {

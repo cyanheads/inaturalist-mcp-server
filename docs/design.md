@@ -232,6 +232,11 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `lat` without `lng`/`radius` | 200, `total_results: 387,388,228` — went global | The coordinate triple is validated as a unit: all three or none. |
 | `radius` alone | 200, `total_results: 387,389,093` — went global | Same rule, enforced from both directions. |
 | `d1=notadate` | 200, `total_results: 4,660,461` — identical to the unfiltered place total, so the date filter was dropped entirely | `d1` and `d2` must match `^\d{4}-\d{2}-\d{2}$`. Anything else is rejected before the request. A blank string is the one exception: form clients submit every optional string field, blank when untouched, so a blank `d1`, `d2`, `q`, or `cursor` is treated as unset rather than as a malformed value. |
+| `d1=2026-02-30`, `d1=2025-13-01` (well-shaped, not a real day) — verified 2026-09-22 | 200 on `/observations/species_counts?place_id=14`: `d1=2026-02-30&d2=2026-03-05` returned 51,499, identical to `d2` alone; `d1=2025-13-01` returned 54,336, identical to no date at all — the bound is dropped | Calendar validity is refined onto the same schema as the pattern, so an impossible day fails exactly as `notadate` does, on `d1` and `d2` independently. The advertised JSON Schema still carries only the pattern. Leap days follow the proleptic Gregorian calendar upstream applies: `d2=0000-02-29` narrows to zero results (a real day), while `1900-02-29` and `0100-02-29` are dropped like `2026-02-30`. |
+| `d1` after `d2` — verified 2026-09-22 | 200, `total_results: 0` | Rejected in-process as `inverted_date_range` on every tool taking `d1`/`d2`. Equal bounds are a valid single day. |
+| `hrank` finer than `lrank` (`hrank=family&lrank=order`) — verified 2026-09-22 | 200, `total_results: 0`. Upstream compares rank *levels*: `hrank=hybrid&lrank=species` and `hrank=variety&lrank=subspecies` both return the full band | Rejected in-process as `inverted_rank_range` when `hrank`'s level is below `lrank`'s. Ranks sharing a level (genus/genushybrid 20, species/hybrid 10, subspecies/variety/form 5) are valid in either order, as is an equal pair. Every adjacent pair of distinct levels, inverted, returns 0 upstream, so the rejection set is exactly upstream's empty set. |
+| `radius=0` — verified 2026-09-22 | **500** `Elasticsearch error`, retried four times (~14 s) before surfacing as an upstream fault; a negative radius answers the same 500. Any positive radius answers 200, down to `radius=1e-12` | `invalid_geography` before any request: `radius` must be greater than 0. The bound lives in the handler rather than the schema so the failure carries the area recovery hint. |
+| Bounding box with `nelat` south of `swlat` — verified 2026-09-22 | **500** `Elasticsearch error` on `/observations/species_counts` and `/places/nearby` alike, retried as above | `invalid_geography` before any request, on every area-scoped tool and on `inaturalist_find_places`' own box. `nelng` west of `swlng` is an antimeridian-crossing box and stays valid — `nelat=66&nelng=-170&swlat=52&swlng=170` answers 200 on every area endpoint and `/places/nearby` (1,623 species on `/observations/species_counts`). Equal latitudes are served too, so `nelat == swlat` passes. |
 | `term_value_id` without `term_id` | 200, `total_results: 4,660,477` — the filter was ignored | `term_value_id` requires `term_id`; the pair is validated together. |
 | `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | `per_page` capped in the schema well below the upstream clamp — 25 for observation search, 50 for species counts, 250 for leaderboards. The caps are sized by response bytes, not by what upstream will serve; see Response size budget. Upstream's own clamps, verified live: `/observations` clamps to 200, and `/observations/observers?per_page=999` and `/observations/identifiers?per_page=999` both clamp to 500, not 200. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the cursor. |
@@ -325,13 +330,13 @@ The name-to-id front door. A miss is a result, not a failure.
 | `q` | string, 1–100, required | `q` | For `type: "taxon"` this is a **prefix** match or an exact id, per the spec. |
 | `type` | enum, default `taxon` | `sources` | `taxon` \| `place` \| `project` \| `user` \| `any`. `taxon` routes to `/taxa/autocomplete`; everything else routes to `/search` with `sources` set to `places` / `projects` / `users`, or omitted for `any`. |
 | `rank` | enum, optional | `rank` | One of the 25 ranks. Only honoured on `type: "taxon"` — `/search` has no rank filter. |
-| `limit` | int 1–30, default 10 | `per_page` | |
+| `limit` | int 1–30, default 10 | `per_page` | Also applied in-process on every route: `/taxa/autocomplete` returns related taxa past its `per_page` (`q=monarch&per_page=1` returned 4, `per_page=3` returned 5, verified 2026-09-22), so the candidate list is sliced to `limit`. `totalCount` still reports upstream's `total_results`. |
 
 **Routing:** `type: "taxon"` → `GET /taxa/autocomplete?q=&rank=&per_page=` (returns `matched_term`, verified). Everything else → `GET /search?q=&sources=&per_page=` (returns `{ type, score, matches[], record }`; `type` values observed: `Taxon`, `Place`, `Project`, `User`).
 
 **Output:** `found` (boolean), `candidates[]`, `guidance` (optional).
 
-Each candidate: `kind` (`taxon` \| `place` \| `project` \| `user`), `id`, `name`, `common_name` (optional), `rank` (optional), `display_name` (optional, places), `slug` (optional, places and projects), `matched_term` (optional — `matched_term` on the autocomplete route, the first entry of `matches[]` on the search route), `score` (optional, search route only), `observations_count` (optional), `photo` (optional, projected). No `url`: none of these record kinds returns one, and the identifier is what the other tools consume.
+Each candidate: `kind` (`taxon` \| `place` \| `project` \| `user`), `id`, `name` (scientific name, place name, project title, or an observer's display name — falling back to the login when the observer set none), `login` (optional, users only — the record's `login`, the same value `inaturalist_get_leaderboard`'s `entries[].login` and an observation's `observer` carry, so a user candidate joins to both), `common_name` (optional), `rank` (optional), `display_name` (optional, places), `slug` (optional, places and projects), `matched_term` (optional — `matched_term` on the autocomplete route, the first entry of `matches[]` on the search route), `score` (optional, search route only), `observations_count` (optional), `photo` (optional, projected). No `url`: none of these record kinds returns one, and the identifier is what the other tools consume.
 
 **format():** `found` first as `{n} candidates` or `No match`, then one `## ` heading per candidate — `{common_name} ({name})` for taxa, `{display_name}` for places, `{name}` otherwise — carrying `kind`, `id`, `rank`, `slug`, `matched_term`, `score`, and `observations_count` on a single pipe-separated line, plus the photo block. On a miss, `guidance` renders as its own paragraph rather than the enrichment trailer, because it is the primary result.
 
@@ -349,7 +354,8 @@ Search-route records are 11.8 KB (Taxon) to 15.5 KB (Project) each and are proje
 |:--|:--|
 | Taxon route, zero candidates | `No taxon name starts with that text — the taxon search matches a name prefix, not words inside a name. Try the scientific name, a shorter prefix, or drop the rank filter.` |
 | Taxon route, zero candidates, `rank` was set | `No taxon of that rank starts with that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.` |
-| Search route, zero candidates | `No place, project, or observer matched that text. Try fewer words, or set type to any to search every record kind at once.` |
+| Search route (`place` / `project` / `user`), zero candidates | `No place, project, or observer matched that text. Try fewer words, or set type to any to search every record kind at once.` |
+| `type: "any"`, zero candidates | `Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling; for an organism, type taxon matches a name prefix.` |
 
 ### `inaturalist_search_observations`
 
@@ -360,16 +366,16 @@ The spine of the surface.
 | `place_id` | int ≥ 1, optional | `place_id` | From `inaturalist_find_places`. Non-numeric values 500 upstream, so the schema enforces the integer. |
 | `lat` | number −90…90, optional | `lat` | Requires `lng` and `radius`. |
 | `lng` | number −180…180, optional | `lng` | Requires `lat` and `radius`. |
-| `radius` | number 0…500, optional | `radius` | **Kilometres**. The spec names no numeric bound; live probes on 2026-09-19 confirmed 500 km and 1,000 km both return correctly scoped, non-global results (only a radius approaching the antipodal maximum, ~20,000 km, degenerates toward a global search — by circle geometry, not upstream clamping). 500 is a generous, verified ceiling, not an upstream-enforced one. Requires `lat` and `lng`. |
-| `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four or none. |
+| `radius` | number ≤ 500, optional | `radius` | **Kilometres**, greater than 0 — a zero or negative radius fails as `invalid_geography` before the request (upstream answers `radius=0` with HTTP 500). The spec names no numeric bound; live probes on 2026-09-19 confirmed 500 km and 1,000 km both return correctly scoped, non-global results (only a radius approaching the antipodal maximum, ~20,000 km, degenerates toward a global search — by circle geometry, not upstream clamping). 500 is a generous, verified ceiling, not an upstream-enforced one. Requires `lat` and `lng`. |
+| `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four or none. `nelat` must be at or north of `swlat`; `nelng` west of `swlng` is an antimeridian-crossing box and is accepted. |
 | `taxon_id` | int ≥ 1, optional | `taxon_id` | Matches the taxon and its descendants. |
-| `d1` / `d2` | string `YYYY-MM-DD`, optional | `d1` / `d2` | Observed on or after / on or before. A malformed value drops the filter upstream, so the regex is enforced. |
+| `d1` / `d2` | string `YYYY-MM-DD`, optional | `d1` / `d2` | Observed on or after / on or before. A malformed or calendar-invalid value drops the filter upstream, so both the pattern and calendar validity are enforced in the schema; `d1` after `d2` fails as `inverted_date_range`. |
 | `quality_grade` | enum array, default `["research"]` | `quality_grade` | Joined with commas. Widening to `needs_id` roughly doubles the corpus and lowers identification confidence. |
 | `captive` | boolean, default `false` | `captive` | `false` excludes zoo animals and garden plantings. |
 | `term_id` | int array, optional | `term_id` | Annotation attribute ids from `inaturalist_list_reference`. |
 | `term_value_id` | int array, optional | `term_value_id` | Requires `term_id`; ignored upstream on its own. |
 | `iconic_taxa` | enum array, optional | `iconic_taxa` | The 14 spec values. |
-| `hrank` / `lrank` | enum, optional | `hrank` / `lrank` | Highest / lowest taxonomic rank of the identification. |
+| `hrank` / `lrank` | enum, optional | `hrank` / `lrank` | Highest (coarsest) / lowest (finest) taxonomic rank of the identification. Compared by rank level, as upstream does; an `hrank` below `lrank`'s level fails as `inverted_rank_range`. |
 | `csi` | enum array, optional | `csi` | `LC, NT, VU, EN, CR, EW, EX`. |
 | `threatened` / `native` / `introduced` / `endemic` | boolean, optional | same | Taxon status relative to the observation's location. |
 | `licensed` | boolean, optional | `licensed` | The observation's own licence is not null. |
@@ -391,7 +397,9 @@ The spine of the surface.
 
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
-| `invalid_geography` | `ValidationError` | An area was given partially or in two forms at once. | `Pass lat, lng and radius together, or all four of nelat, nelng, swlat and swlng, or a single place_id from inaturalist_find_places.` |
+| `invalid_geography` | `ValidationError` | An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat. | `Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.` |
+| `inverted_date_range` | `ValidationError` | `d1` is after `d2`. | `Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.` |
+| `inverted_rank_range` | `ValidationError` | `hrank` is a finer rank than `lrank`. | `Set hrank to the coarser rank and lrank to the finer one, or pass the same rank to both for an exact-rank match; list the ranks with inaturalist_list_reference topic ranks.` |
 | `result_window_exceeded` | `ValidationError` | `page × per_page` would exceed the upstream 10,000-result window. | `Continue past 10,000 results by passing cursor set to next_cursor from the previous page instead of raising page.` |
 | `conflicting_pagination` | `ValidationError` | Both `page` and `cursor` were supplied. | `Pass page alone to walk the first 10,000 results, or cursor alone to continue past that window.` |
 | `unpaired_annotation_value` | `ValidationError` | `term_value_id` without `term_id`. | `Pass term_id alongside term_value_id; list the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.` |
@@ -406,10 +414,12 @@ The spine of the surface.
 |:--|:--|
 | Default `quality_grade` still in force | `Only research-grade records were searched. Add "needs_id" to quality_grade to include sightings whose identification is not yet community-confirmed.` |
 | Default `captive: false` still in force | `Captive and cultivated records were excluded. Set captive to true to include zoo animals and garden plantings.` |
-| A date range was given | `No sightings fall in {d1}…{d2}. Widen the range, or call inaturalist_get_histogram to see which months this taxon is recorded in here.` |
-| An annotation filter was given | `No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.` |
+| A date range was given | `No sightings fall in {d1}…{d2}. Widen the range, or call inaturalist_get_histogram with the same filters to see which months have records.` |
+| An annotation filter was given | `No sightings carry that annotation. Check the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.` With `taxon_id` set: `…Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.` |
 | A radius was given | `No sightings within {radius} km of that point. Raise radius, or search a named area with a place_id from inaturalist_find_places.` |
-| Nothing else applies | `No sightings matched. Relax one filter at a time — taxon_id and the date range are the usual culprits.` |
+| Nothing else applies | `No sightings matched. Relax one filter at a time.` With `taxon_id` set, it adds `Confirm taxon_id with inaturalist_resolve_name, or drop it.` |
+
+No fragment names a filter the call did not supply.
 
 **Truncation:** `truncated: false` with `shown` and `cap` on every other path; when the page fills `per_page`, `ctx.enrich.truncated({ shown, cap, guidance })` with the guidance naming `next_cursor`.
 
@@ -454,11 +464,11 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 
 **format():** `total_results` as a header line, then a numbered list ranked by `observation_count` — `{n}. **{common_name}** (*{name}*) — {observation_count} observations · {rank} · {iconic_taxon_name} · taxon_id {taxon_id}` — with the photo block indented under each entry.
 
-**Errors:** `invalid_geography`, `unpaired_annotation_value`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
+**Errors:** `invalid_geography`, `inverted_date_range`, `unpaired_annotation_value`, `unknown_taxon_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
 
 **Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
-**Zero-hit notice:** `No species recorded for that area and period. Widen the date range or the area, or set quality_grade to include "needs_id".`
+**Zero-hit notice:** `No species recorded for those filters.`, followed by one remedy per narrowing filter the call actually supplied, in this order: `widen or drop d1/d2`, `widen the area`, `drop taxon_id or confirm it with inaturalist_resolve_name`, and `set quality_grade to include "needs_id"` unless it already does. With `place_id` and `taxon_id` under the default quality grade: `No species recorded for those filters. Widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".` `inaturalist_get_leaderboard` composes its notice the same way.
 
 ### `inaturalist_get_histogram`
 
@@ -476,13 +486,13 @@ Partial success is the norm: ids that resolve come back in `observations`, the r
 
 **format():** a header line naming `interval` and `total`, then a two-column markdown table of `key` and `count` — small enough at every interval other than `day`/`hour` over a wide range (12 rows for `month_of_year`, 53 for `week_of_year`) to render whole.
 
-**Errors:** `invalid_geography`, `unknown_taxon_id` — same strings.
+**Errors:** `invalid_geography`, `inverted_date_range`, `unknown_taxon_id` — same strings.
 
 **Enrichment:** `applied_filters`, `truncated`/`shown`/`cap` (required, written on every path — the same unconditional-disclosure pattern as the other list tools), `notice`.
 
 **Bucket cap:** `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 bytes against the design's 50,000-byte advertised maximum for a list tool. Capped at 800 buckets, the first in upstream key order — a bucket costs at most ~58 bytes combined across `structuredContent` and its rendered markdown row (a 10-char day key, a JSON entry, and a `| key | count |` row up to a 5-digit count), so a full 800-bucket response lands near 46,800 bytes worst case. `ctx.enrich.truncated()` fires when upstream returned more than 800, with guidance to narrow `d1`/`d2` or choose a coarser interval; `total` still sums every bucket upstream returned, not just the shown 800, so the figure stays accurate even when the array is cut.
 
-**Zero-hit notice** (every bucket zero, computed over the full unclipped set): `Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.` This wins over the truncation guidance (last-wins) when the answer is genuinely zero everywhere, since narrowing the range would not help in that case.
+**Zero-hit notice** (every bucket zero, computed over the full unclipped set), composed from the call rather than fixed: with `taxon_id` set and no date range it reads `Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.` The taxon wording is dropped when `taxon_id` was omitted (`nothing is recorded in that area. Widen the area, or relax quality_grade or captive.`); when `d1` or `d2` was set, the range is named as the likeliest cause (`no records of this taxon in that area fall in {d1}…{d2}. Widen or drop d1/d2.`, with `any start`/`any end` for an open bound); and the area clauses drop when no area was given. It replaces the truncation guidance when the answer is genuinely zero everywhere, since narrowing the range would not help — the notice is written once, as the truncation guidance itself on a capped response.
 
 ### `inaturalist_get_taxon`
 
@@ -534,11 +544,11 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 **format():** a header line naming the queried `taxon_id` and how many look-alikes were found, then a numbered list ranked by `misidentification_count` — `{n}. **{common_name}** (*{name}*) — corrected {misidentification_count} times · {rank} · {observations_count} observations · taxon_id {taxon_id}` — with the photo block under each entry, since a look-alike without a picture is not much use in the field.
 
-**Errors:** `unknown_taxon_id`, `invalid_geography` — same strings.
+**Errors:** `unknown_taxon_id`, `invalid_geography`, `inverted_date_range` — same strings.
 
 **Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when `limit` cut the list.
 
-**Zero-hit notice:** `No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.`
+**Zero-hit notice:** with an area given, `No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.` A `d1`/`d2` range is named the same way (`the d1/d2 range`, or both as `the area filter and the d1/d2 range are too narrow. Re-run without them…`); with neither, the notice is `No look-alikes are recorded for this taxon — it is rarely misidentified.`
 
 ### `inaturalist_find_places`
 
@@ -546,9 +556,9 @@ Two arms, one of which must be supplied.
 
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
-| `q` | string 1–100, optional | `q` | Routes to `/places/autocomplete`. Name-prefix match. |
-| `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four together. Routes to `/places/nearby`, where the spec marks all four required. |
-| `per_page` | int 1–30, default 10 | `per_page` | Honoured on the nearby arm only — `/places/autocomplete` publishes no `per_page` and returned a fixed page of 10 out of 45 matches. |
+| `q` | string 1–100, optional | `q` | Routes to `/places/autocomplete`. Name-prefix match. A blank string reads as unset, so a form client submitting an untouched `q` alongside a box reaches the nearby arm. |
+| `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four together. Routes to `/places/nearby`, where the spec marks all four required. `nelat` south of `swlat` answers HTTP 500 there, so it fails as `invalid_geography` first; `nelng` west of `swlng` (antimeridian) is accepted. |
+| `per_page` | int 1–30, default 10 | `per_page` | Honoured on the nearby arm only, where it bounds `standard` and `community` independently — verified 2026-09-22, `per_page=5` over central Seattle returned 4 + 5, `per_page=3` 3 + 3. `/places/autocomplete` publishes no `per_page` and returned a fixed page of 10 out of 45 matches. |
 
 **Output:** `places[]` for the autocomplete arm; `standard[]` and `community[]` for the nearby arm, which returns `results` as an object with those two keys. Each place: `id`, `name`, `display_name`, `place_type` (int \| null), `admin_level` (int \| null), `bbox` (`{ swlat, swlng, nelat, nelng }`), `ancestor_place_ids`, `location` (`{ lat, lng }`), `slug`. No `url` — the place record carries a `slug` but no URL of its own, and none is constructed.
 
@@ -560,9 +570,9 @@ Two arms, one of which must be supplied.
 
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
-| `invalid_geography` | `ValidationError` | Neither `q` nor a complete bbox was given, or both were. | `Pass q to search place names, or all four of nelat, nelng, swlat and swlng to list the places covering a map area.` |
+| `invalid_geography` | `ValidationError` | Neither `q` nor a complete bbox was given, both were, or the box has `nelat` south of `swlat`. | `Pass q to search place names, or all four of nelat, nelng, swlat and swlng, with nelat at or north of swlat, to list the places covering a map area.` |
 
-**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps. `cap` means different things per arm: `per_page` on the nearby arm, the fixed page upstream served on the autocomplete arm, which publishes no page size to report.
+**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps. `cap` means different things per arm: `per_page × 2` on the nearby arm, since `per_page` bounds each list separately, and the fixed page upstream served on the autocomplete arm, which publishes no page size to report. On the nearby arm `truncated` fires only when the standard or community list reached `per_page` — the list that may have been cut — and the guidance names which; at `per_page` 30 it points at shrinking the box instead. `totalCount` there is upstream's `total_results`, which always equals the places returned, so it is bounded by the page size rather than a full count; on the autocomplete arm it is the full match count.
 
 **Zero-hit notice:** `No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.`
 
@@ -592,13 +602,14 @@ Top species for an area is not a `kind` here; `inaturalist_get_species_counts` a
 
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
-| `invalid_geography` | `ValidationError` | An area was given partially or in two forms at once. | Same string as `inaturalist_search_observations`. |
+| `invalid_geography` | `ValidationError` | An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat. | Same string as `inaturalist_search_observations`. |
+| `inverted_date_range` | `ValidationError` | `d1` is after `d2`. | Same string as `inaturalist_search_observations`. |
 | `unknown_taxon_id` | `ValidationError` | Upstream answered 422 `Unknown taxon_id`. | Same string as `inaturalist_search_observations`. (`thrownBy: 'service'`) |
 | `leaderboard_window_exceeded` | `ValidationError` | `page × per_page` would exceed 500. | `This leaderboard only ranks the top 500 entries; page and per_page must multiply to 500 or less. Narrow the area, date range, or taxon_id to bring a specific user's rank into the top 500 instead.` |
 
 **Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response. `total_results` is not duplicated into enrichment — it already rides `output`.
 
-**Zero-hit notice:** `Nobody has recorded observations matching those filters. Widen the date range or the area, or drop taxon_id.`
+**Zero-hit notice:** `Nobody has recorded observations matching those filters.` (`Nobody has made identifications…` for `kind: "identifiers"`), followed by the remedies for the filters the call supplied, composed as on `inaturalist_get_species_counts` — `taxon_id`, the date range, and the area are named only when given.
 
 ---
 
@@ -797,6 +808,9 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **The server never sends an `Authorization` header.** | The spec marks an optional api-token on the two observation paths whose only effect is unlocking coordinates hidden from the public. Obscured localities are a protection for threatened taxa, and a read-only public relay has no business seeking around it. |
 | **Every parameter is sent from a per-endpoint allowlist.** | An unknown parameter name returns HTTP 200 and the entire 387M-record index. Without an allowlist, one typo anywhere in the service turns a scoped query into a global one with no signal at any layer. |
 | **A malformed date is rejected rather than sent.** | `d1=notadate` returned the unfiltered place total — upstream drops the filter entirely. A result set that looks fine and silently ignores the date range is worse than a rejection the agent can fix. |
+| **A calendar-invalid date is rejected at the schema, beside the pattern.** | `2026-02-30` drops the bound upstream exactly as `notadate` does, so it fails at the same layer with the same `invalid_arguments` envelope. A refinement rather than `z.iso.date()` keeps the advertised JSON Schema pattern unchanged. |
+| **Inverted ordered pairs and 500-answering areas are rejected in the handler, with typed reasons.** | `d1` after `d2` and an inverted `hrank`/`lrank` answer 200 with zero results; `radius=0` and `nelat` south of `swlat` answer 500 and burn four retries. Cross-field or recoverable, they fail as `inverted_date_range`, `inverted_rank_range`, and `invalid_geography` so the caller gets a recovery hint a schema rejection cannot carry. |
+| **`hrank`/`lrank` compare rank levels, not enum position.** | Upstream serves `hrank=hybrid&lrank=species` and `hrank=variety&lrank=subspecies` in full, because those ranks share a level; an index comparison would reject valid bands. |
 | **`term_value_id` requires `term_id`, enforced in-process.** | Sent alone it is silently ignored and the caller gets the unfiltered corpus back believing it was annotation-filtered. |
 | **Pacing and the concurrency cap are two knobs, not one.** | Probed call durations ranged from 9 ms to 3.2 s. A single serial lane would fall far below the target rate whenever a slow call landed; start spacing bounds the sustained rate, the in-flight cap bounds the burst. |
 | **A per-UTC-day request budget, failing loudly at exhaustion.** | The published ask is under 10,000 requests a day per IP, and a hosted deployment shares one egress IP across every tenant. Degrading silently at the ceiling would look like an upstream outage; a typed failure names the actual constraint. |
