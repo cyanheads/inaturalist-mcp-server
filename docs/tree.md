@@ -1,6 +1,6 @@
 # inaturalist-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 04:27:36
+Generated on: 2026-09-22 18:57:18
 
 ```text
 inaturalist-mcp-server/
@@ -165,6 +165,7 @@ inaturalist-mcp-server/
 │   ├── config/
 │   │   └── server-config.test.ts
 │   ├── helpers/
+│   │   ├── failing-upstream.ts
 │   │   ├── fake-inaturalist-service.ts
 │   │   └── fixtures.ts
 │   ├── mcp-server/
