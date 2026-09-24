@@ -121,9 +121,9 @@ The default record for `inaturalist_search_observations`. Every field name below
 | `photo_count` | number | `photos.length` | So an agent knows `include: ["photos"]` is worth spending. |
 | `sound_count` | number | `sounds.length` | |
 | `observer` | string | `user.login` | The `user` object carries 22 keys including a real name; only `login` is relayed. |
-| `identifications_count` | number | `identifications_count` | |
-| `agreements` | number | `num_identification_agreements` | |
-| `disagreements` | number | `num_identification_disagreements` | |
+| `identifications_count` | number | `identifications_count` | Upstream's tally of identifications currently agreeing or disagreeing with the community taxon — equal to `agreements + disagreements` on every one of 270 sampled records. **Not the thread size**: it leaves out the observer's own identification and any that neither agrees nor disagrees (a coarser guess, a withdrawn one) — 116370592 has 14 identifications from 14 non-owners and `identifications_count: 6`, the six made at the community taxon itself. The thread size is `identifications_total` on `inaturalist_get_observation`. |
+| `agreements` | number | `num_identification_agreements` | Identifications currently at the community taxon, the observer's own excluded (402402822: the observer's matching identification plus one other, `agreements: 1`). |
+| `disagreements` | number | `num_identification_disagreements` | Identifications currently disagreeing with the community taxon. |
 | `community_taxon_id` | number \| null | `community_taxon_id` | The consensus taxon; differs from `taxon.id` while a thread is contested. |
 
 Roughly 450 bytes per record against ~16 KB raw. A 20-record page lands near 9 KB instead of 320 KB.
@@ -141,8 +141,8 @@ Dropped outright: `non_owner_ids` (duplicate of `identifications`), `place_ids` 
 | `photos` | `photos[]` | `{ square_url, medium_url, attribution, license_code, open }` per photo. |
 | `annotations` | `annotations[]` | `{ attribute, value, attribute_id, value_id, by }` — decoded, see Annotations. |
 | `sounds` | `sounds[]` | `{ url, attribution, license_code }`. |
-| `identifications` | `identifications[]` | `{ id, taxon: {id,name,rank,common_name}, by, current, category, disagreement, from_vision, body, created_at }` from `{id, taxon, user.login, current, category, disagreement, vision, body, created_at}`. `category` is `improving` / `supporting` / `leading` / `maverick`. |
-| `comments` | `comments[]` | `{ id, by, body, created_at }`. |
+| `identifications` | `identifications[]`, `identifications_total`, `identifications_shown` | `{ id, taxon: {id,name,rank,common_name}, by, current, category, disagreement, from_vision, body, created_at }` from `{id, taxon, user.login, current, category, disagreement, vision, body, created_at}`. `category` is `improving` / `supporting` / `leading` / `maverick`. Capped per record on the by-id surfaces — see Response size budget: the by-id array cap. |
+| `comments` | `comments[]`, `comments_total`, `comments_shown` | `{ id, by, body, created_at }`. Capped the same way. |
 
 ### Photos
 
@@ -192,6 +192,29 @@ Measured live on 2026-09-19 against `place_id: 97394` (North America):
 
 Sizes are the whole `tools/call` reply. Nothing is lost at the lower caps: `page` and `cursor` reach the same records, and two leaderboard pages of 250 cover the whole 500-entry window those endpoints rank. `inaturalist_find_places` (max 30; ten places measured 6,752 bytes, so ~675 each) and `inaturalist_get_similar_species` (max 50, over look-alikes projected to roughly 250 bytes each) already sit inside both thresholds and are unchanged. `include: ["photos"]` on an observation search multiplies the per-record cost and is the caller's own call to make — the field's description says as much. `inaturalist_get_histogram` has no page/default split — it is a single response, so the cap targets the 50,000-byte advertised maximum directly rather than the smaller default; the first 800 buckets in upstream key order are kept, `total` still sums every bucket upstream returned, and the `truncated`/`shown`/`cap` enrichment discloses the cut the way every other list tool does.
 
+### Response size budget: the by-id array cap
+
+`inaturalist_get_observation` and the `inaturalist://observations/{observation_id}` resource take no page size, and three arrays are what grows: 5890862 carries 1,114 identifications, 1,377 comments, and 906 filled observation fields. Before any cap, one id measured 624,791 bytes with the default `include`, 1,147,654 bytes with `comments` added, and 504,204 bytes as a resource read. With only the threads capped, relaying the 906 fields whole still added 86–94 KB to each reply.
+
+**The rule.** `identifications[]`, `comments[]`, and `observation_fields[]` share one 40-entry budget across the records a call returns: each array on each record keeps its first `max(4, floor(40 / records returned))` entries — 40 for one id and for the resource, 20 for two, 4 for nine or ten. A repeated id is one record returned, although upstream answers it once per repetition. The thread arrays are cut before projection, so a 1,114-entry thread costs 40 projections; observation fields are counted after blank values are dropped, so the cap measures fields a reader could see. Each capped array carries its `_total` / `_shown` pair — the entries upstream holds against the entries kept — on every response, under-cap ones included: `identifications_*` and `comments_*` whenever the arm was included, `observation_fields_*` on every by-id record. On a cut, the tool writes one `notice` naming each cut id with the arrays it cut and the recovery: re-request a single id for the 40-entry view, or open the record's `url` for the full record. No tool wraps upstream `/identifications?observation_id=`, so the notice names none. The resource has no enrichment trailer; its counts are the disclosure. `agreements`, `disagreements`, and `community_taxon_id` still summarize the whole thread, and `description` — one string — is never cut.
+
+**Upstream order is not chronological.** It is stable across repeated reads and roughly ascending, but not sorted: on 5890862, 16 of 1,114 identifications and 386 of 1,377 comments are dated earlier than the entry before them (116370592: 2 of 14 and 1 of 12). The kept entries are the first in upstream order, which is what the headings and the notice say — never "the earliest".
+
+**Per-entry cost** across both surfaces of the reply, from a sample of 61 records: identifications mean 557 B, p90 591 B; comments mean 378 B, p90 603 B. On 5890862 the 40 kept identifications measured about 21,400 bytes, its 40 comments 12,053, and its 40 kept observation fields 3,301 (~83 B each).
+
+Measured live on 2026-09-23 with the cap on all three arrays, whole `tools/call` reply (or `resources/read` reply). The batch is 5890862, 106687320, 322939816, 66463326, 264619200, 3704154, 101960556, 189784392, 116370592, 402402822, returned in that order.
+
+| Call | Reply |
+|:--|--:|
+| 5890862, default `include` | 28,050 B |
+| 5890862, `identifications` + `comments` | 40,102 B |
+| 10-id batch, default `include` | 53,155 B |
+| 10-id batch, `identifications` + `comments` | 66,853 B |
+| `inaturalist://observations/5890862` | 25,336 B |
+| 402402822 (two-entry thread, no fields — the common case) | 3,836 B |
+
+A single id now stays under the 50,000-byte advertised maximum with both thread arms. The capped arrays hold near the budget at any batch size, but the budget bounds the arrays, not the records around them: the ten records' own fields add roughly 27 KB, so a ten-id batch lands past 50,000 bytes — 53,155 with the default `include`, 66,853 with comments.
+
 ### Places: geometry stripped to a bounding box
 
 Every place payload embeds `geometry_geojson`, and it dominates: `/places/nearby` returned 246,887 bytes of `standard` results for two places. Each record also carries `bounding_box_geojson`, a five-point polygon of ~196 bytes.
@@ -217,6 +240,7 @@ Every place response drops `geometry_geojson` and reduces `bounding_box_geojson`
 | Upstream free text — `wikipedia_summary`, identification and comment bodies, `place_guess`, tags, attributions — renders inside a `>` blockquote. | Every tool that surfaces it |
 | The text renders every record of the page. Volume is bounded by the caller through `per_page` and each tool's cap, so the text is never cut shorter than `structuredContent`; a cap that was reached is disclosed through `ctx.enrich.truncated`. | Tools with per-record arrays |
 | The enrichment trailer carries applied defaults, totals, notices, and truncation — never hand-authored into `format()`, since `ctx.enrich` already reaches both surfaces. | Every tool |
+| A field renders only when the response carries its key. A field a selection left out is omitted rather than shown as absent; null-case text (`no common name`, `not published`) is reserved for a value upstream genuinely left null. | Tools returning a slice of a record (`inaturalist_get_taxon` with `sections`) |
 
 ---
 
@@ -428,13 +452,20 @@ No fragment names a filter the call did not supply.
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
 | `observation_id` | int array, 1–10, required | path `id` | Comma-joined into one request. Verified: three ids, one bogus, returned `total_results: 2` with the bogus id omitted. |
-| `include` | enum array, default `["identifications"]` | — | `identifications` \| `comments` \| `photos` \| `annotations` \| `sounds`. |
+| `include` | enum array, default `["identifications"]` | — | `identifications` \| `comments` \| `photos` \| `annotations` \| `sounds`. The two thread arms share the batch's 40-entry budget; the `.describe()` states the rule and names `identifications_total`. |
 
-**Output:** `observations[]` — the projected record plus, per `include`, the expansions above, plus `community_taxon` (`{ id, name, rank, common_name }` from the 1.2 KB embedded object) and `identification_disagreements_count`. `unresolved[]` — `{ observation_id }` for each requested id upstream did not return.
+**Output:** `observations[]` — in the requested order, unresolved ids left out in place, a repeated id once — the projected record plus, per `include`, the expansions above (with `identifications_total`/`_shown` and `comments_total`/`_shown` beside the capped thread arrays — see Response size budget: the by-id array cap), plus `community_taxon` (`{ id, name, rank, common_name }` from the 1.2 KB embedded object), `identification_disagreements_count`, `description`, and `observation_fields` with `observation_fields_total`/`_shown`. `unresolved[]` — `{ observation_id }` for each requested id upstream did not return.
 
-`non_owner_ids` (14,925 bytes on the probed record, a near-duplicate of `identifications`) is dropped.
+Upstream answers `/observations/{ids}` sorted by id as a string — requesting 5890862, 106687320, 322939816, … returned 101960556, 106687320, 116370592, … — so `getObservations()` puts the records back in the requested order before they leave the service.
 
-**format():** the same per-observation block as `inaturalist_search_observations`, plus a `**Community consensus:**` line from `community_taxon` and `identification_disagreements_count`, and an `### Identification thread` list rendering each identification as `{by} → {taxon.common_name} ({taxon.name}) — {category}{, disagreement}{, from image classifier}` with the body as a blockquote beneath. `unresolved` renders as a closing `**Unresolved ids:**` list.
+| Detail field | Type | Maps to | Notes |
+|:--|:--|:--|:--|
+| `description` | string \| null | `description` | The observer's own note — host plant, behaviour, habitat, count ("caterpillar on narrow-leaf milkweed along fisherman's access rd" on 402402822). Third-party free text. 23% of 272 sampled observations carry one. |
+| `observation_fields` | `{ name: string \| null, value: string }[]` | `ofvs[].name`, `ofvs[].value` | Observation-field values filled in on the record, usually by a project. An entry whose `value` is blank or whitespace is dropped; every other value is relayed verbatim, the string `"null"` included. 10% of sampled observations carry any, and all values seen are strings. The tail is long — 5890862 carries 906 — so the list takes the same per-record share as the thread arrays, counted after blanks are dropped, with `observation_fields_total` / `observation_fields_shown` beside it. |
+
+`non_owner_ids` (14,925 bytes on the probed record, a near-duplicate of `identifications`) is dropped. `searchObservations()` never sets the detail arm, so a search record carries neither `description` nor `observation_fields`.
+
+**format():** the same per-observation block as `inaturalist_search_observations`, plus a `**Community consensus:**` line from `community_taxon` and `identification_disagreements_count`, the description as an `**Observer’s description:**` blockquote (the `place_guess` convention), `observation_fields` as a `### Observation fields` bullet list of `**{name}:** {value}` rendered inline (the `annotations` convention — values are short labels, not prose; a record with no filled fields renders no block, since the arm rides every by-id record and the common case should not grow a heading), and an `### Identification thread` list rendering each identification as `{by} → {taxon.common_name} ({taxon.name}) — {category}{, disagreement}{, from image classifier}` with the body as a blockquote beneath. Each capped block's heading carries its counts — `### Identification thread — 2 of 2 shown`, or `### Observation fields — first 40 of 906 shown, in upstream order` on a cut. `unresolved` renders as a closing `**Unresolved ids:**` list.
 
 **Errors:**
 
@@ -444,7 +475,7 @@ No fragment names a filter the call did not supply.
 
 Partial success is the norm: ids that resolve come back in `observations`, the rest in `unresolved`, and the call fails only when nothing resolved.
 
-**Enrichment:** `notice` when `unresolved` is non-empty — `{n} of {total} ids returned no observation; they may have been deleted or never existed.`
+**Enrichment:** one `notice`, composed from up to two segments and written once, since the notice is last-wins. When `unresolved` is non-empty: `{n} of {total} ids returned no observation; they may have been deleted or never existed.` When an array was cut: `Arrays cut to the first {cap} entries each, in upstream order: observation {id} — identifications {shown} of {total}, comments {shown} of {total}, observation_fields {shown} of {total}. Open the record's url for the full record.` — on a batch, `…in upstream order, to share the response across {n} records: …` and the recovery `Re-request a single id for up to 40 entries per array, or open a record's url for the full record.` Only the cut arrays are named.
 
 ### `inaturalist_get_species_counts`
 
@@ -518,7 +549,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 `listed_taxa` (26,462 B) is dropped; `listed_taxa_count` is kept. The taxon record publishes no canonical web URL for itself — `wikipedia_url` is the only link it carries, and no other link is constructed. Observations are the one record kind that returns a page URL of their own, on the `uri` key.
 
-**format():** the two arms render on field presence, independently — never by branching on `kind`, which would fail parity against the linter's all-fields sample. The full arm renders `## {common_name} ({name})` then the scalars as a pipe-separated line, then a `### ` block per section: taxonomy as a `Kingdom › Phylum › … › Species` rank path, children as a list, conservation as a table of `status`, `authority`, `iucn`, `place`, and `url`, photos as the standard photo block, and `encyclopedia` as a blockquote followed by `wikipedia_url`. The outline arm renders through `formatOutline()` from `@cyanheads/mcp-ts-core/utils`.
+**format():** the two arms render on field presence, independently — never by branching on `kind`, which would fail parity against the linter's all-fields sample. The full arm renders `## {common_name} ({name})` then the scalars as a pipe-separated line — each heading value and scalar only when the response carries its key, so a selection without `summary` (`sections: ["children"]`) reads `## Plantae` over `id 47126 · name Plantae · rank kingdom`, never `## no common name (Plantae)` over a row of `not published` — then a `### ` block per section: taxonomy as a `Kingdom › Phylum › … › Species` rank path, children as a list, conservation as a table of `status`, `authority`, `iucn`, `place`, and `url`, photos as the standard photo block, and `encyclopedia` as a blockquote followed by `wikipedia_url`. The outline arm renders through `formatOutline()` from `@cyanheads/mcp-ts-core/utils`.
 
 **Errors:**
 
@@ -533,7 +564,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
-| `taxon_id` | int ≥ 1, required | `taxon_id` | |
+| `taxon_id` | int ≥ 1, required | `taxon_id` | Genus or finer. Verified 2026-09-23 across the full lineage kingdom → subtribe (`rank_level` 70 down to 24): every rank coarser than genus answers HTTP 422 `{"error":"Taxon 3 is not genus or finer","status":422}`; genus (20) and species (10) succeed. The tool description and the `.describe()` state the floor. |
 | area params | as above | same | Verified to work: unscoped returned 24 look-alikes in 228,989 bytes; `place_id=46` returned 3 in 24,642 bytes. |
 | `d1` / `d2`, `quality_grade`, `captive` | as above | same | The endpoint accepts the full observation filter set. |
 | `limit` | int 1–50, default 20 | — | Applied in-process — the endpoint publishes no `page` or `per_page` parameter. |
@@ -544,7 +575,11 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 **format():** a header line naming the queried `taxon_id` and how many look-alikes were found, then a numbered list ranked by `misidentification_count` — `{n}. **{common_name}** (*{name}*) — corrected {misidentification_count} times · {rank} · {observations_count} observations · taxon_id {taxon_id}` — with the photo block under each entry, since a look-alike without a picture is not much use in the field.
 
-**Errors:** `unknown_taxon_id`, `invalid_geography`, `inverted_date_range` — same strings.
+**Errors:** `unknown_taxon_id`, `invalid_geography`, `inverted_date_range` — same strings — plus:
+
+| reason | code | when | recovery |
+|:--|:--|:--|:--|
+| `taxon_rank_too_coarse` | `ValidationError` | iNaturalist answered 422 because the taxon is coarser than genus, such as a family, order, or class. | `Pass a genus or species id: resolve a specific organism by name with inaturalist_resolve_name, or walk children with inaturalist_get_taxon down to a genus, which takes several calls from a class (order, family, subfamily, tribe, subtribe, genus).` (`thrownBy: 'service'`, not retryable) |
 
 **Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when `limit` cut the list.
 
@@ -619,7 +654,7 @@ Top species for an area is not a `kind` here; `inaturalist_get_species_counts` a
 |:--|:--|:--|
 | `name` | `inaturalist-taxon` | `inaturalist-observation` |
 | Params | `taxon_id` (positive integer) | `observation_id` (positive integer) |
-| Output | The projected taxon document, always the full arm — a resource read has no way to ask for sections, so the handler returns the projected document whatever its size. | The projected observation with `identifications` expanded. |
+| Output | The projected taxon document, always the full arm — a resource read has no way to ask for sections, so the handler returns the projected document whatever its size. | The projected observation with `identifications` expanded — its first 40 in upstream order, with `identifications_total` and `identifications_shown` as the cut's only disclosure, since a resource has no enrichment trailer — plus `description` and `observation_fields`, likewise its first 40 with `observation_fields_total` and `observation_fields_shown`. |
 | `mimeType` | `application/json` | `application/json` |
 | Cache hint | `{ ttlMs: 21_600_000, cacheScope: 'public' }` — matches the service's 6 h taxon TTL. | `{ ttlMs: 900_000, cacheScope: 'public' }` — an observation's thread accrues identifications. |
 | Miss | `notFound(...)` on an empty `results` array. | Same. |
@@ -650,7 +685,7 @@ One upstream, one base URL, one rate regime, one response envelope (`{ total_res
 | **Retry boundary** | `withRetry` wraps fetch-plus-parse, base delay 2,000 ms — the rate-limited/degraded band, not the ephemeral one. |
 | **HTTP** | `fetchWithTimeout` (15 s) with `ctx.signal`. No caller-supplied URLs ever reach it; every URL is built from the allowlist against the fixed base. |
 | **Not-found mapping** | Upstream signals a missing by-id record as HTTP 200 with `results: []`, never 404. The service returns `null` for that case so each tool takes its own `not_found` path. |
-| **422 mapping** | `{"error":"Unknown taxon_id N","status":422}` is mapped to `data: { reason: 'unknown_taxon_id' }` so the tool contract's reason reaches the wire. `/taxa/abc`'s bare `{"error":"Error","status":422}` never occurs, because the schema rejects the non-integer first. |
+| **422 mapping** | `mapUpstreamError()` matches the body. `{"error":"Unknown taxon_id N","status":422}` is mapped to `data: { reason: 'unknown_taxon_id' }`, and `{"error":"Taxon N is not genus or finer","status":422}` from `/identifications/similar_species` to `data: { reason: 'taxon_rank_too_coarse' }`, both `ValidationError`, not retryable, with the recovery from the calling tool's contract and no upstream path in `data` — so the tool contract's reason reaches the wire. `/taxa/abc`'s bare `{"error":"Error","status":422}` never occurs, because the schema rejects the non-integer first. |
 | **HTML guard** | A response body starting with `<!DOCTYPE html` or `<html` is thrown as a transient error rather than a serialization error — an edge or maintenance page is upstream degradation, not malformed data. |
 
 ### Cached surfaces
@@ -771,6 +806,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 - **Obscured coordinates cannot be resolved**, by design. A threatened-taxon record reports a locality with an accuracy radius in the tens of kilometres.
 - **A single oversized section stays oversized.** `selectSections` returns what the agent named; a taxon whose `conservation` section alone exceeds the outline budget comes back whole, because truncating a section the agent asked for by name is the failure the outline exists to prevent.
 - **The daily request counter is per process.** A restart resets it, and two processes behind one egress IP do not share it.
+- **A ten-id by-id batch can exceed the list budget.** The by-id array cap bounds the thread and observation-field arrays, not the records around them: the ten records' own fields add roughly 27 KB, so the heavy ten-id batch measured 53,155 bytes with the default `include` and 66,853 with comments, past the 50,000-byte advertised maximum. A single id stays under it. See Response size budget: the by-id array cap.
 - **Leaderboard endpoints cap at 500 total results, not the 10,000 window of `/observations`.** `/observations/observers` and `/observations/identifiers` return an empty result set once `page × per_page` exceeds 500, verified live, despite `total_results` reporting millions of candidates. `inaturalist_get_leaderboard` rejects the combination in-process rather than surfacing a false zero-hit.
 
 ---
@@ -778,7 +814,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 ## Out of Scope
 
 - **Computer vision.** The v1 spec publishes 86 paths and none of them is a `/computervision/*` endpoint; image scoring is not part of this API surface. The keyless proxy for classifier coverage is the taxon record's `vision` boolean, which `inaturalist_get_taxon` surfaces.
-- **Observation fields.** There is no `/observation_fields` path in v1. `/observation_field_values` exists but publishes only POST, PUT, and DELETE — writes.
+- **Observation fields.** There is no `/observation_fields` path in v1. `/observation_field_values` exists but publishes only POST, PUT, and DELETE — writes. This covers the write path only: the filled values already embedded in a record (`ofvs[]`) are relayed on the by-id surfaces as `observation_fields`.
 - **All writes.** No POST, PUT, or DELETE, on any path, under any configuration. Every registered tool and resource is `readOnlyHint: true`.
 - **Authenticated surfaces.** `/users/me`, messages, updates, and vote endpoints need a 24-hour token this server never obtains. It also never sends an `Authorization` header on the two observation paths where the spec marks one optional, so hidden coordinates stay hidden.
 
@@ -831,3 +867,9 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **The unknown-section rejection names a bounded sample of what it rejected.** | `sections` is an unbounded array of unbounded strings, and naming every unknown entry let one call inflate its own failure message to 106 KB — mirrored into `content[]` and `structuredContent.error` alike, straight into the agent's context. Three names, 40 characters each, plus a count of the rest is all a caller needs to find the typo, and the valid section list follows it regardless. The bound sits in the handler rather than on the schema so the typed `unknown_section` contract and its recovery hint still fire; a `maxItems` on the input would pre-empt them with a framework `invalid_arguments` rejection instead. |
 | **`inaturalist_get_histogram` caps `buckets[]` at 800, kept from the start of upstream key order.** | `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 bytes, past the design's 50,000-byte advertised maximum for a list tool. A bucket costs at most ~58 bytes combined across `structuredContent` and its rendered markdown row, so 800 lands near 46,800 bytes worst case — under budget with headroom. `total` still sums every bucket upstream returned, including any past the cap, so the one number that costs nothing to keep accurate stays accurate; only the array is cut, disclosed through the same `truncated`/`shown`/`cap` enrichment every other list tool declares. |
 | **`cursor` on `inaturalist_search_observations` is validated against `^[1-9]\d*$`, the same way `place_id` enforces an integer.** | `cursor` is forwarded verbatim as upstream `id_below`, and the server's own `next_cursor` is always a decimal observation id — a caller-supplied non-numeric value 500s upstream, which the service maps to an upstream-unavailable error and retries against a fault that a schema rejection would have caught for free. `blankAsUnset` still runs first, so a form client's blank cursor is unset rather than rejected. |
+| **The by-id arrays — identifications, comments, and filled observation fields — share one 40-entry budget across the batch: `max(4, floor(40 / records returned))` per array per record, first entries in upstream order.** | One heavily discussed id measured 624,791 bytes uncapped, and a per-record cap alone would let ten such records multiply it. Sharing the budget brings 5890862 alone to 28,050 B with the default `include` and 40,102 B with comments; ten ids measured 53,155 and 66,853 B, the extra being the ten records' own fields. Totals and shown counts ride every record, so an under-cap array reads as whole rather than as unknown, and one composed notice names each cut id and array with the two recoveries — a single-id re-call or the record's `url` — since no tool pages them. Upstream order is kept rather than re-sorted; it is stable but not chronological, and the surfaces say "in upstream order", never "earliest". |
+| **`identifications_count` is described as upstream's agree-plus-disagree tally, and no thread-size field was added beside it.** | It equalled `agreements + disagreements` on all 270 sampled records and leaves out the observer's own and any non-committal identification, so describing it as the thread size misled by up to 8 of 14 entries. The thread size already rides `identifications_total` wherever the thread is included. |
+| **The observer's `description` and non-blank `observation_fields` are relayed on the by-id detail arm only.** | The description is often the most useful field on a sighting (host plant, behaviour, habitat) and was being dropped. Search never carries them: a 25-record page would pay for 25 notes nobody asked for. Blank values are dropped because an empty project field tells a reader nothing; every other value is relayed verbatim, the string `"null"` included. The fields take the thread arrays' per-record share, counted after blanks are dropped, because the tail is long: 5890862 carries 906, which relayed whole added 86–94 KB to every reply that included it. `description` is one string and stays whole. |
+| **A batch comes back in the requested order.** | Upstream answers `/observations/{ids}` sorted by id as a string, so a caller pairing the reply with its own `observation_id` array matched the wrong records. The service reorders to the requested ids, leaving unresolved ids out in place and a repeated id once; the order is stated on `observations`. |
+| **A rank coarser than genus fails as a typed `taxon_rank_too_coarse`, matched on the 422 body like `unknown_taxon_id`.** | Upstream refuses every rank above genus with the same 422, and surfaced untyped it read as a generic upstream fault with no recovery. The recovery names both routes to a genus — resolving a specific organism by name, or walking `children` down from the coarse taxon — and says the walk takes several calls, so the caller can pick the cheaper one. |
+| **`inaturalist_get_taxon` renders a heading value or scalar only when the response carries its key.** | A `sections` selection without `summary` omits those keys from `structuredContent`, and rendering them with null-case text told a `content[]` reader that Plantae has no common name, no observations, and no vision coverage — all false. Null-case text stays for a value upstream genuinely left null. |

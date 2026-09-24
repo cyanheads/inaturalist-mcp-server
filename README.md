@@ -45,7 +45,7 @@ Composes with servers covering institutional specimen records, botanical nomencl
 | `inaturalist_get_species_counts` | Rank the distinct species recorded in an area and period, most-observed first |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in |
 | `inaturalist_get_leaderboard` | Rank the most active observers or identifiers for an area, period, and taxon |
-| `inaturalist_get_similar_species` | List the taxa a taxon is most often misidentified as, ranked by how many times identifiers made the correction |
+| `inaturalist_get_similar_species` | List the taxa a genus-or-finer taxon is most often misidentified as, ranked by how many times identifiers made the correction |
 | `inaturalist_get_taxon` | Fetch a taxon profile — taxonomic path, conservation listings by authority, encyclopedia summary, photos, and children |
 
 ### Resources
@@ -101,7 +101,10 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 - 1–10 ids per call, resolved in a single upstream request
 - `include` defaults to `["identifications"]`; `comments`, `photos`, `annotations`, and `sounds` are also available
 - Partial success: ids that resolve return in `observations`, the rest in `unresolved`; the call fails as `not_found` only when nothing resolved
-- Adds `community_taxon` and `identification_disagreements_count` on top of the projected search record
+- Adds `community_taxon`, `identification_disagreements_count`, the observer's `description`, and filled `observation_fields` on top of the projected search record
+- Records come back in the requested order, unresolved ids left out in place
+- `identifications`, `comments`, and the filled `observation_fields` share a 40-entry budget across the batch: each record keeps its first `max(4, floor(40 / records returned))` entries per array in upstream order — 40 for one id, 4 for ten — and reports `identifications_total`/`identifications_shown`, `comments_total`/`comments_shown`, and `observation_fields_total`/`observation_fields_shown`. A cut is named in the `notice`; request one id alone for the 40-entry view, or open the record's `url` for the full record. `description` is never cut
+- `identifications_count` is upstream's tally of identifications agreeing or disagreeing with the community taxon (`agreements + disagreements`), not the thread size — that is `identifications_total`
 
 ---
 
@@ -134,6 +137,7 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 ### `inaturalist_get_similar_species` <sub>tool</sub>
 
 - The taxa a `taxon_id` is most often corrected from, ranked by `misidentification_count` — the field-identification check before committing to a look-alike
+- `taxon_id` must be a genus or finer; upstream keeps no confusion set for a family, order, or anything coarser, and the call fails as `taxon_rank_too_coarse`
 - An optional area, date range, `quality_grade`, and `captive` scope the confusion set to one region; omit them for the global set
 - `limit` 1–50 (default 20), applied in-process — the endpoint publishes no page size and returns its whole set
 
@@ -157,7 +161,7 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 
 ### `inaturalist://observations/{observation_id}` <sub>resource</sub>
 
-- One observation with its identification thread expanded, as `application/json`
+- One observation with its identification thread expanded, as `application/json` — the first 40 identifications and the first 40 filled observation fields in upstream order, each with its `_total` beside its `_shown`
 - `observation_id` comes from `inaturalist_search_observations`; cached for fifteen minutes, since a thread accrues identifications
 
 ## Features
