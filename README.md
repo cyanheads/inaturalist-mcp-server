@@ -40,9 +40,9 @@ Composes with servers covering institutional specimen records, botanical nomencl
 | `inaturalist_list_reference` | Decode the controlled vocabularies the other tools filter on — annotation attributes and values, quality grades, licences, ranks, iconic taxa, conservation-status codes |
 | `inaturalist_resolve_name` | Resolve a common or scientific name to a taxon id, or a place, project, or observer name to its id, as ranked candidates |
 | `inaturalist_find_places` | Resolve a place name to a place id, or list the places covering a map area, each with its bounding box and containment chain |
-| `inaturalist_search_observations` | Search georeferenced sightings by area, date, taxon, quality grade, annotation, and conservation status |
+| `inaturalist_search_observations` | Search georeferenced sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence |
 | `inaturalist_get_observation` | Fetch up to 10 observations by id with their community identification thread and consensus taxon |
-| `inaturalist_get_species_counts` | Rank the distinct species recorded in an area and period, most-observed first |
+| `inaturalist_get_species_counts` | Rank the distinct species recorded in an area and period, most-observed first — optionally for one observer or one project |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in |
 | `inaturalist_get_leaderboard` | Rank the most active observers or identifiers for an area, period, and taxon |
 | `inaturalist_get_similar_species` | List the taxa a genus-or-finer taxon is most often misidentified as, ranked by how many times identifiers made the correction |
@@ -62,7 +62,7 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 ### `inaturalist_list_reference` <sub>tool</sub>
 
 - `topic` selects one table: `controlled_terms`, `quality_grades`, `licenses`, `ranks`, `iconic_taxa`, `conservation_status_codes`; `source` reports whether it came from iNaturalist or the published spec
-- `taxon_id` applies only to `controlled_terms` and adds `observed_usage` — which annotation pairs identifiers have actually recorded for that taxon, with counts
+- `taxon_id` applies only to `controlled_terms` and adds `observed_usage` — which annotation pairs identifiers have actually recorded for that taxon, with counts. Each row carries `term_id` and `term_value_id`, ready to pass to the annotation filters; labels repeat across attributes ("Egg" is both a Life Stage and an Evidence of Presence value), so filter by the ids
 - Every other tool's recovery hint routes here: an unrecognised filter value is not rejected upstream, it silently returns nothing
 
 ---
@@ -88,10 +88,13 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 ### `inaturalist_search_observations` <sub>tool</sub>
 
 - An area is given in exactly one form — `place_id`, the `lat`+`lng`+`radius` triple in kilometres (0 < radius ≤ 500), or the four-corner bounding box with `nelat` at or north of `swlat`; partial, mixed, a zero radius, or an inverted box fails as `invalid_geography`
-- Filters: `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `licensed`/`photo_licensed`, and `q`+`search_on`
+- Filters: `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `user_id` or `user_login`, `project_id`, `licensed`/`photo_licensed`, `license`/`photo_license`, and `q`+`search_on`
+- `user_id`, `user_login`, and `project_id` come from `inaturalist_resolve_name` (a login also rides leaderboard entries and every observation's `observer`). Passing both observer forms fails as `conflicting_observer`; an unknown observer or project fails as `unknown_user` or `unknown_project_id`
+- `license` and `photo_license` take licence codes — `cc0`, `cc-by`, `cc-by-nc`, `cc-by-nd`, `cc-by-sa`, `cc-by-nc-nd`, `cc-by-nc-sa`, any case — joined as OR, so `["cc-by","cc0"]` finds sightings reusable with attribution only. `photo_license` matches a record with any photo under the code, independently of the record's own licence. `licensed`/`photo_licensed` only test for a non-null licence
 - Ordered pairs are checked before the request: `d1` after `d2` fails as `inverted_date_range` (on every tool that takes dates), and an `hrank` finer than `lrank` as `inverted_rank_range`. Equal pairs are valid
 - Defaults to `quality_grade: ["research"]` and `captive: false`, echoed back as `applied_filters` on every call
-- `per_page` 1–25 (default 10); `page` walks the first 10,000 results and `cursor` continues past it — passing both fails, and a cursor forces an id ordering, which is echoed
+- `per_page` 1–25 (default 10); `page` walks the first 10,000 results under any ordering. Past that, order by `id` descending and pass each page's `next_cursor` as `cursor` — `next_cursor` is issued only on an id-descending page, since no other ordering can be continued by id. Passing `page` and `cursor` together fails, and a cursor forces the id ordering, which is echoed
+- A page past the last one holding results says so and names that page, rather than suggesting wider filters
 - `include` expands `photos`, `annotations`, `sounds`. `identifications` and `comments` are deliberately absent — one thread measures 28 KB, so the thread lives on `inaturalist_get_observation`
 
 ---
@@ -111,8 +114,9 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 ### `inaturalist_get_species_counts` <sub>tool</sub>
 
 - Distinct species for an area and period, ranked by `observation_count` — the "what lives here" answer without paging through individual sightings
-- Same area forms and filters as the observation search; `taxon_id` narrows to a clade, such as the birds of a park
+- Same area forms and filters as the observation search; `taxon_id` narrows to a clade, such as the birds of a park, and `user_id`/`user_login` or `project_id` to one observer's or one project's species list
 - `per_page` 1–50 (default 25), `page` for offset — upstream would serve 500 in one page, and the cap is sized by response bytes instead
+- Each row carries `position`, its absolute place in the ranking counted from page 1, and the rendered list is numbered from it — page 3 at 3 per page reads 7, 8, 9. `rank` stays the taxonomic rank
 - `truncationCeiling` carries the last count shown; the ranking is descending, so nothing left off the page exceeds it
 
 ---
@@ -122,6 +126,7 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 - `interval`: `month_of_year` (default) and `week_of_year` fold every year into one seasonal curve; `year`, `month`, `week`, `day`, and `hour` bucket absolute dates, to which upstream applies its own default start date
 - `date_field`: `observed` (default) or `created`
 - `taxon_id` is optional — omit it to chart every taxon in the area
+- `term_id`+`term_value_id` chart one life stage or reproductive state, such as monarch larvae (Life Stage `1` = Larva `6`) or a plant in flower (Flowers and Fruits `12` = Flowers `13`); `iconic_taxa` narrows to broad groups. `term_value_id` without `term_id` fails as `unpaired_annotation_value`, and an all-zero curve names the annotation or group filter when one was set
 - Returns every bucket upstream produced in order, zeros included, plus their `total` — computed across every bucket upstream returned, even past the cap. `day`/`hour` over a wide date range can generate thousands of buckets, so the response is capped at 800, kept from the start of the range, with `truncated`/`shown`/`cap` disclosing the cut
 
 ---
@@ -173,13 +178,13 @@ iNaturalist-specific:
 - Keyless, read-only cover of the iNaturalist v1 API — observations, taxa, places, controlled terms, the similar-species graph, and the observer and identifier leaderboards
 - Every response is projected in-process. Upstream accepts and ignores its own `fields=` parameter, so a two-record observation search arrives at 95 KB, a full upstream page of 200 at 4.3 MB, and a common taxon record at 95 KB before anything is trimmed
 - Per-endpoint parameter allowlist — an unknown parameter name returns HTTP 200 and the entire global index, so nothing outside the allowlist is ever sent
-- In-process rejection of every input upstream would silently widen, narrow to zero, or fail on: a lone `lat`, an unparseable or impossible `d1` such as `2026-02-30`, `d1` after `d2`, a `term_value_id` without its `term_id`, a zero radius, a box with `nelat` south of `swlat`, a page past the result window
+- In-process rejection of every input upstream would silently widen, narrow to zero, or fail on: a lone `lat`, an unparseable or impossible `d1` such as `2026-02-30`, `d1` after `d2`, a `term_value_id` without its `term_id`, `user_id` with `user_login`, a licence code outside the seven, a zero radius, a box with `nelat` south of `swlat`, a page past the result window
 - Self-paced outbound traffic with a per-UTC-day request budget, since the API returns no rate-limit headers to react to
 
 Agent-friendly output:
 
 - Applied defaults echoed on every call — `quality_grade`, `captive`, and the ordering a cursor forced — so an agent can see the filters that shaped its answer
-- Zero-hit notices name the filter most likely responsible and the tool that decodes it, instead of an empty list
+- Zero-hit notices name the filter most likely responsible and the tool that decodes it, instead of an empty list; a page past the end names the last page holding results instead
 - Truncation disclosed unconditionally: `truncated`, `shown`, and `cap` on every path, plus a `truncationCeiling` where a descending ranking supports one
 - Upstream free text — encyclopedia summaries, identification and comment bodies, place guesses, photo attributions — renders inside a markdown blockquote, marking it as third-party content rather than instruction
 
@@ -208,7 +213,7 @@ Page-size maxima are sized by measured response bytes across `structuredContent`
 | `inaturalist_get_species_counts` | ~860 | 50 | 25 | 500 |
 | `inaturalist_get_leaderboard` | ~140 | 250 | 25 | 500 |
 
-Each default page fits the 24,000-byte budget a single document gets, and each full page fits 50,000. Nothing is unreachable at the lower caps — `page` and `cursor` reach the same records — so the smaller page costs one more call rather than any data.
+Each default page fits the 24,000-byte budget a single document gets, and each full page fits 50,000. Nothing is unreachable at the lower caps — `page` walks the first 10,000 records under any ordering, and an id-descending walk continues past that by `cursor` — so the smaller page costs one more call rather than any data.
 
 ## Known limitations
 
