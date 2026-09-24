@@ -450,12 +450,16 @@ export function projectControlledTerm(raw: RawControlledTerm): ControlledTerm {
 /**
  * Projects observed annotation usage for one taxon. The per-entry
  * `month_of_year` breakdown is dropped — the question this answers is which
- * annotations exist for a taxon, not when they were recorded.
+ * annotations exist for a taxon, not when they were recorded. The ids ride with
+ * the labels because labels repeat across attributes ("Egg" is a Life Stage and
+ * an Evidence of Presence value), and the pair is what the annotation filters take.
  */
 export function projectObservedUsage(raw: RawPopularFieldValue): ObservedUsage {
   return {
     attribute: raw.controlled_attribute?.label ?? null,
+    term_id: raw.controlled_attribute?.id ?? null,
     value: raw.controlled_value?.label ?? null,
+    term_value_id: raw.controlled_value?.id ?? null,
     count: raw.count ?? 0,
   };
 }
@@ -548,11 +552,15 @@ export function projectTaxonDocument(
   };
 }
 
-/** One ranked species row. The upstream `count` is observations of that taxon. */
-export function projectSpeciesCount(raw: RawTaxonCount): SpeciesCount | null {
+/**
+ * One ranked species row at its absolute `position` in the ranking. The
+ * upstream `count` is observations of that taxon.
+ */
+export function projectSpeciesCount(raw: RawTaxonCount, position: number): SpeciesCount | null {
   const record = projectTaxonRecord(raw.taxon);
   if (!record) return null;
   return {
+    position,
     taxon_id: record.id,
     name: record.name,
     common_name: record.common_name,

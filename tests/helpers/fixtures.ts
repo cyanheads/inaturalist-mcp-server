@@ -390,7 +390,14 @@ export function controlledTerm(overrides: Partial<ControlledTerm> = {}): Control
 }
 
 export function observedUsage(overrides: Partial<ObservedUsage> = {}): ObservedUsage {
-  return { attribute: 'Life Stage', value: 'Adult', count: 336_576, ...overrides };
+  return {
+    attribute: 'Life Stage',
+    term_id: 1,
+    value: 'Adult',
+    term_value_id: 2,
+    count: 336_576,
+    ...overrides,
+  };
 }
 
 // ─── Wave 2: taxon document, aggregates ────────────────────────────────────
@@ -467,6 +474,7 @@ export function rawHistogram(overrides: Partial<RawHistogram> = {}): RawHistogra
 
 export function speciesCount(overrides: Partial<SpeciesCount> = {}): SpeciesCount {
   return {
+    position: 1,
     taxon_id: 48662,
     name: 'Danaus plexippus',
     common_name: 'Monarch',

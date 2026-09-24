@@ -361,7 +361,9 @@ export type ControlledTerm = {
 
 export type ObservedUsage = {
   attribute: string | null;
+  term_id: number | null;
   value: string | null;
+  term_value_id: number | null;
   count: number;
 };
 
@@ -427,6 +429,8 @@ export type ProjectedTaxonDocument = {
 
 /** One ranked species row from `/observations/species_counts`. */
 export type SpeciesCount = {
+  /** Absolute place in the ranking, counted from page 1. */
+  position: number;
   taxon_id: number;
   name: string | null;
   common_name: string | null;

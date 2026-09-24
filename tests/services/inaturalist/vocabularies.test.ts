@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { STATIC_VOCABULARIES, toQualityGrade } from '@/services/inaturalist/vocabularies.js';
+import {
+  LICENSE_CODES,
+  STATIC_VOCABULARIES,
+  toQualityGrade,
+} from '@/services/inaturalist/vocabularies.js';
 
 describe('toQualityGrade', () => {
   it('passes through each documented grade unchanged', () => {
@@ -55,5 +59,16 @@ describe('STATIC_VOCABULARIES', () => {
   it('includes the null-license entry meaning all rights reserved', () => {
     const entry = STATIC_VOCABULARIES.licenses?.find((e) => e.code === 'null');
     expect(entry?.label).toBe('All rights reserved');
+  });
+});
+
+describe('LICENSE_CODES', () => {
+  it('is exactly the licenses topic codes minus null — the values the licence filters accept', () => {
+    const topicCodes = (STATIC_VOCABULARIES.licenses ?? [])
+      .map((entry) => entry.code)
+      .filter((code) => code !== 'null');
+
+    expect([...LICENSE_CODES].sort()).toEqual([...topicCodes].sort());
+    expect(LICENSE_CODES).toHaveLength(7);
   });
 });

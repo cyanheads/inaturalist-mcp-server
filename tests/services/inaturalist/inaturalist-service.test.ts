@@ -11,7 +11,9 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
+import { inaturalistGetSpeciesCounts } from '@/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
+import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
 import type { Endpoint, QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import { INaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import {
@@ -68,6 +70,43 @@ describe('parameter allowlist', () => {
       params: { q: 'monarch', per_page: 10 },
     });
     expect(url).toBe('https://api.inaturalist.org/v1/taxa/autocomplete?per_page=10&q=monarch');
+  });
+
+  it('allows the observer and project filters on observations and species_counts only', () => {
+    const service = newService();
+    const params = { user_id: 1, user_login: 'kueda', project_id: 227779 };
+    for (const endpoint of ['observations', 'observations/species_counts'] as const) {
+      expect(internals(service).buildUrl({ endpoint, params })).toContain(
+        '?project_id=227779&user_id=1&user_login=kueda',
+      );
+    }
+    for (const endpoint of [
+      'observations/histogram',
+      'observations/observers',
+      'observations/identifiers',
+      'identifications/similar_species',
+    ] as const) {
+      for (const key of Object.keys(params)) {
+        expect(() => internals(service).buildUrl({ endpoint, params: { [key]: 1 } })).toThrow(
+          McpError,
+        );
+      }
+    }
+  });
+
+  it('allows the licence-code filters on observations alone', () => {
+    const service = newService();
+    expect(
+      internals(service).buildUrl({
+        endpoint: 'observations',
+        params: { license: ['cc-by', 'cc0'], photo_license: ['cc0'] },
+      }),
+    ).toBe('https://api.inaturalist.org/v1/observations?license=cc-by%2Ccc0&photo_license=cc0');
+    for (const endpoint of ['observations/species_counts', 'observations/histogram'] as const) {
+      expect(() => internals(service).buildUrl({ endpoint, params: { license: ['cc0'] } })).toThrow(
+        McpError,
+      );
+    }
   });
 
   it('drops an undefined parameter and an empty array rather than sending them', () => {
@@ -425,6 +464,75 @@ describe('upstream error mapping', () => {
           },
         },
       );
+    } finally {
+      http.restore();
+    }
+  });
+
+  it.each([
+    ['an unknown user id', 'Unknown user_id 999999999'],
+    [
+      'an unknown login, which upstream also reports as user_id',
+      'Unknown user_id zz-no-such-login-xq9',
+    ],
+  ])('maps a 422 naming %s to unknown_user with the contract recovery', async (_label, body) => {
+    const http = createFetchMock([
+      {
+        match: /\/observations\/species_counts\?/,
+        respond: () => new Response(JSON.stringify({ error: body, status: 422 }), { status: 422 }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+
+      const error = await service
+        .getSpeciesCounts({ user_login: 'x', page: 1, per_page: 25 }, ctx)
+        .then(() => undefined)
+        .catch((err: unknown) => err);
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'unknown_user',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('inaturalist_resolve_name type user') },
+        },
+      });
+      expect((error as McpError).data).not.toHaveProperty('body');
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('maps a 422 "Unknown project_id" body to unknown_project_id with the contract recovery', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/observations\?/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Unknown project_id: [999999999]', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+
+      await expect(
+        service.searchObservations({ project_id: 999_999_999, per_page: 10 }, new Set(), ctx),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'unknown_project_id',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('inaturalist_resolve_name type project') },
+        },
+      });
+      expect(http.calls).toHaveLength(1);
     } finally {
       http.restore();
     }

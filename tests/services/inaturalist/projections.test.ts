@@ -665,15 +665,41 @@ describe('projectControlledTerm / projectObservedUsage', () => {
     });
   });
 
-  it('projects observed annotation usage from popular_field_values', () => {
+  it('projects observed annotation usage from popular_field_values, with the ids that feed term_id and term_value_id', () => {
     expect(projectObservedUsage(rawPopularFieldValue())).toEqual({
       attribute: 'Life Stage',
+      term_id: 1,
       value: 'Adult',
+      term_value_id: 2,
       count: 336_576,
     });
   });
 
-  it('defaults a missing count to zero rather than null', () => {
-    expect(projectObservedUsage({}).count).toBe(0);
+  it('keeps a repeated value label apart by its attribute and value ids', () => {
+    const lifeStageEgg = projectObservedUsage(
+      rawPopularFieldValue({
+        controlled_attribute: { id: 1, label: 'Life Stage' },
+        controlled_value: { id: 7, label: 'Egg' },
+      }),
+    );
+    const evidenceEgg = projectObservedUsage(
+      rawPopularFieldValue({
+        controlled_attribute: { id: 22, label: 'Evidence of Presence' },
+        controlled_value: { id: 30, label: 'Egg' },
+      }),
+    );
+
+    expect(lifeStageEgg).toMatchObject({ value: 'Egg', term_id: 1, term_value_id: 7 });
+    expect(evidenceEgg).toMatchObject({ value: 'Egg', term_id: 22, term_value_id: 30 });
+  });
+
+  it('defaults a missing count to zero and a missing id to null, never inventing one', () => {
+    expect(projectObservedUsage({})).toEqual({
+      attribute: null,
+      term_id: null,
+      value: null,
+      term_value_id: null,
+      count: 0,
+    });
   });
 });

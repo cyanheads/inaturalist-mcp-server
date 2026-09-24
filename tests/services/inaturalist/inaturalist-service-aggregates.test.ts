@@ -78,6 +78,87 @@ describe('getSpeciesCounts', () => {
       http.restore();
     }
   });
+
+  it('numbers rows absolutely from the page offset — page 3 at 3 per page is 7, 8, 9', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/observations\/species_counts/,
+        respond: () =>
+          Response.json({
+            total_results: 99_891,
+            results: [
+              rawTaxonCount({ count: 314_499 }),
+              rawTaxonCount({ count: 309_869 }),
+              rawTaxonCount({ count: 289_232 }),
+            ],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext();
+
+      const { species } = await service.getSpeciesCounts(
+        { place_id: 1, page: 3, per_page: 3 },
+        ctx,
+      );
+
+      expect(species.map((row) => row.position)).toEqual([7, 8, 9]);
+      // `rank` stays the taxonomic rank; the ranking position is its own field.
+      expect(species.every((row) => row.rank === 'species')).toBe(true);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('numbers page 1 from 1', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/observations\/species_counts/,
+        respond: () =>
+          Response.json({
+            total_results: 3,
+            results: [rawTaxonCount(), rawTaxonCount(), rawTaxonCount()],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { species } = await newService().getSpeciesCounts(
+        { page: 1, per_page: 25 },
+        createMockContext(),
+      );
+
+      expect(species.map((row) => row.position)).toEqual([1, 2, 3]);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('leaves a gap where a taxonless row was dropped, rather than renumbering the rest', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/observations\/species_counts/,
+        respond: () =>
+          Response.json({
+            total_results: 500,
+            results: [rawTaxonCount(), { count: 5, taxon: {} }, rawTaxonCount(), rawTaxonCount()],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { species } = await newService().getSpeciesCounts(
+        { page: 2, per_page: 4 },
+        createMockContext(),
+      );
+
+      expect(species.map((row) => row.position)).toEqual([5, 7, 8]);
+    } finally {
+      http.restore();
+    }
+  });
 });
 
 describe('getHistogram', () => {

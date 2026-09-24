@@ -224,28 +224,31 @@ describe('projectTaxonDocument', () => {
 });
 
 describe('projectSpeciesCount', () => {
-  it('projects a ranked species row from a { count, taxon } wrapper', () => {
-    expect(projectSpeciesCount(rawTaxonCount({ count: 4200 }))).toMatchObject({
+  it('projects a ranked species row from a { count, taxon } wrapper, with its absolute position', () => {
+    expect(projectSpeciesCount(rawTaxonCount({ count: 4200 }), 7)).toMatchObject({
+      position: 7,
       taxon_id: 48662,
       name: 'Danaus plexippus',
+      rank: 'species',
       observation_count: 4200,
     });
   });
 
   it('returns null when the wrapped taxon carries no numeric id', () => {
-    expect(projectSpeciesCount({ count: 1, taxon: null })).toBeNull();
-    expect(projectSpeciesCount({ count: 1, taxon: {} })).toBeNull();
+    expect(projectSpeciesCount({ count: 1, taxon: null }, 1)).toBeNull();
+    expect(projectSpeciesCount({ count: 1, taxon: {} }, 1)).toBeNull();
   });
 
   it('defaults observation_count to zero rather than null when count is absent', () => {
-    expect(projectSpeciesCount({ taxon: rawTaxon() })?.observation_count).toBe(0);
+    expect(projectSpeciesCount({ taxon: rawTaxon() }, 1)?.observation_count).toBe(0);
   });
 
   it('carries the photo only when the taxon has one', () => {
-    const withPhoto = projectSpeciesCount(rawTaxonCount());
+    const withPhoto = projectSpeciesCount(rawTaxonCount(), 1);
     expect(withPhoto?.photo).toBeDefined();
     const withoutPhoto = projectSpeciesCount(
       rawTaxonCount({ taxon: rawTaxon({ default_photo: null }) }),
+      1,
     );
     expect(withoutPhoto).not.toHaveProperty('photo');
   });

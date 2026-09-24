@@ -123,6 +123,9 @@ const OBSERVATION_FILTER_PARAMS = [
   'iconic_taxa',
 ] as const;
 
+/** Observer and project scoping, probed on `/observations` and `/observations/species_counts` only. */
+const OBSERVER_PROJECT_PARAMS = ['user_id', 'user_login', 'project_id'] as const;
+
 const LEADERBOARD_PARAMS = [
   ...AREA_PARAMS,
   'taxon_id',
@@ -149,6 +152,7 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
   observations: new Set([
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
+    ...OBSERVER_PROJECT_PARAMS,
     'hrank',
     'lrank',
     'csi',
@@ -158,6 +162,8 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     'endemic',
     'licensed',
     'photo_licensed',
+    'license',
+    'photo_license',
     'q',
     'search_on',
     'order_by',
@@ -169,6 +175,7 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
   'observations/species_counts': new Set([
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
+    ...OBSERVER_PROJECT_PARAMS,
     'page',
     'per_page',
   ]),
@@ -666,17 +673,23 @@ export class INaturalistService {
 
   // ─── Aggregates ─────────────────────────────────────────────────────────────
 
-  /** Distinct species in an area, pre-aggregated upstream and ranked by count. */
+  /**
+   * Distinct species in an area, pre-aggregated upstream and ranked by count.
+   * Positions are absolute, counted from the page offset against the raw row
+   * index — so a row dropped for carrying no taxon leaves a gap rather than
+   * renumbering the rows after it.
+   */
   async getSpeciesCounts(
-    params: QueryParams,
+    params: QueryParams & { page: number; per_page: number },
     ctx: Context,
   ): Promise<{ total: number; species: SpeciesCount[] }> {
     const payload = await this.request<INaturalistEnvelope<RawTaxonCount>>(
       { endpoint: 'observations/species_counts', params },
       ctx,
     );
+    const offset = (params.page - 1) * params.per_page;
     const species = (payload.results ?? [])
-      .map(projectSpeciesCount)
+      .map((raw, index) => projectSpeciesCount(raw, offset + index + 1))
       .filter((row): row is SpeciesCount => row !== null);
     return { total: payload.total_results ?? species.length, species };
   }
@@ -752,11 +765,13 @@ export class INaturalistService {
 }
 
 /**
- * Turns the upstream failures that carry meaning into typed ones. Both are 422s
+ * Turns the upstream failures that carry meaning into typed ones. All are 422s
  * a caller can fix, told apart by the body: `Unknown taxon_id N` names an id
- * that does not exist, and `Taxon N is not genus or finer` names a real taxon
- * too coarse for `/identifications/similar_species`. The reason each carries is
- * what routes the agent to its recovery.
+ * that does not exist, `Taxon N is not genus or finer` names a real taxon too
+ * coarse for `/identifications/similar_species`, `Unknown user_id X` names an
+ * observer that does not exist — upstream words an unknown `user_login` the
+ * same way — and `Unknown project_id: [X]` a project. The reason each carries
+ * is what routes the agent to its recovery.
  *
  * The upstream path stays out of the returned `data`: that object reaches the
  * caller on `structuredContent.error.data`, where the REST path names nothing
@@ -785,6 +800,20 @@ function mapUpstreamError(err: unknown, ctx: Context): unknown {
         ...ctx.recoveryFor('taxon_rank_too_coarse'),
       },
     );
+  }
+  if (body.includes('Unknown user_id')) {
+    return validationError('iNaturalist does not recognize that observer.', {
+      reason: 'unknown_user',
+      retryable: false,
+      ...ctx.recoveryFor('unknown_user'),
+    });
+  }
+  if (body.includes('Unknown project_id')) {
+    return validationError('iNaturalist does not recognize that project_id.', {
+      reason: 'unknown_project_id',
+      retryable: false,
+      ...ctx.recoveryFor('unknown_project_id'),
+    });
   }
   return err;
 }
