@@ -10,6 +10,7 @@ import {
   areaInputShape,
   dateRangeInputShape,
   observationFilterInputShape,
+  resolveAnnotation,
   resolveArea,
   resolveDateRange,
 } from '@/mcp-server/tools/observation-filters.js';
@@ -28,7 +29,7 @@ const INTERVALS = [
   'week_of_year',
 ] as const;
 
-const { quality_grade, captive } = observationFilterInputShape;
+const { quality_grade, captive, term_id, term_value_id, iconic_taxa } = observationFilterInputShape;
 
 /**
  * A fine interval (day, hour) over a wide date range is unbounded upstream —
@@ -44,7 +45,7 @@ const HISTOGRAM_BUCKET_CAP = 800;
 
 export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
   description:
-    'Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in. The default month_of_year interval answers "when does this bloom or appear here" in twelve buckets; the absolute intervals (year, month, week, day, hour) bucket real dates and upstream applies a default start date to them. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Omit taxon_id to chart every taxon in the area. Defaults to research-grade, wild-only records and echoes those defaults back.',
+    'Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in. The default month_of_year interval answers "when does this bloom or appear here" in twelve buckets; the absolute intervals (year, month, week, day, hour) bucket real dates and upstream applies a default start date to them. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Omit taxon_id to chart every taxon in the area. Narrow to one life stage or reproductive state with an annotation pair (term_id and term_value_id, e.g. Life Stage = Larva, or Flowers and Fruits = Flowers), or to broad groups with iconic_taxa. Defaults to research-grade, wild-only records and echoes those defaults back.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -75,6 +76,9 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     ),
     quality_grade,
     captive,
+    term_id,
+    term_value_id,
+    iconic_taxa,
   }),
 
   output: z.object({
@@ -144,6 +148,13 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
     },
     {
+      reason: 'unpaired_annotation_value',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'term_value_id was supplied without term_id.',
+      recovery:
+        'Pass term_id alongside term_value_id; list the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.',
+    },
+    {
       reason: 'unknown_taxon_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'iNaturalist answered 422 because the taxon_id does not exist.',
@@ -168,12 +179,21 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       });
     }
 
+    const annotation = resolveAnnotation(input);
+    if (!annotation.ok) {
+      throw ctx.fail('unpaired_annotation_value', annotation.message, {
+        ...ctx.recoveryFor('unpaired_annotation_value'),
+      });
+    }
+
     const params: QueryParams & { interval: string } = {
       ...area.value,
+      ...annotation.value,
       ...dates.value,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       captive: input.captive,
+      iconic_taxa: input.iconic_taxa,
       interval: input.interval,
       date_field: input.date_field,
     };
@@ -236,20 +256,47 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
 
 /**
  * Names what most likely emptied every bucket: the date range when one was
- * set, the taxon only when one was given, and the area only when one was named.
+ * set, otherwise the annotation or iconic-group filter when one was given, the
+ * taxon only when one was given, and the area only when one was named. A
+ * `term_value_id` from another attribute zeroes every bucket, so an annotation
+ * filter always carries the pairing check.
  */
 function zeroHitNotice(
-  input: { taxon_id?: number | undefined; d1?: string | undefined; d2?: string | undefined },
+  input: {
+    taxon_id?: number | undefined;
+    d1?: string | undefined;
+    d2?: string | undefined;
+    term_id?: readonly number[] | undefined;
+    iconic_taxa?: readonly string[] | undefined;
+  },
   hasArea: boolean,
 ): string {
   const where = hasArea ? ' in that area' : '';
   const hasTaxon = input.taxon_id !== undefined;
-  const finding =
-    input.d1 !== undefined || input.d2 !== undefined
-      ? `Every bucket is zero — no records${hasTaxon ? ' of this taxon' : ''}${where} fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen or drop d1/d2.`
-      : `Every bucket is zero — ${hasTaxon ? 'this taxon has no records' : 'nothing is recorded'}${where}.`;
+  const of = hasTaxon ? ' of this taxon' : '';
+  const hasAnnotation = (input.term_id?.length ?? 0) > 0;
+  const iconic = input.iconic_taxa?.length ? input.iconic_taxa.join(', ') : undefined;
+  const narrowing = [
+    ...(hasAnnotation ? ['the annotation filter'] : []),
+    ...(iconic ? [`iconic_taxa ${iconic}`] : []),
+  ];
+
+  let finding = `Every bucket is zero — ${hasTaxon ? 'this taxon has no records' : 'nothing is recorded'}${where}.`;
+  if (input.d1 !== undefined || input.d2 !== undefined) {
+    finding = `Every bucket is zero — no records${of}${where} fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen or drop d1/d2.`;
+  } else if (narrowing.length > 0) {
+    finding = `Every bucket is zero — no records${of}${where} match ${narrowing.join(' and ')}.`;
+  }
+  const filterChecks = [
+    ...(hasAnnotation
+      ? [
+          `Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms${hasTaxon ? ' and taxon_id' : ''}, or drop the annotation filter.`,
+        ]
+      : []),
+    ...(iconic ? ['Drop iconic_taxa or choose another group.'] : []),
+  ];
   const remedy = hasTaxon
     ? `Confirm the taxon with inaturalist_resolve_name${hasArea ? ', or widen the area' : ''}.`
     : `${hasArea ? 'Widen the area, or relax' : 'Relax'} quality_grade or captive.`;
-  return `${finding} ${remedy}`;
+  return [finding, ...filterChecks, remedy].join(' ');
 }

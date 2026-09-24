@@ -93,7 +93,24 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
         z
           .object({
             attribute: z.string().nullable().describe('Annotation attribute label.'),
-            value: z.string().nullable().describe('Annotation value label.'),
+            term_id: z
+              .number()
+              .nullable()
+              .describe(
+                'Attribute id — pass it as term_id to filter search, species counts, or the histogram. Null when upstream omitted it.',
+              ),
+            value: z
+              .string()
+              .nullable()
+              .describe(
+                'Annotation value label. Labels repeat across attributes, so filter by the ids rather than the label.',
+              ),
+            term_value_id: z
+              .number()
+              .nullable()
+              .describe(
+                'Value id — pass it as term_value_id alongside term_id. Null when upstream omitted it.',
+              ),
             count: z.number().describe('How many observations of this taxon carry the pair.'),
           })
           .describe('One attribute/value pair and how often it has been recorded.'),
@@ -199,7 +216,7 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
       lines.push('', '### Observed usage');
       for (const usage of result.observed_usage) {
         lines.push(
-          `- ${inlineText(usage.attribute ?? 'undecoded attribute')} = ${inlineText(usage.value ?? 'undecoded value')} — ${usage.count} observations`,
+          `- ${inlineText(usage.attribute ?? 'undecoded attribute')} = ${inlineText(usage.value ?? 'undecoded value')} — ${usage.count} observations · term_id ${usage.term_id ?? 'not published'} · term_value_id ${usage.term_value_id ?? 'not published'}`,
         );
       }
     }

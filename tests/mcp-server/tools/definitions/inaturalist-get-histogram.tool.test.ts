@@ -1,14 +1,23 @@
 /**
  * @fileoverview Tests for inaturalist_get_histogram — area validation, the
- * unknown_taxon_id passthrough, the every-bucket-zero notice, and format().
+ * unknown_taxon_id passthrough, the annotation and iconic-group filters, the
+ * every-bucket-zero notice, and format().
  * @module tests/mcp-server/tools/definitions/inaturalist-get-histogram.tool.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetHistogram } from '@/mcp-server/tools/definitions/inaturalist-get-histogram.tool.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import {
   asService,
   createFakeService,
@@ -315,6 +324,166 @@ describe('bucket cap', () => {
       notice:
         'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
     });
+  });
+});
+
+describe('annotation and iconic-group filters', () => {
+  it('forwards term_id, term_value_id, and iconic_taxa to the service', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 721 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+
+    await inaturalistGetHistogram.handler(
+      inaturalistGetHistogram.input.parse({
+        taxon_id: 48662,
+        place_id: 14,
+        term_id: [1],
+        term_value_id: [6],
+        iconic_taxa: ['Insecta'],
+      }),
+      ctx,
+    );
+
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      term_id: [1],
+      term_value_id: [6],
+      iconic_taxa: ['Insecta'],
+    });
+  });
+
+  it('rejects term_value_id without term_id before any request', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+    const input = inaturalistGetHistogram.input.parse({ taxon_id: 48662, term_value_id: [6] });
+
+    await expect(inaturalistGetHistogram.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'unpaired_annotation_value',
+        recovery: { hint: expect.stringContaining('inaturalist_list_reference') },
+      },
+    });
+    expect(fake.getHistogram).not.toHaveBeenCalled();
+  });
+
+  it('rejects an iconic group outside the spec values at the schema', () => {
+    expect(inaturalistGetHistogram.input.safeParse({ iconic_taxa: ['Birds'] }).success).toBe(false);
+  });
+
+  it('names the annotation filter when it emptied every bucket, on both surfaces', async () => {
+    fake.getHistogram.mockResolvedValue(
+      Array.from({ length: 12 }, (_, i) => ({ key: String(i + 1), count: 0 })),
+    );
+
+    const result = await runToolContract(inaturalistGetHistogram, {
+      taxon_id: 48662,
+      place_id: 14,
+      term_id: [1],
+      term_value_id: [13],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const expected =
+      'Every bucket is zero — no records of this taxon in that area match the annotation filter. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms and taxon_id, or drop the annotation filter. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
+    expect(result.structuredContent).toMatchObject({ total: 0, notice: expected });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(expected);
+  });
+
+  it('names the iconic groups when they emptied every bucket', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+
+    await inaturalistGetHistogram.handler(
+      inaturalistGetHistogram.input.parse({ place_id: 14, iconic_taxa: ['Aves', 'Insecta'] }),
+      ctx,
+    );
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — no records in that area match iconic_taxa Aves, Insecta. Drop iconic_taxa or choose another group. Widen the area, or relax quality_grade or captive.',
+    );
+  });
+
+  it('keeps the date range as the finding and adds the annotation check when both were given', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
+
+    await inaturalistGetHistogram.handler(
+      inaturalistGetHistogram.input.parse({ d1: '2090-01-01', term_id: [12] }),
+      ctx,
+    );
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Every bucket is zero — no records fall in 2090-01-01…any end. Widen or drop d1/d2. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms, or drop the annotation filter. Relax quality_grade or captive.',
+    );
+  });
+
+  it('sends the three filters upstream beside the defaults', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/histogram\?/,
+        respond: () => Response.json({ results: { month_of_year: { '1': 721 } } }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetHistogram, {
+        taxon_id: 48662,
+        place_id: 14,
+        term_id: [1],
+        term_value_id: [6],
+        iconic_taxa: ['Insecta'],
+      });
+
+      expect(result.isError).toBeFalsy();
+      const params = new URL(http.calls[0]?.request.url ?? '').searchParams;
+      expect(params.get('term_id')).toBe('1');
+      expect(params.get('term_value_id')).toBe('6');
+      expect(params.get('iconic_taxa')).toBe('Insecta');
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('request URL without the annotation or iconic filters', () => {
+  it('builds the same query string as before those filters existed', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/histogram\?/,
+        respond: () => Response.json({ results: { month_of_year: { '1': 3 } } }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetHistogram, {
+        taxon_id: 48662,
+        place_id: 14,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(http.calls[0]?.request.url).toBe(
+        'https://api.inaturalist.org/v1/observations/histogram?captive=false&date_field=observed&interval=month_of_year&place_id=14&quality_grade=research&taxon_id=48662',
+      );
+    } finally {
+      http.restore();
+    }
   });
 });
 

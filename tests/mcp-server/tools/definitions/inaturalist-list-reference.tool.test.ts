@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -108,6 +108,57 @@ describe('controlled_terms (live) topic', () => {
     const text = block && 'text' in block ? block.text : '';
     expect(text).toContain('### Observed usage');
     expect(text).toContain('336576 observations');
+  });
+
+  it('carries the attribute and value ids on each observed_usage row, on both surfaces', async () => {
+    fake.getControlledTerms.mockResolvedValue([controlledTerm()]);
+    fake.getObservedUsage.mockResolvedValue([
+      observedUsage({ term_id: 1, term_value_id: 7, value: 'Egg', count: 5 }),
+      observedUsage({
+        attribute: 'Evidence of Presence',
+        term_id: 22,
+        value: 'Egg',
+        term_value_id: 30,
+        count: 3,
+      }),
+    ]);
+
+    const result = await runToolContract(inaturalistListReference, {
+      topic: 'controlled_terms',
+      taxon_id: 48662,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(
+      (result.structuredContent as { observed_usage: unknown[] }).observed_usage,
+    ).toMatchObject([
+      { attribute: 'Life Stage', term_id: 1, value: 'Egg', term_value_id: 7, count: 5 },
+      { attribute: 'Evidence of Presence', term_id: 22, value: 'Egg', term_value_id: 30, count: 3 },
+    ]);
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('- Life Stage = Egg — 5 observations · term_id 1 · term_value_id 7');
+    expect(text).toContain(
+      '- Evidence of Presence = Egg — 3 observations · term_id 22 · term_value_id 30',
+    );
+  });
+
+  it('renders a missing id as not published rather than inventing one', () => {
+    const [block] =
+      inaturalistListReference.format?.({
+        topic: 'controlled_terms',
+        source: 'upstream',
+        entries: [],
+        observed_usage: [
+          { attribute: null, term_id: null, value: null, term_value_id: null, count: 2 },
+        ],
+      }) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+
+    expect(text).toContain(
+      '- undecoded attribute = undecoded value — 2 observations · term_id not published · term_value_id not published',
+    );
   });
 
   it('reports a notice when the requested taxon has no observed usage yet', async () => {
