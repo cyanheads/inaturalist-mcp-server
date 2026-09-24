@@ -9,6 +9,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { inaturalistFindPlaces } from '@/mcp-server/tools/definitions/inaturalist-find-places.tool.js';
 import { inaturalistGetObservation } from '@/mcp-server/tools/definitions/inaturalist-get-observation.tool.js';
+import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import { inaturalistResolveName } from '@/mcp-server/tools/definitions/inaturalist-resolve-name.tool.js';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
@@ -53,5 +54,52 @@ describe('definition smoke test', () => {
     expect(inaturalistGetObservation.input.parse({ observation_id: [401617560] })).toMatchObject({
       include: ['identifications'],
     });
+    expect(inaturalistGetSimilarSpecies.input.parse({ taxon_id: 48662 })).toMatchObject({
+      quality_grade: ['research'],
+      captive: false,
+      limit: 20,
+    });
+  });
+
+  it('declares the upstream rank floor on inaturalist_get_similar_species as a typed reason', () => {
+    expect(inaturalistGetSimilarSpecies.errors?.map((entry) => entry.reason)).toEqual([
+      'invalid_geography',
+      'inverted_date_range',
+      'unknown_taxon_id',
+      'taxon_rank_too_coarse',
+    ]);
+  });
+
+  it('accepts the by-id thread counts and detail fields on the observation output schema', () => {
+    const record = inaturalistGetObservation.output.shape.observations.element.parse({
+      id: 1,
+      uuid: null,
+      url: null,
+      observed_on: null,
+      observed_at: null,
+      taxon: null,
+      place_guess: null,
+      coordinate: null,
+      obscured: false,
+      geoprivacy: null,
+      taxon_geoprivacy: null,
+      quality_grade: 'needs_id',
+      license_code: null,
+      captive: false,
+      photo: null,
+      photo_count: 0,
+      sound_count: 0,
+      observer: null,
+      identifications_count: 0,
+      agreements: 0,
+      disagreements: 0,
+      community_taxon_id: null,
+      identifications: [],
+      identifications_total: 0,
+      identifications_shown: 0,
+      description: null,
+      observation_fields: [],
+    });
+    expect(record).toMatchObject({ identifications_total: 0, description: null });
   });
 });
