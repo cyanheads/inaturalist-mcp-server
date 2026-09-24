@@ -183,6 +183,35 @@ export const observationFilterInputShape = {
     ),
 };
 
+/**
+ * Who recorded a sighting, and which project collected it. Each value comes from
+ * `inaturalist_resolve_name` — an observer's `login` also rides leaderboard
+ * entries and every observation's `observer`. An unknown value answers 422 and
+ * surfaces typed; a blank login would answer the whole index, so it reads as
+ * unset. {@link resolveObserver} checks the observer pair.
+ */
+export const observerProjectInputShape = {
+  user_id: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      'Restrict to one observer, by numeric user id from inaturalist_resolve_name type user. Mutually exclusive with user_login.',
+    ),
+  user_login: blankAsUnset(z.string().min(1).optional()).describe(
+    'Restrict to one observer, by login — the login on an inaturalist_resolve_name user candidate, a leaderboard entry, or an observation’s observer. Mutually exclusive with user_id.',
+  ),
+  project_id: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      'Restrict to observations in one project, by numeric project id from inaturalist_resolve_name type project.',
+    ),
+};
+
 export type AreaInput = {
   place_id?: number | undefined;
   lat?: number | undefined;
@@ -337,6 +366,48 @@ export function resolveAnnotation(input: {
 }
 
 /**
+ * Validates the observer pair. `user_id` and `user_login` together answer zero
+ * upstream unless they name the same person, in which case one was redundant —
+ * so the pair is refused rather than sent.
+ */
+export function resolveObserver(input: {
+  user_id?: number | undefined;
+  user_login?: string | undefined;
+  project_id?: number | undefined;
+}): FilterResult<QueryParams> {
+  const { user_id, user_login, project_id } = input;
+  if (user_id !== undefined && user_login !== undefined) {
+    return {
+      ok: false,
+      message:
+        'user_id and user_login were both supplied. Each names one observer on its own, and upstream answers a mismatched pair with zero results.',
+    };
+  }
+  return { ok: true, value: { user_id, user_login, project_id } };
+}
+
+/**
+ * The notice for an empty page when upstream still reports matches — the page,
+ * not the filters, is what came back empty, so widening guidance would send the
+ * caller after the wrong cause. Past the last page it names that page; a page
+ * inside the reported range that still came back empty means the count ran
+ * ahead of the rows, and naming a "last page" at or past it would contradict it.
+ */
+export function emptyPageNotice(args: {
+  page: number;
+  perPage: number;
+  total: number;
+  noun: string;
+}): string {
+  const { page, perPage, total, noun } = args;
+  const last = Math.ceil(total / perPage);
+  if (page > last) {
+    return `Page ${page} is past the end: ${total} ${noun} match, so the last page holding results at per_page ${perPage} is ${last}. Request page ${last} or lower — the filters are not what emptied this page.`;
+  }
+  return `Page ${page} came back empty although ${total} ${noun} match — upstream’s count runs ahead of the rows it serves. Request an earlier page; the filters are not what emptied this page.`;
+}
+
+/**
  * The ways to widen an empty answer, one per narrowing filter the call actually
  * supplied, joined into a sentence — guidance naming a filter the caller never
  * set sends it after a cause that is not there. Undefined when nothing the
@@ -347,15 +418,25 @@ export function wideningGuidance(
     d1?: string | undefined;
     d2?: string | undefined;
     taxon_id?: number | undefined;
+    user_id?: number | undefined;
+    user_login?: string | undefined;
+    project_id?: number | undefined;
     quality_grade: readonly string[];
   },
   hasArea: boolean,
 ): string | undefined {
+  const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
   const options = [
     ...(input.d1 !== undefined || input.d2 !== undefined ? ['widen or drop d1/d2'] : []),
     ...(hasArea ? ['widen the area'] : []),
     ...(input.taxon_id !== undefined
       ? ['drop taxon_id or confirm it with inaturalist_resolve_name']
+      : []),
+    ...(input.user_id !== undefined || input.user_login !== undefined
+      ? [`drop ${observerKey} or confirm the observer with inaturalist_resolve_name`]
+      : []),
+    ...(input.project_id !== undefined
+      ? ['drop project_id or confirm it with inaturalist_resolve_name']
       : []),
     ...(input.quality_grade.includes('needs_id')
       ? []

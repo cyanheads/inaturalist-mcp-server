@@ -9,11 +9,15 @@ import { describe, expect, it } from 'vitest';
 import {
   areaInputShape,
   dateRangeInputShape,
+  emptyPageNotice,
   exceedsWindow,
+  observerProjectInputShape,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
+  resolveObserver,
   resolveRankRange,
+  wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 
 describe('dateRangeInputShape', () => {
@@ -316,6 +320,79 @@ describe('resolveAnnotation', () => {
   it('treats an empty term_id array the same as absent — still rejects a lone term_value_id', () => {
     const result = resolveAnnotation({ term_id: [], term_value_id: [6] });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('observerProjectInputShape', () => {
+  const schema = z.object(observerProjectInputShape);
+
+  it('keeps each filter as given', () => {
+    expect(schema.parse({ user_id: 1, project_id: 227779 })).toEqual({
+      user_id: 1,
+      project_id: 227779,
+    });
+    expect(schema.parse({ user_login: 'kueda' })).toEqual({ user_login: 'kueda' });
+  });
+
+  it('treats a blank user_login as unset — sent blank, upstream returns the whole index', () => {
+    expect(schema.parse({ user_login: '' })).toEqual({});
+  });
+
+  it('refuses a non-positive or fractional id', () => {
+    expect(schema.safeParse({ user_id: 0 }).success).toBe(false);
+    expect(schema.safeParse({ project_id: 1.5 }).success).toBe(false);
+  });
+});
+
+describe('resolveObserver', () => {
+  it('resolves to an empty fragment when no observer or project is given', () => {
+    expect(resolveObserver({})).toEqual({ ok: true, value: {} });
+  });
+
+  it('resolves each observer form and the project on its own', () => {
+    expect(resolveObserver({ user_id: 1 })).toEqual({ ok: true, value: { user_id: 1 } });
+    expect(resolveObserver({ user_login: 'kueda', project_id: 5 })).toEqual({
+      ok: true,
+      value: { user_login: 'kueda', project_id: 5 },
+    });
+  });
+
+  it('rejects user_id with user_login, even when they name the same person', () => {
+    const result = resolveObserver({ user_id: 1, user_login: 'kueda' });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.message).toContain('user_id and user_login');
+  });
+});
+
+describe('emptyPageNotice', () => {
+  it('names the last page when the page is past the end', () => {
+    expect(emptyPageNotice({ page: 40, perPage: 25, total: 93, noun: 'records' })).toBe(
+      'Page 40 is past the end: 93 records match, so the last page holding results at per_page 25 is 4. Request page 4 or lower — the filters are not what emptied this page.',
+    );
+  });
+
+  it('counts an exactly full last page as the last page', () => {
+    expect(emptyPageNotice({ page: 3, perPage: 25, total: 50, noun: 'species' })).toContain(
+      'the last page holding results at per_page 25 is 2.',
+    );
+  });
+
+  it('does not call a page inside the reported range past the end', () => {
+    expect(emptyPageNotice({ page: 2, perPage: 25, total: 50, noun: 'people' })).toBe(
+      'Page 2 came back empty although 50 people match — upstream’s count runs ahead of the rows it serves. Request an earlier page; the filters are not what emptied this page.',
+    );
+  });
+});
+
+describe('wideningGuidance', () => {
+  it('names the observer and project options only when each was supplied', () => {
+    expect(
+      wideningGuidance({ quality_grade: ['research', 'needs_id'], user_login: 'kueda' }, false),
+    ).toBe('Drop user_login or confirm the observer with inaturalist_resolve_name.');
+    expect(
+      wideningGuidance({ quality_grade: ['research', 'needs_id'], project_id: 227779 }, false),
+    ).toBe('Drop project_id or confirm it with inaturalist_resolve_name.');
+    expect(wideningGuidance({ quality_grade: ['research', 'needs_id'] }, false)).toBeUndefined();
   });
 });
 
