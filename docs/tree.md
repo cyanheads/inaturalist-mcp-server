@@ -1,6 +1,6 @@
 # inaturalist-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 18:57:18
+Generated on: 2026-09-24 01:05:32
 
 ```text
 inaturalist-mcp-server/
@@ -25,6 +25,7 @@ inaturalist-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md

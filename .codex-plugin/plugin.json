@@ -1,6 +1,6 @@
 {
   "name": "inaturalist-mcp-server",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-23
+
+Long identification and comment threads, and filled observation fields, are now capped per by-id record with disclosed counts; inaturalist_get_similar_species returns a typed error for a taxon coarser than genus, and batch order and identifications_count's meaning are corrected.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-09-22
 
 Invalid geography, date order, and rank order are now rejected before the request instead of reaching upstream as a retried 500 or a silent zero-result narrowing, and find_places, resolve_name, and every zero-hit notice get matching corrections.
