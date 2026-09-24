@@ -1,15 +1,24 @@
 /**
  * @fileoverview Tests for inaturalist_get_similar_species — area validation,
- * the unknown_taxon_id passthrough, the zero-hit and limit-truncation
+ * the unknown_taxon_id passthrough, the upstream 422 mapping to
+ * taxon_rank_too_coarse and unknown_taxon_id on the wire, the zero-hit and limit-truncation
  * enrichment (with the descending-rank ceiling), and format().
  * @module tests/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import {
   asService,
   createFakeService,
@@ -105,6 +114,94 @@ describe('unknown_taxon_id passthrough from the service', () => {
     await expect(inaturalistGetSimilarSpecies.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'unknown_taxon_id' },
     });
+  });
+});
+
+/**
+ * The rank floor is enforced upstream, as a 422 whose body names the taxon. These
+ * run the real service — its fetch, its expected-status handling, and
+ * `mapUpstreamError()` — behind a strict fetch mock, so the wire shape asserted
+ * here is the one the mapping actually produces.
+ */
+describe('upstream 422 mapping on the wire', () => {
+  function realServiceAnswering(body: { error: string; status: number }) {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/identifications\/similar_species/,
+        respond: () => new Response(JSON.stringify(body), { status: 422 }),
+      },
+    ]);
+    const service = new INaturalistService({
+      userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+      minRequestIntervalMs: 0,
+      maxConcurrentRequests: 4,
+      dailyRequestBudget: 1000,
+    });
+    vi.mocked(getINaturalistService).mockReturnValue(service);
+    return http;
+  }
+
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join('');
+
+  it('fails a class-rank taxon as taxon_rank_too_coarse with the declared recovery', async () => {
+    const http = realServiceAnswering({ error: 'Taxon 3 is not genus or finer', status: 422 });
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSimilarSpecies, { taxon_id: 3 });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'taxon_rank_too_coarse',
+            retryable: false,
+            recovery: {
+              hint: inaturalistGetSimilarSpecies.errors?.find(
+                (entry) => entry.reason === 'taxon_rank_too_coarse',
+              )?.recovery,
+            },
+          },
+        },
+      });
+      const data = (result.structuredContent as { error: { data: Record<string, unknown> } }).error
+        .data;
+      expect(data).not.toHaveProperty('endpoint');
+      expect(textOf(result)).toContain('inaturalist_resolve_name');
+      expect(textOf(result)).toContain('genus');
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('still fails an unknown taxon id as unknown_taxon_id', async () => {
+    const http = realServiceAnswering({ error: 'Unknown taxon_id 999999999', status: 422 });
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSimilarSpecies, { taxon_id: 999_999_999 });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'unknown_taxon_id',
+            recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
+          },
+        },
+      });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('states the genus-or-finer floor in the tool description and on taxon_id', () => {
+    expect(inaturalistGetSimilarSpecies.description).toContain('genus or finer');
+    expect(inaturalistGetSimilarSpecies.input.shape.taxon_id.description).toContain(
+      'genus or finer',
+    );
   });
 });
 

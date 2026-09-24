@@ -7,9 +7,10 @@
  * @module tests/services/inaturalist/inaturalist-service.test
  */
 
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import type { Endpoint, QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import { INaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -356,6 +357,74 @@ describe('upstream error mapping', () => {
           recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
         },
       });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('maps a 422 "is not genus or finer" body to a typed taxon_rank_too_coarse error with the contract recovery and no upstream path', async () => {
+    // The body is the one upstream returned live for taxon_id=3 (Aves, class).
+    const http = createFetchMock([
+      {
+        match: /\/identifications\/similar_species\?taxon_id=3$/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Taxon 3 is not genus or finer', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+
+      const error = await service
+        .getSimilarSpecies({ taxon_id: 3 }, ctx)
+        .then(() => undefined)
+        .catch((err: unknown) => err);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'taxon_rank_too_coarse',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
+        },
+      });
+      expect((error as McpError).data).not.toHaveProperty('endpoint');
+      expect((error as McpError).data).not.toHaveProperty('body');
+      // A 422 is an expected status, so the mapped error settles in one attempt.
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('still maps "Unknown taxon_id" to unknown_taxon_id on the similar-species endpoint beside the rank-floor case', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/identifications\/similar_species/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Unknown taxon_id 999999999', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+
+      await expect(service.getSimilarSpecies({ taxon_id: 999_999_999 }, ctx)).rejects.toMatchObject(
+        {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'unknown_taxon_id',
+            recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
+          },
+        },
+      );
     } finally {
       http.restore();
     }

@@ -46,7 +46,7 @@ const SimilarSpeciesSchema = z
 
 export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_species', {
   description:
-    'List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction — the field-identification check before committing to a look-alike. Scope it to an area in exactly one form (place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box) to see the confusion set a specific region actually produces, or leave the area off for the global set. Resolve the organism name to a taxon id with inaturalist_resolve_name first.',
+    'List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction — the field-identification check before committing to a look-alike. Scope it to an area in exactly one form (place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box) to see the confusion set a specific region actually produces, or leave the area off for the global set. The taxon must be a genus or finer (genus, species, or below) — upstream keeps no confusion set for a family, order, or anything coarser. Resolve the organism name to a taxon id with inaturalist_resolve_name first.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -55,7 +55,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       .int()
       .min(1)
       .describe(
-        'Numeric taxon id to find look-alikes for. Resolve a name to an id with inaturalist_resolve_name.',
+        'Numeric taxon id to find look-alikes for, at genus or finer — a genus, species, or subspecies; a family or anything coarser is refused. Resolve a name to an id with inaturalist_resolve_name.',
       ),
     ...areaInputShape,
     ...dateRangeInputShape,
@@ -119,6 +119,14 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       when: 'iNaturalist answered 422 because the taxon_id does not exist.',
       recovery:
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'taxon_rank_too_coarse',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the taxon is coarser than genus, such as a family, order, or class.',
+      recovery:
+        'Pass a genus or species id: resolve a specific organism by name with inaturalist_resolve_name, or walk children with inaturalist_get_taxon down to a genus, which takes several calls from a class (order, family, subfamily, tribe, subtribe, genus).',
       thrownBy: 'service',
     },
   ],
