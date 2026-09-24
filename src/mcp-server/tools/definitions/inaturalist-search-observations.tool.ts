@@ -1,6 +1,7 @@
 /**
  * @fileoverview Searches georeferenced iNaturalist sightings by area, date,
- * taxon, quality grade, annotation, and conservation status.
+ * taxon, quality grade, annotation, conservation status, observer, project,
+ * and licence.
  * @module mcp-server/tools/definitions/inaturalist-search-observations.tool
  */
 
@@ -10,12 +11,15 @@ import {
   areaInputShape,
   blankAsUnset,
   dateRangeInputShape,
+  emptyPageNotice,
   exceedsWindow,
   observationFilterInputShape,
+  observerProjectInputShape,
   RESULT_WINDOW,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
+  resolveObserver,
   resolveRankRange,
 } from '@/mcp-server/tools/observation-filters.js';
 import { ObservationSchema, renderObservation } from '@/mcp-server/tools/observation-record.js';
@@ -24,7 +28,11 @@ import {
   type QueryParams,
 } from '@/services/inaturalist/inaturalist-service.js';
 import type { ObservationExpansion } from '@/services/inaturalist/types.js';
-import { CONSERVATION_STATUS_CODES, RANKS } from '@/services/inaturalist/vocabularies.js';
+import {
+  CONSERVATION_STATUS_CODES,
+  LICENSE_CODES,
+  RANKS,
+} from '@/services/inaturalist/vocabularies.js';
 
 const ORDER_BY = [
   'created_at',
@@ -37,9 +45,20 @@ const ORDER_BY = [
   'votes',
 ] as const;
 
+/**
+ * One licence code. Upstream reads `CC0` and `CC-BY` exactly as `cc0` and
+ * `cc-by`, and callers write licences that way, so a case variant is lowercased
+ * before the enum; anything outside the seven codes — the topic's `null`
+ * included — narrows upstream to zero and is refused here instead.
+ */
+const licenseCode = z.preprocess(
+  (value) => (typeof value === 'string' ? value.toLowerCase() : value),
+  z.enum(LICENSE_CODES),
+);
+
 export const inaturalistSearchObservations = tool('inaturalist_search_observations', {
   description:
-    'Search georeferenced wildlife sightings by area, date, taxon, quality grade, annotation, and conservation status. Returns a projected record per sighting with coordinates, licence, first photo, and identification counts. An area is given in exactly one form — place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box — and defaults to research-grade, wild-only records, which are echoed back on every call. Identifications and comments are deliberately not expandable here (one thread is 28 KB); fetch them for specific records with inaturalist_get_observation. Results past 10,000 need the cursor from the previous page rather than a higher page number.',
+    'Search georeferenced wildlife sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence. Returns a projected record per sighting with coordinates, licence, first photo, and identification counts. An area is given in exactly one form — place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box — and defaults to research-grade, wild-only records, which are echoed back on every call. Identifications and comments are deliberately not expandable here (one thread is 28 KB); fetch them for specific records with inaturalist_get_observation. page walks the first 10,000 results under any ordering; past 10,000, order by id descending (order_by "id", order "desc") and pass each page’s next_cursor as cursor.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -54,6 +73,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       ),
     ...dateRangeInputShape,
     ...observationFilterInputShape,
+    ...observerProjectInputShape,
     hrank: z
       .enum(RANKS)
       .optional()
@@ -88,11 +108,27 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     licensed: z
       .boolean()
       .optional()
-      .describe('Restrict to records whose own license_code is not null.'),
+      .describe(
+        'Restrict to records whose own license_code is not null — any licence, NonCommercial and NoDerivatives variants included. For specific licences, use license.',
+      ),
     photo_licensed: z
       .boolean()
       .optional()
-      .describe('Restrict to records with at least one licensed photo.'),
+      .describe(
+        'Restrict to records with at least one licensed photo, under any licence. For specific licences, use photo_license.',
+      ),
+    license: z
+      .array(licenseCode)
+      .optional()
+      .describe(
+        'Restrict to records whose own license_code is one of these, e.g. ["cc-by","cc0"] for reuse with attribution only. Decode the codes with inaturalist_list_reference topic licenses; all-rights-reserved records have no code to pass.',
+      ),
+    photo_license: z
+      .array(licenseCode)
+      .optional()
+      .describe(
+        'Restrict to records carrying at least one photo under one of these licence codes. Matched independently of the record’s own license_code, so check each photo’s license_code before reusing it.',
+      ),
     q: blankAsUnset(z.string().min(1).optional()).describe(
       'Free text matched across observation properties.',
     ),
@@ -104,7 +140,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       .enum(ORDER_BY)
       .default('observed_on')
       .describe(
-        'Sort field. Forced to id when cursor is supplied, since a cursor only continues an id ordering.',
+        'Sort field. Set "id" with order "desc" to walk past 10,000 results: that is the one ordering next_cursor continues, so it is the only one that issues a next_cursor. A cursor forces it.',
       ),
     order: z.enum(['asc', 'desc']).default('desc').describe('Sort direction.'),
     page: z
@@ -113,7 +149,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       .min(1)
       .optional()
       .describe(
-        'Page number within the first 10,000 results. Defaults to 1. Mutually exclusive with cursor.',
+        'Page number within the first 10,000 results, under any ordering. Defaults to 1. Mutually exclusive with cursor.',
       ),
     cursor: blankAsUnset(
       z
@@ -121,7 +157,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
         .regex(/^[1-9]\d*$/)
         .optional(),
     ).describe(
-      'next_cursor from a previous page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces an id ordering.',
+      'next_cursor from a previous id-descending page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces order_by "id", order "desc".',
     ),
     per_page: z
       .number()
@@ -150,8 +186,14 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     next_cursor: z
       .string()
       .optional()
-      .describe('Pass back as cursor to continue past this page. Absent when has_more is false.'),
-    has_more: z.boolean().describe('True when this page filled per_page, so more records follow.'),
+      .describe(
+        'Pass back as cursor to continue past this page. Present only when has_more is true and the page was ordered by id descending; under any other ordering, raise page instead.',
+      ),
+    has_more: z
+      .boolean()
+      .describe(
+        'True when this page filled per_page and more records follow. On the page path an exactly full final page is false; under a cursor, where the offset is unknown, every full page is true.',
+      ),
   }),
 
   enrichment: {
@@ -172,7 +214,9 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, or how to continue past a full page.'),
+      .describe(
+        'Guidance when nothing matched, when the page is past the last one holding results, or how to continue past a full page.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -209,7 +253,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       code: JsonRpcErrorCode.ValidationError,
       when: 'page multiplied by per_page would reach past the upstream 10,000-result window.',
       recovery:
-        'Continue past 10,000 results by passing cursor set to next_cursor from the previous page instead of raising page.',
+        'Past 10,000 results only the cursor continues, and only on an id-descending walk: re-run with order_by "id" and order "desc", then pass each page\'s next_cursor as cursor. Otherwise narrow the filters to bring the records into the first 10,000.',
     },
     {
       reason: 'conflicting_pagination',
@@ -233,11 +277,34 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
         'Pass q alongside search_on, or drop search_on to search every observation property.',
     },
     {
+      reason: 'conflicting_observer',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'user_id and user_login were both supplied.',
+      recovery:
+        'Pass one observer, as user_id or user_login — each names the observer on its own, and a mismatched pair matches nothing.',
+    },
+    {
       reason: 'unknown_taxon_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'iNaturalist answered 422 because the taxon_id does not exist.',
       recovery:
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_user',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      recovery:
+        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_project_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the project_id does not exist.',
+      recovery:
+        'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
       thrownBy: 'service',
     },
   ],
@@ -268,6 +335,13 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     if (!annotation.ok) {
       throw ctx.fail('unpaired_annotation_value', annotation.message, {
         ...ctx.recoveryFor('unpaired_annotation_value'),
+      });
+    }
+
+    const observer = resolveObserver(input);
+    if (!observer.ok) {
+      throw ctx.fail('conflicting_observer', observer.message, {
+        ...ctx.recoveryFor('conflicting_observer'),
       });
     }
 
@@ -304,6 +378,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       ...annotation.value,
       ...dates.value,
       ...ranks.value,
+      ...observer.value,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       captive: input.captive,
@@ -315,6 +390,8 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       endemic: input.endemic,
       licensed: input.licensed,
       photo_licensed: input.photo_licensed,
+      license: input.license,
+      photo_license: input.photo_license,
       q: input.q,
       search_on: input.search_on,
       order_by: orderBy,
@@ -353,7 +430,14 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     });
 
     if (observations.length === 0) {
-      ctx.enrich.notice(zeroHitNotice(input));
+      // On the page path a non-zero total means this page, not the filters, came
+      // back empty. A cursor walk has no page offset, and its upstream total
+      // counts only what lies below the cursor.
+      ctx.enrich.notice(
+        !usingCursor && total > 0
+          ? emptyPageNotice({ page, perPage: input.per_page, total, noun: 'records' })
+          : zeroHitNotice(input),
+      );
       return { total_results: total, observations, has_more: false };
     }
 
@@ -363,16 +447,19 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     // offset is unknown and a full page is the only signal there is.
     const hasMore =
       observations.length >= input.per_page && (usingCursor || page * input.per_page < total);
+    // `id_below` continues only an id-descending walk: under any other ordering
+    // it repeats or skips records, and under `id asc` it walks back over page 1.
+    const idDescending = orderBy === 'id' && order === 'desc';
     const last = observations.at(-1);
-    const nextCursor = hasMore && last ? String(last.id) : undefined;
+    const nextCursor = hasMore && idDescending && last ? String(last.id) : undefined;
     if (hasMore) {
-      ctx.enrich.truncated({
-        shown: observations.length,
-        cap: input.per_page,
-        guidance: nextCursor
-          ? `More records match. Pass cursor "${nextCursor}" to continue; beyond 10,000 results the cursor is the only mechanism that works.`
-          : 'More records match. Raise page, or switch to the cursor past 10,000 results.',
-      });
+      let guidance = `More records match. Raise page to ${page + 1} to continue.`;
+      if (nextCursor) {
+        guidance = `More records match. Pass cursor "${nextCursor}" to continue; beyond 10,000 results the cursor is the only mechanism that works.`;
+      } else if (exceedsWindow(page + 1, input.per_page, RESULT_WINDOW)) {
+        guidance = `This page ends at the 10,000-result window upstream serves, and no cursor continues order_by "${orderBy}", order "${order}". To continue past it, re-run with order_by "id" and order "desc" and follow next_cursor, or narrow the filters.`;
+      }
+      ctx.enrich.truncated({ shown: observations.length, cap: input.per_page, guidance });
     }
 
     return {
@@ -408,6 +495,9 @@ function zeroHitNotice(input: {
   d2?: string | undefined;
   term_id?: readonly number[] | undefined;
   radius?: number | undefined;
+  user_id?: number | undefined;
+  user_login?: string | undefined;
+  project_id?: number | undefined;
 }): string {
   const fragments: string[] = [];
 
@@ -436,6 +526,17 @@ function zeroHitNotice(input: {
   if (input.radius !== undefined) {
     fragments.push(
       `No sightings within ${input.radius} km of that point. Raise radius, or search a named area with a place_id from inaturalist_find_places.`,
+    );
+  }
+  const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
+  if (input.user_id !== undefined || input.user_login !== undefined) {
+    fragments.push(
+      `No sightings by that observer match the other filters. Confirm ${observerKey} with inaturalist_resolve_name type user, or drop it.`,
+    );
+  }
+  if (input.project_id !== undefined) {
+    fragments.push(
+      'No sightings in that project match the other filters. Confirm project_id with inaturalist_resolve_name type project, or drop it.',
     );
   }
 
