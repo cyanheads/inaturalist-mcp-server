@@ -16,7 +16,7 @@ export const inaturalistObservationResource = resource(
   {
     name: 'inaturalist-observation',
     description:
-      'One iNaturalist observation by numeric id, with its community identification thread expanded — who identified what, whether each identification agrees, and the consensus taxon. An obscured coordinate is a locality with an accuracy radius, never a sighting position, and a null license_code means all rights reserved.',
+      'One iNaturalist observation by numeric id, with its community identification thread expanded — who identified what, whether each identification agrees, and the consensus taxon — plus the observer’s description and filled observation fields. The thread keeps its first 40 identifications and the list its first 40 filled fields, both in upstream order; identifications_total beside identifications_shown, and observation_fields_total beside observation_fields_shown, say whether either was cut, and the record’s url opens the full record. An obscured coordinate is a locality with an accuracy radius, never a sighting position, and a null license_code means all rights reserved.',
     mimeType: 'application/json',
     // Shorter than the taxon resource's: an observation's thread accrues
     // identifications, so a stale read misreports the community consensus.

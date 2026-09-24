@@ -126,6 +126,16 @@ export const CommentSchema = z
   })
   .describe('One discussion comment on the record.');
 
+export const ObservationFieldSchema = z
+  .object({
+    name: z
+      .string()
+      .nullable()
+      .describe('Field name, as its creator wrote it, e.g. "Habitat_Description".'),
+    value: z.string().describe('The value filled in, verbatim.'),
+  })
+  .describe('One filled observation field.');
+
 export const CoordinateSchema = z.object({
   lat: z.number().describe('Latitude in decimal degrees.'),
   lng: z.number().describe('Longitude in decimal degrees.'),
@@ -196,9 +206,17 @@ export const ObservationSchema = z
       .string()
       .nullable()
       .describe('Login of the observer. The rest of the upstream profile is not relayed.'),
-    identifications_count: z.number().describe('How many identifications the thread holds.'),
-    agreements: z.number().describe('How many identifications agree with the current taxon.'),
-    disagreements: z.number().describe('How many identifications disagree with the current taxon.'),
+    identifications_count: z
+      .number()
+      .describe(
+        'Upstream’s tally of identifications currently agreeing or disagreeing with the community taxon — agreements + disagreements. Not the thread size: it leaves out the observer’s own identification and any that neither agrees nor disagrees, such as a coarser or withdrawn one. The thread size is identifications_total, on inaturalist_get_observation.',
+      ),
+    agreements: z
+      .number()
+      .describe('How many identifications currently agree with the community taxon.'),
+    disagreements: z
+      .number()
+      .describe('How many identifications currently disagree with the community taxon.'),
     community_taxon_id: z
       .number()
       .nullable()
@@ -218,11 +236,39 @@ export const ObservationSchema = z
     identifications: z
       .array(IdentificationSchema)
       .optional()
-      .describe('The identification thread. Present when "identifications" was included.'),
+      .describe(
+        'The identification thread, cut to its first entries in upstream order (roughly but not strictly chronological) when it exceeds the per-record share of a 40-entry budget. Present when "identifications" was included.',
+      ),
+    identifications_total: z
+      .number()
+      .optional()
+      .describe(
+        'How many identifications upstream holds on the record — the thread size. Present when "identifications" was included.',
+      ),
+    identifications_shown: z
+      .number()
+      .optional()
+      .describe(
+        'How many of them identifications carries. Below identifications_total when the thread was cut. Present when "identifications" was included.',
+      ),
     comments: z
       .array(CommentSchema)
       .optional()
-      .describe('Discussion comments. Present when "comments" was included.'),
+      .describe(
+        'Discussion comments, cut to their first entries in upstream order (not strictly chronological) when they exceed the per-record share of a 40-entry budget. Present when "comments" was included.',
+      ),
+    comments_total: z
+      .number()
+      .optional()
+      .describe(
+        'How many comments upstream holds on the record. Present when "comments" was included.',
+      ),
+    comments_shown: z
+      .number()
+      .optional()
+      .describe(
+        'How many of them comments carries. Below comments_total when the thread was cut. Present when "comments" was included.',
+      ),
     community_taxon: TaxonSummarySchema.nullable()
       .optional()
       .describe(
@@ -233,6 +279,31 @@ export const ObservationSchema = z
       .optional()
       .describe(
         'Count of disagreeing identifications as upstream tallies it. Present on the by-id tool.',
+      ),
+    description: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'The observer’s own note on the sighting — host plant, behaviour, habitat, count. Third-party free text. Present on the by-id tool; null when the observer wrote none.',
+      ),
+    observation_fields: z
+      .array(ObservationFieldSchema)
+      .optional()
+      .describe(
+        'Observation-field values filled in on the record, usually by a project; fields left blank are dropped. Cut to the first filled fields in upstream order when they exceed the per-record share of a 40-entry budget. Present on the by-id tool.',
+      ),
+    observation_fields_total: z
+      .number()
+      .optional()
+      .describe(
+        'How many filled observation fields the record carries. Present on the by-id tool.',
+      ),
+    observation_fields_shown: z
+      .number()
+      .optional()
+      .describe(
+        'How many of them observation_fields carries. Below observation_fields_total when the list was cut. Present on the by-id tool.',
       ),
   })
   .describe('One projected observation record.');
@@ -293,6 +364,22 @@ export function renderPhoto(photo: PhotoOutput, label: string): string[] {
   return lines;
 }
 
+/**
+ * The heading of a capped array's block. The by-id tool reports how many entries
+ * it kept against the array's upstream size; a search record carries neither
+ * count and keeps the bare heading.
+ */
+function cappedHeading(
+  label: string,
+  shown: number | undefined,
+  total: number | undefined,
+): string {
+  if (shown === undefined || total === undefined) return `### ${label}`;
+  return shown < total
+    ? `### ${label} — first ${shown} of ${total} shown, in upstream order`
+    : `### ${label} — ${shown} of ${total} shown`;
+}
+
 function observationHeading(observation: ObservationOutput): string {
   const taxon = observation.taxon;
   if (!taxon) return UNIDENTIFIED;
@@ -340,7 +427,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
     `**Status:** ${observation.quality_grade} · captive: ${observation.captive} · geoprivacy ${inlineText(observation.geoprivacy ?? 'not set')} · taxon_geoprivacy ${inlineText(observation.taxon_geoprivacy ?? 'not set')} · ${licenceLabel(observation.license_code)}`,
   );
   lines.push(
-    `**Identifications:** ${observation.identifications_count} · ${observation.agreements} agree · ${observation.disagreements} disagree · community_taxon_id ${observation.community_taxon_id ?? 'none yet'}`,
+    `**Identifications:** ${observation.identifications_count} agreeing or disagreeing with the community taxon (${observation.agreements} agree · ${observation.disagreements} disagree) — upstream’s tally, not the thread size · community_taxon_id ${observation.community_taxon_id ?? 'none yet'}`,
   );
   lines.push(
     `**Observer:** ${inlineText(observation.observer ?? 'login not published')} · ${observation.photo_count} photos · ${observation.sound_count} sounds`,
@@ -360,6 +447,11 @@ export function renderObservation(observation: ObservationOutput): string[] {
     );
   }
 
+  if (observation.description) {
+    lines.push('**Observer’s description:**');
+    lines.push(...blockquote(observation.description));
+  }
+
   if (observation.photos?.length) {
     lines.push('### Photos');
     for (const [index, photo] of observation.photos.entries()) {
@@ -376,6 +468,21 @@ export function renderObservation(observation: ObservationOutput): string[] {
     }
   }
 
+  // Unlike an opted-in thread arm, the fields ride every by-id record, so a record
+  // with none renders no block — its zero counts stay in structuredContent.
+  if (observation.observation_fields?.length) {
+    lines.push(
+      cappedHeading(
+        'Observation fields',
+        observation.observation_fields_shown,
+        observation.observation_fields_total,
+      ),
+    );
+    for (const field of observation.observation_fields) {
+      lines.push(`- **${inlineText(field.name ?? 'unnamed field')}:** ${inlineText(field.value)}`);
+    }
+  }
+
   if (observation.sounds?.length) {
     lines.push('### Sounds');
     for (const sound of observation.sounds) {
@@ -386,9 +493,19 @@ export function renderObservation(observation: ObservationOutput): string[] {
     }
   }
 
-  if (observation.identifications?.length) {
-    lines.push('### Identification thread');
-    for (const identification of observation.identifications) {
+  const { identifications, comments } = observation;
+  if (
+    identifications &&
+    (identifications.length > 0 || observation.identifications_total !== undefined)
+  ) {
+    lines.push(
+      cappedHeading(
+        'Identification thread',
+        observation.identifications_shown,
+        observation.identifications_total,
+      ),
+    );
+    for (const identification of identifications) {
       const taxon = identification.taxon
         ? taxonLine(identification.taxon)
         : 'no taxon on this identification';
@@ -407,9 +524,9 @@ export function renderObservation(observation: ObservationOutput): string[] {
     }
   }
 
-  if (observation.comments?.length) {
-    lines.push('### Comments');
-    for (const comment of observation.comments) {
+  if (comments && (comments.length > 0 || observation.comments_total !== undefined)) {
+    lines.push(cappedHeading('Comments', observation.comments_shown, observation.comments_total));
+    for (const comment of comments) {
       lines.push(
         `- **${inlineText(comment.by ?? 'unknown')}** · id ${comment.id} · ${inlineText(comment.created_at ?? 'no timestamp')}`,
       );

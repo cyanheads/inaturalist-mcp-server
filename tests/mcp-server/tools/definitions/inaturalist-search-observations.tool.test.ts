@@ -8,17 +8,29 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import { failingUpstream } from '../../../helpers/failing-upstream.js';
 import {
   asService,
   createFakeService,
   resetFakeService,
 } from '../../../helpers/fake-inaturalist-service.js';
-import { projectedObservation } from '../../../helpers/fixtures.js';
+import {
+  projectedObservation,
+  rawIdentification,
+  rawObservation,
+} from '../../../helpers/fixtures.js';
 
 vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) => {
   const actual =
@@ -601,5 +613,71 @@ describe('format()', () => {
     const text = block && 'text' in block ? block.text : '';
 
     expect(text).toContain('**next_cursor:** none');
+  });
+});
+
+/**
+ * Search records never carry the by-id detail arm. This runs the real service
+ * and projection behind a strict fetch mock with an upstream record that holds a
+ * description, many filled observation fields, and a long thread, and checks
+ * none of it reaches either surface of a search reply.
+ */
+describe('search records stay free of the by-id detail fields', () => {
+  it('carries no description, observation fields, or thread counts, and renders none of them', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\?/,
+        respond: () =>
+          Response.json({
+            total_results: 1,
+            results: [
+              rawObservation({
+                id: 5890862,
+                description: 'Confirm?',
+                ofvs: Array.from({ length: 60 }, (_, i) => ({ name: `Field ${i}`, value: 'x' })),
+                identifications: Array.from({ length: 60 }, (_, i) =>
+                  rawIdentification({ id: i + 1 }),
+                ),
+              }),
+            ],
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistSearchObservations, { place_id: 46 });
+
+      expect(result.isError).toBeFalsy();
+      const [record] = (result.structuredContent as { observations: Record<string, unknown>[] })
+        .observations;
+      for (const key of [
+        'description',
+        'observation_fields',
+        'observation_fields_total',
+        'observation_fields_shown',
+        'identifications',
+        'identifications_total',
+        'identifications_shown',
+        'comments_total',
+      ]) {
+        expect(record).not.toHaveProperty(key);
+      }
+      const text = (result.content ?? [])
+        .map((block) => ('text' in block ? block.text : ''))
+        .join('\n');
+      expect(text).not.toContain('Observer’s description');
+      expect(text).not.toContain('### Observation fields');
+      expect(text).not.toContain('### Identification thread');
+    } finally {
+      http.restore();
+    }
   });
 });

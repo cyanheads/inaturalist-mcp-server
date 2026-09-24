@@ -18,11 +18,15 @@ import {
   projectPlace,
   projectTaxonRecord,
   projectTaxonSummary,
+  THREAD_ENTRY_BUDGET,
+  THREAD_ENTRY_FLOOR,
+  threadCap,
 } from '@/services/inaturalist/projections.js';
 import {
   openPhoto,
   rawAnnotation,
   rawBoundingBoxPolygon,
+  rawComment,
   rawControlledTerm,
   rawIdentification,
   rawObservation,
@@ -440,6 +444,150 @@ describe('projectObservation', () => {
     expect(notDetailed.identification_disagreements_count).toBeUndefined();
   });
 
+  it('projects every identification and comment in upstream order when no thread cap is given', () => {
+    const observation = projectObservation(
+      rawObservation({
+        identifications: [3, 1, 2].map((id) => rawIdentification({ id })),
+        comments: [30, 10, 20].map((id) => rawComment({ id })),
+      }),
+      { include: new Set(['identifications', 'comments']) },
+    );
+    expect(observation.identifications?.map((entry) => entry.id)).toEqual([3, 1, 2]);
+    expect(observation.comments?.map((entry) => entry.id)).toEqual([30, 10, 20]);
+  });
+
+  it('keeps the first threadCap entries of each thread array, in upstream order, with the upstream total', () => {
+    const observation = projectObservation(
+      rawObservation({
+        identifications: [5, 3, 1, 4, 2].map((id) => rawIdentification({ id })),
+        comments: [50, 30, 10].map((id) => rawComment({ id })),
+      }),
+      { include: new Set(['identifications', 'comments']), detail: true, threadCap: 2 },
+    );
+    expect(observation.identifications?.map((entry) => entry.id)).toEqual([5, 3]);
+    expect(observation.identifications_total).toBe(5);
+    expect(observation.identifications_shown).toBe(2);
+    expect(observation.comments?.map((entry) => entry.id)).toEqual([50, 30]);
+    expect(observation.comments_total).toBe(3);
+    expect(observation.comments_shown).toBe(2);
+  });
+
+  it('keeps a thread exactly at the cap whole, and reports shown equal to total', () => {
+    const observation = projectObservation(
+      rawObservation({ identifications: [1, 2, 3].map((id) => rawIdentification({ id })) }),
+      { include: new Set(['identifications']), detail: true, threadCap: 3 },
+    );
+    expect(observation.identifications).toHaveLength(3);
+    expect(observation.identifications_total).toBe(3);
+    expect(observation.identifications_shown).toBe(3);
+  });
+
+  it('reports zero for an included thread upstream returned empty or omitted', () => {
+    const { comments: _omitted, ...withoutComments } = rawObservation({ identifications: [] });
+    const observation = projectObservation(withoutComments, {
+      include: new Set(['identifications', 'comments']),
+      detail: true,
+      threadCap: 40,
+    });
+    expect(observation.identifications).toEqual([]);
+    expect(observation.identifications_total).toBe(0);
+    expect(observation.identifications_shown).toBe(0);
+    expect(observation.comments).toEqual([]);
+    expect(observation.comments_total).toBe(0);
+    expect(observation.comments_shown).toBe(0);
+  });
+
+  it('carries no thread counts for an arm that was not included', () => {
+    const observation = projectObservation(rawObservation(), {
+      include: new Set(['identifications']),
+      detail: true,
+      threadCap: 40,
+    });
+    expect(observation.identifications_total).toBe(1);
+    expect(observation).not.toHaveProperty('comments');
+    expect(observation).not.toHaveProperty('comments_total');
+    expect(observation).not.toHaveProperty('comments_shown');
+
+    const bare = projectObservation(rawObservation(), { detail: true, threadCap: 40 });
+    expect(bare).not.toHaveProperty('identifications_total');
+    expect(bare).not.toHaveProperty('identifications_shown');
+  });
+
+  it("relays the observer's description and the filled observation-field values in detail mode", () => {
+    const observation = projectObservation(
+      rawObservation({
+        description: 'caterpillar on narrow-leaf milkweed',
+        ofvs: [
+          { name: 'Habitat_Description', value: 'Garden' },
+          { name: 'Blank', value: '' },
+          { name: 'Whitespace', value: '   ' },
+          { name: 'Missing', value: null },
+          { name: 'Literal null', value: 'null' },
+          { name: null, value: '8' },
+        ],
+      }),
+      { detail: true },
+    );
+    expect(observation.description).toBe('caterpillar on narrow-leaf milkweed');
+    expect(observation.observation_fields).toEqual([
+      { name: 'Habitat_Description', value: 'Garden' },
+      { name: 'Literal null', value: 'null' },
+      { name: null, value: '8' },
+    ]);
+  });
+
+  it('reports a null description and no observation fields when upstream carries none', () => {
+    const observation = projectObservation(rawObservation({ ofvs: null }), { detail: true });
+    expect(observation.description).toBeNull();
+    expect(observation.observation_fields).toEqual([]);
+  });
+
+  it('leaves description and observation_fields off a search (non-detail) record', () => {
+    const observation = projectObservation(
+      rawObservation({ description: 'A note.', ofvs: [{ name: 'A', value: 'B' }] }),
+    );
+    expect(observation).not.toHaveProperty('description');
+    expect(observation).not.toHaveProperty('observation_fields');
+    expect(observation).not.toHaveProperty('observation_fields_total');
+    expect(observation).not.toHaveProperty('observation_fields_shown');
+  });
+
+  it('cuts filled observation fields to the thread cap after dropping blanks, with the filled total', () => {
+    const observation = projectObservation(
+      rawObservation({
+        ofvs: [
+          { name: 'A', value: '' },
+          { name: 'B', value: '1' },
+          { name: 'C', value: ' ' },
+          { name: 'D', value: '2' },
+          { name: 'E', value: '3' },
+        ],
+      }),
+      { detail: true, threadCap: 2 },
+    );
+    expect(observation.observation_fields).toEqual([
+      { name: 'B', value: '1' },
+      { name: 'D', value: '2' },
+    ]);
+    expect(observation.observation_fields_total).toBe(3);
+    expect(observation.observation_fields_shown).toBe(2);
+  });
+
+  it('keeps every filled field and reports shown equal to total when no cap is given', () => {
+    const observation = projectObservation(
+      rawObservation({
+        ofvs: [
+          { name: 'A', value: '1' },
+          { name: 'B', value: '2' },
+        ],
+      }),
+      { detail: true },
+    );
+    expect(observation.observation_fields).toHaveLength(2);
+    expect(observation.observation_fields_total).toBe(2);
+    expect(observation.observation_fields_shown).toBe(2);
+  });
+
   it('reports an obscured observation’s coordinate and wide accuracy radius without resolving it', () => {
     const observation = projectObservation(
       rawObservation({
@@ -450,6 +598,28 @@ describe('projectObservation', () => {
     );
     expect(observation.obscured).toBe(true);
     expect(observation.coordinate).toEqual({ lat: 47.6, lng: -122.3, accuracy_m: 26_839 });
+  });
+});
+
+describe('threadCap — the batch-shared identification/comment budget', () => {
+  it('pins the budget at 40 entries and the per-record floor at 4', () => {
+    expect(THREAD_ENTRY_BUDGET).toBe(40);
+    expect(THREAD_ENTRY_FLOOR).toBe(4);
+  });
+
+  it('gives a single record the whole budget', () => {
+    expect(threadCap(1)).toBe(40);
+  });
+
+  it('splits the budget evenly across a batch, rounding down', () => {
+    expect(threadCap(2)).toBe(20);
+    expect(threadCap(3)).toBe(13);
+    expect(threadCap(8)).toBe(5);
+  });
+
+  it('never drops below the floor, however large the batch', () => {
+    expect(threadCap(9)).toBe(4);
+    expect(threadCap(10)).toBe(4);
   });
 });
 

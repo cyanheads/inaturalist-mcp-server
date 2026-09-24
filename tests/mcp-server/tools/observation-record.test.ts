@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   blockquote,
   licenceLabel,
+  ObservationSchema,
   renderObservation,
   renderPhoto,
 } from '@/mcp-server/tools/observation-record.js';
@@ -242,6 +243,117 @@ describe('renderObservation', () => {
     expect(lines).toContain('> Note.');
   });
 
+  it('renders the identification tally as a count against the community taxon, not the thread size', () => {
+    const lines = renderObservation(
+      projectedObservation({ identifications_count: 6, agreements: 6, disagreements: 0 }),
+    );
+    expect(lines.find((line) => line.startsWith('**Identifications'))).toBe(
+      '**Identifications:** 6 agreeing or disagreeing with the community taxon (6 agree · 0 disagree) — upstream’s tally, not the thread size · community_taxon_id 48662',
+    );
+  });
+
+  it('describes identifications_count as the agree-plus-disagree tally, pointing to identifications_total for the thread size', () => {
+    const described = ObservationSchema.shape.identifications_count.description ?? '';
+    expect(described).toContain('community taxon');
+    expect(described).toContain('agreements + disagreements');
+    expect(described).toContain('identifications_total');
+    expect(described).not.toContain('thread holds');
+  });
+
+  it('keeps the thread headings bare when no thread counts are present (the search record)', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: [projectedIdentification()],
+        comments: [projectedComment()],
+      }),
+    );
+    expect(lines).toContain('### Identification thread');
+    expect(lines).toContain('### Comments');
+  });
+
+  it('states shown against total at each thread heading when nothing was cut', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: [projectedIdentification()],
+        identifications_total: 1,
+        identifications_shown: 1,
+        comments: [projectedComment()],
+        comments_total: 1,
+        comments_shown: 1,
+      }),
+    );
+    expect(lines).toContain('### Identification thread — 1 of 1 shown');
+    expect(lines).toContain('### Comments — 1 of 1 shown');
+  });
+
+  it('discloses a cut thread at its heading', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: Array.from({ length: 40 }, (_, i) => projectedIdentification({ id: i })),
+        identifications_total: 1113,
+        identifications_shown: 40,
+        comments: Array.from({ length: 40 }, (_, i) => projectedComment({ id: i })),
+        comments_total: 1377,
+        comments_shown: 40,
+      }),
+    );
+    expect(lines).toContain(
+      '### Identification thread — first 40 of 1113 shown, in upstream order',
+    );
+    expect(lines).toContain('### Comments — first 40 of 1377 shown, in upstream order');
+    expect(lines.filter((line) => line.startsWith('- **identifier_one**'))).toHaveLength(40);
+  });
+
+  it('still states the counts for an included thread that is empty', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: [],
+        identifications_total: 0,
+        identifications_shown: 0,
+      }),
+    );
+    expect(lines).toContain('### Identification thread — 0 of 0 shown');
+  });
+
+  it("blockquotes the observer's description beneath its label", () => {
+    const lines = renderObservation(
+      projectedObservation({ description: 'caterpillar on narrow-leaf milkweed\nalong the road' }),
+    );
+    const at = lines.indexOf('**Observer’s description:**');
+    expect(at).toBeGreaterThan(-1);
+    expect(lines.slice(at + 1, at + 3)).toEqual([
+      '> caterpillar on narrow-leaf milkweed',
+      '> along the road',
+    ]);
+  });
+
+  it('renders nothing for a null description', () => {
+    const lines = renderObservation(projectedObservation({ description: null }));
+    expect(lines).not.toContain('**Observer’s description:**');
+  });
+
+  it('renders filled observation fields as an inline bullet list', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        observation_fields: [
+          { name: 'Habitat_Description', value: 'Garden' },
+          { name: null, value: '8' },
+        ],
+      }),
+    );
+    const at = lines.indexOf('### Observation fields');
+    expect(at).toBeGreaterThan(-1);
+    expect(lines.slice(at + 1, at + 3)).toEqual([
+      '- **Habitat_Description:** Garden',
+      '- **unnamed field:** 8',
+    ]);
+  });
+
+  it('renders no Observation fields block when none are filled', () => {
+    const lines = renderObservation(projectedObservation({ observation_fields: [] }));
+    expect(lines).not.toContain('### Observation fields');
+  });
+
   it('renders the Comments sub-block, blockquoting each body', () => {
     const lines = renderObservation(
       projectedObservation({ comments: [projectedComment({ body: 'Nice shot!' })] }),
@@ -322,6 +434,21 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
       projectedPhoto({ medium_url: `https://example.test/a.jpg\n${FORGERY}` }),
       'Photo',
     );
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let an observation-field name or value break out of its bullet', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        observation_fields: [{ name: `Habitat\n${FORGERY}`, value: `Garden\r${FORGERY}` }],
+      }),
+    );
+    expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('keeps a description quoted across a bare CR', () => {
+    const lines = renderObservation(projectedObservation({ description: `A note.\r${FORGERY}` }));
+    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
     expect(forgedLines(lines)).toEqual([]);
   });
 

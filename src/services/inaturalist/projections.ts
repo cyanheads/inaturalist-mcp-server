@@ -20,6 +20,7 @@ import type {
   ProjectedComment,
   ProjectedIdentification,
   ProjectedObservation,
+  ProjectedObservationField,
   ProjectedPhoto,
   ProjectedPlace,
   ProjectedSound,
@@ -34,6 +35,7 @@ import type {
   RawIdentification,
   RawLeaderboardEntry,
   RawObservation,
+  RawObservationFieldValue,
   RawPhoto,
   RawPlace,
   RawPopularFieldValue,
@@ -264,12 +266,71 @@ function projectComment(raw: RawComment): ProjectedComment {
 }
 
 /**
+ * Entries of each capped by-id array — `identifications[]`, `comments[]`, and
+ * `observation_fields[]` — one response spends per array, shared across every
+ * record it returns, so the arrays of a ten-record batch cost about what one
+ * record's do. Sized from the measured per-entry reply cost — see the by-id
+ * array cap in `docs/design.md`.
+ */
+export const THREAD_ENTRY_BUDGET = 40;
+
+/** The fewest entries any one record keeps per capped array, however large the batch. */
+export const THREAD_ENTRY_FLOOR = 4;
+
+/** Per-record, per-array cap for a by-id response carrying `records` observations. */
+export function threadCap(records: number): number {
+  return Math.max(THREAD_ENTRY_FLOOR, Math.floor(THREAD_ENTRY_BUDGET / records));
+}
+
+/**
+ * Projects the first `cap` entries of a thread array in upstream order, cutting
+ * before projecting, and reports how many upstream held.
+ */
+function projectThread<Raw, Projected>(
+  raw: readonly Raw[] | null | undefined,
+  project: (entry: Raw) => Projected,
+  cap: number | undefined,
+): { entries: Projected[]; total: number } {
+  const all = raw ?? [];
+  const kept = cap === undefined ? all : all.slice(0, cap);
+  return { entries: kept.map(project), total: all.length };
+}
+
+/**
+ * Keeps an observation field only when it carries a value — a project can
+ * attach a field to a record and leave it empty, and a blank row tells a reader
+ * nothing — then keeps the first `cap` filled fields in upstream order. `total`
+ * counts every filled field, so the cap is measured against what a reader could
+ * have seen, not against the blanks.
+ */
+function projectObservationFields(
+  raw: readonly RawObservationFieldValue[] | null | undefined,
+  cap: number | undefined,
+): { entries: ProjectedObservationField[]; total: number } {
+  const entries: ProjectedObservationField[] = [];
+  let total = 0;
+  for (const field of raw ?? []) {
+    if (typeof field.value !== 'string' || field.value.trim() === '') continue;
+    total += 1;
+    if (cap === undefined || entries.length < cap) {
+      entries.push({ name: field.name ?? null, value: field.value });
+    }
+  }
+  return { entries, total };
+}
+
+/**
  * Projects one observation to roughly 450 bytes from the ~16 KB upstream record.
  *
  * `include` selects which embedded arrays survive; everything else — the
  * `non_owner_ids` near-duplicate of `identifications`, the 40 unlabelled
  * `place_ids`, the full 22-key `user` profile, `geojson`, votes, faves, flags —
  * is dropped outright.
+ *
+ * `threadCap` bounds each included thread array — and, on the detail arm, the
+ * filled observation fields — to its first entries in upstream order, cut
+ * before projecting, so a 1,114-entry thread costs 40 projections, not 1,114.
+ * Each capped array reports its upstream total beside what it kept.
  */
 export function projectObservation(
   raw: RawObservation,
@@ -277,6 +338,7 @@ export function projectObservation(
     include?: ReadonlySet<ObservationExpansion>;
     terms?: ControlledTermIndex;
     detail?: boolean;
+    threadCap?: number;
   } = {},
 ): ProjectedObservation {
   const include = options.include ?? new Set<ObservationExpansion>();
@@ -285,6 +347,13 @@ export function projectObservation(
   const expandedPhotos = include.has('photos')
     ? photos.map(projectPhoto).filter((photo): photo is ProjectedPhoto => photo !== null)
     : undefined;
+  const identifications = include.has('identifications')
+    ? projectThread(raw.identifications, projectIdentification, options.threadCap)
+    : undefined;
+  const comments = include.has('comments')
+    ? projectThread(raw.comments, projectComment, options.threadCap)
+    : undefined;
+  const fields = options.detail ? projectObservationFields(raw.ofvs, options.threadCap) : undefined;
 
   return {
     id: raw.id ?? 0,
@@ -314,14 +383,28 @@ export function projectObservation(
       ? { annotations: decodeAnnotations(raw.annotations, options.terms) }
       : {}),
     ...(include.has('sounds') ? { sounds: sounds.map(projectSound) } : {}),
-    ...(include.has('identifications')
-      ? { identifications: (raw.identifications ?? []).map(projectIdentification) }
+    ...(identifications
+      ? {
+          identifications: identifications.entries,
+          identifications_total: identifications.total,
+          identifications_shown: identifications.entries.length,
+        }
       : {}),
-    ...(include.has('comments') ? { comments: (raw.comments ?? []).map(projectComment) } : {}),
-    ...(options.detail
+    ...(comments
+      ? {
+          comments: comments.entries,
+          comments_total: comments.total,
+          comments_shown: comments.entries.length,
+        }
+      : {}),
+    ...(fields
       ? {
           community_taxon: projectTaxonSummary(raw.community_taxon),
           identification_disagreements_count: raw.identification_disagreements_count ?? 0,
+          description: raw.description ?? null,
+          observation_fields: fields.entries,
+          observation_fields_total: fields.total,
+          observation_fields_shown: fields.entries.length,
         }
       : {}),
   };

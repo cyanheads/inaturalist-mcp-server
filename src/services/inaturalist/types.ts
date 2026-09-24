@@ -78,6 +78,12 @@ export type RawComment = {
   created_at?: string | null;
 };
 
+/** One observation-field value embedded in a record — `ofvs[]` upstream. */
+export type RawObservationFieldValue = {
+  name?: string | null;
+  value?: string | null;
+};
+
 export type RawObservation = {
   id?: number;
   uuid?: string | null;
@@ -100,6 +106,8 @@ export type RawObservation = {
   annotations?: RawAnnotation[] | null;
   identifications?: RawIdentification[] | null;
   comments?: RawComment[] | null;
+  description?: string | null;
+  ofvs?: RawObservationFieldValue[] | null;
   user?: { login?: string | null } | null;
   identifications_count?: number | null;
   num_identification_agreements?: number | null;
@@ -279,6 +287,12 @@ export type ProjectedComment = {
   created_at: string | null;
 };
 
+/** A filled observation field — name and value as the record carries them. */
+export type ProjectedObservationField = {
+  name: string | null;
+  value: string;
+};
+
 export type ProjectedObservation = {
   id: number;
   uuid: string | null;
@@ -306,9 +320,17 @@ export type ProjectedObservation = {
   annotations?: ProjectedAnnotation[];
   sounds?: ProjectedSound[];
   identifications?: ProjectedIdentification[];
+  identifications_total?: number;
+  identifications_shown?: number;
   comments?: ProjectedComment[];
+  comments_total?: number;
+  comments_shown?: number;
   community_taxon?: TaxonSummary | null;
   identification_disagreements_count?: number;
+  description?: string | null;
+  observation_fields?: ProjectedObservationField[];
+  observation_fields_total?: number;
+  observation_fields_shown?: number;
 };
 
 export type BoundingBox = {

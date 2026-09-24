@@ -36,6 +36,7 @@ import {
   projectSpeciesCount,
   projectTaxonDocument,
   projectTaxonRecord,
+  threadCap,
 } from './projections.js';
 import type {
   CandidateKind,
@@ -626,25 +627,41 @@ export class INaturalistService {
    * Resolves a batch of observation ids in one upstream request. Unresolvable
    * ids are omitted from the response rather than reported, so the requested set
    * is reconciled against what came back and the misses are named per id.
+   * A repeated id is requested and reported once. Upstream answers the batch
+   * sorted by id as a string, so the records are put back in the order they
+   * were asked for.
+   *
+   * The identification and comment threads and the filled observation fields
+   * share one entry budget across the distinct records that came back —
+   * `threadCap` of that count per array per record — so a heavily discussed
+   * record cannot carry a reply many times the size of the rest of the batch.
    */
   async getObservations(
     ids: readonly number[],
     include: ReadonlySet<ObservationExpansion>,
     ctx: Context,
   ): Promise<{ observations: ProjectedObservation[]; unresolved: number[] }> {
+    const requested = [...new Set(ids)];
     const [terms, payload] = await Promise.all([
       include.has('annotations') ? this.getControlledTermIndex(ctx) : undefined,
       this.request<INaturalistEnvelope<RawObservation>>(
-        { endpoint: 'observations', path: ids.join(',') },
+        { endpoint: 'observations', path: requested.join(',') },
         ctx,
       ),
     ]);
 
-    const observations = (payload.results ?? []).map((raw) =>
-      projectObservation(raw, { include, detail: true, ...(terms ? { terms } : {}) }),
+    const byId = new Map((payload.results ?? []).map((raw) => [raw.id, raw]));
+    const resolved = requested.flatMap((id) => byId.get(id) ?? []);
+    const cap = threadCap(resolved.length);
+    const observations = resolved.map((raw) =>
+      projectObservation(raw, {
+        include,
+        detail: true,
+        threadCap: cap,
+        ...(terms ? { terms } : {}),
+      }),
     );
-    const returned = new Set(observations.map((observation) => observation.id));
-    return { observations, unresolved: ids.filter((id) => !returned.has(id)) };
+    return { observations, unresolved: requested.filter((id) => !byId.has(id)) };
   }
 
   // ─── Aggregates ─────────────────────────────────────────────────────────────
@@ -735,9 +752,11 @@ export class INaturalistService {
 }
 
 /**
- * Turns the two upstream failures that carry meaning into typed ones. A 422
- * whose body names an unknown taxon id is a caller-fixable input error, and the
- * reason it carries is what routes the agent to `inaturalist_resolve_name`.
+ * Turns the upstream failures that carry meaning into typed ones. Both are 422s
+ * a caller can fix, told apart by the body: `Unknown taxon_id N` names an id
+ * that does not exist, and `Taxon N is not genus or finer` names a real taxon
+ * too coarse for `/identifications/similar_species`. The reason each carries is
+ * what routes the agent to its recovery.
  *
  * The upstream path stays out of the returned `data`: that object reaches the
  * caller on `structuredContent.error.data`, where the REST path names nothing
@@ -749,12 +768,23 @@ function mapUpstreamError(err: unknown, ctx: Context): unknown {
   if (!(err instanceof McpError)) return err;
   const status = err.data?.status;
   const body = err.data?.body;
-  if (status === 422 && typeof body === 'string' && body.includes('Unknown taxon_id')) {
+  if (status !== 422 || typeof body !== 'string') return err;
+  if (body.includes('Unknown taxon_id')) {
     return validationError('iNaturalist does not recognize that taxon_id.', {
       reason: 'unknown_taxon_id',
       retryable: false,
       ...ctx.recoveryFor('unknown_taxon_id'),
     });
+  }
+  if (body.includes('is not genus or finer')) {
+    return validationError(
+      'iNaturalist lists look-alikes only for a genus or a finer rank, and that taxon_id is coarser.',
+      {
+        reason: 'taxon_rank_too_coarse',
+        retryable: false,
+        ...ctx.recoveryFor('taxon_rank_too_coarse'),
+      },
+    );
   }
   return err;
 }
