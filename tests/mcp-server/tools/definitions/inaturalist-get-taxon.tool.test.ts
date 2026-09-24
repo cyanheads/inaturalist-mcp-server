@@ -9,7 +9,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetTaxon } from '@/mcp-server/tools/definitions/inaturalist-get-taxon.tool.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
@@ -274,5 +274,32 @@ describe('format()', () => {
     expect(text).toContain('2 sections available');
     expect(text).toContain('`conservation` — 40000 bytes');
     expect(text).not.toContain('## ');
+  });
+
+  it('renders only the identity keys in content[] for a selection that leaves out summary', async () => {
+    fake.getTaxon.mockResolvedValue(
+      projectedTaxonDocument({
+        id: 47126,
+        name: 'Plantae',
+        rank: 'kingdom',
+        common_name: 'Plants',
+      }),
+    );
+
+    const result = await runToolContract(inaturalistGetTaxon, {
+      taxon_id: 47126,
+      sections: ['children'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('common_name');
+    const lines = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n')
+      .split('\n');
+    expect(lines.filter((line) => line.startsWith('## '))).toEqual(['## Plantae']);
+    expect(lines.filter((line) => line.startsWith('id '))).toEqual([
+      'id 47126 · name Plantae · rank kingdom',
+    ]);
   });
 });

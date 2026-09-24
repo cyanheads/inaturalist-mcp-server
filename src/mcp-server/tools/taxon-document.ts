@@ -185,6 +185,47 @@ function conservationLine(status: z.infer<typeof ConservationStatusSchema>): str
 }
 
 /**
+ * The heading for a document that carries its identity. `common_name` is in the
+ * heading only when the response carries that key — a selection without
+ * `summary` names the taxon by its scientific name rather than reporting a
+ * common name it never asked for as absent.
+ */
+function taxonHeading(doc: PartialTaxonDocument): string {
+  const scientific = inlineText(doc.name ?? 'name not recorded');
+  if (doc.common_name === undefined) return `## ${doc.name ? scientific : UNNAMED_TAXON}`;
+  const common = inlineText(doc.common_name ?? 'no common name');
+  return `## ${doc.common_name || doc.name ? `${common} (${scientific})` : UNNAMED_TAXON}`;
+}
+
+/**
+ * The root scalars as one line, each rendered only when the response carries
+ * its key. The null-case text is reserved for a value upstream genuinely left
+ * null; a field a `sections` selection left out is omitted, never shown absent.
+ */
+function scalarLine(doc: PartialTaxonDocument, id: number): string {
+  const parts = [`id ${id}`];
+  if (doc.name !== undefined) parts.push(`name ${inlineText(doc.name ?? 'name not recorded')}`);
+  if (doc.common_name !== undefined) {
+    parts.push(`common_name ${inlineText(doc.common_name ?? 'no common name')}`);
+  }
+  if (doc.rank !== undefined) parts.push(`rank ${inlineText(doc.rank ?? 'not recorded')}`);
+  if (doc.rank_level !== undefined) parts.push(`rank_level ${doc.rank_level ?? 'not published'}`);
+  if (doc.iconic_taxon_name !== undefined) {
+    parts.push(`iconic_taxon_name ${inlineText(doc.iconic_taxon_name ?? 'none assigned')}`);
+  }
+  if (doc.is_active !== undefined) parts.push(`is_active ${doc.is_active}`);
+  if (doc.extinct !== undefined) parts.push(`extinct ${doc.extinct}`);
+  if (doc.observations_count !== undefined) {
+    parts.push(`observations_count ${doc.observations_count ?? 'not published'}`);
+  }
+  if (doc.listed_taxa_count !== undefined) {
+    parts.push(`listed_taxa_count ${doc.listed_taxa_count ?? 'not published'}`);
+  }
+  if (doc.vision !== undefined) parts.push(`vision ${doc.vision}`);
+  return parts.join(' · ');
+}
+
+/**
  * The taxon document's markdown block. Every arm renders on field presence and
  * independently, never by branching on the caller's `kind`: a sliced document
  * carries only the sections that were asked for, and the outline arm carries
@@ -194,24 +235,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
   const lines: string[] = [];
 
   if (doc.id !== undefined) {
-    const common = inlineText(doc.common_name ?? 'no common name');
-    const scientific = inlineText(doc.name ?? 'name not recorded');
-    lines.push(
-      `## ${doc.common_name || doc.name ? `${common} (${scientific})` : UNNAMED_TAXON}`,
-      [
-        `id ${doc.id}`,
-        `name ${scientific}`,
-        `common_name ${common}`,
-        `rank ${inlineText(doc.rank ?? 'not recorded')}`,
-        `rank_level ${doc.rank_level ?? 'not published'}`,
-        `iconic_taxon_name ${inlineText(doc.iconic_taxon_name ?? 'none assigned')}`,
-        `is_active ${doc.is_active ?? 'not published'}`,
-        `extinct ${doc.extinct ?? 'not published'}`,
-        `observations_count ${doc.observations_count ?? 'not published'}`,
-        `listed_taxa_count ${doc.listed_taxa_count ?? 'not published'}`,
-        `vision ${doc.vision ?? 'not published'}`,
-      ].join(' · '),
-    );
+    lines.push(taxonHeading(doc), scalarLine(doc, doc.id));
   }
 
   if (doc.taxonomy) {

@@ -179,6 +179,77 @@ describe('renderTaxonDocument — a single-section selection renders only that s
 });
 
 /**
+ * The heading and the scalar line render only the keys the response carries. A
+ * selection that leaves out `summary` still keeps `id`, `name`, and `rank`, and
+ * must not report the summary fields it never asked for as absent.
+ */
+describe('renderTaxonDocument — heading and scalar line follow the keys present', () => {
+  const FULL_SCALAR_LINE =
+    'id 48662 · name Danaus plexippus · common_name Monarch · rank species · rank_level 10 · iconic_taxon_name Insecta · is_active true · extinct false · observations_count 250000 · listed_taxa_count 42 · vision true';
+
+  function summaryOf(doc: ReturnType<typeof projectedTaxonDocument>) {
+    return {
+      id: doc.id,
+      name: doc.name,
+      rank: doc.rank,
+      rank_level: doc.rank_level,
+      common_name: doc.common_name,
+      iconic_taxon_name: doc.iconic_taxon_name,
+      is_active: doc.is_active,
+      extinct: doc.extinct,
+      observations_count: doc.observations_count,
+      listed_taxa_count: doc.listed_taxa_count,
+      vision: doc.vision,
+    };
+  }
+
+  it('(a) no selection: the full heading and all eleven scalars', () => {
+    const [heading, scalars] = renderTaxonDocument(projectedTaxonDocument());
+    expect(heading).toBe('## Monarch (Danaus plexippus)');
+    expect(scalars).toBe(FULL_SCALAR_LINE);
+  });
+
+  it('(a) no selection: a genuinely null common name keeps its null-case text', () => {
+    const [heading, scalars] = renderTaxonDocument(projectedTaxonDocument({ common_name: null }));
+    expect(heading).toBe('## no common name (Danaus plexippus)');
+    expect(scalars).toBe(
+      FULL_SCALAR_LINE.replace('common_name Monarch', 'common_name no common name'),
+    );
+  });
+
+  it('(b) a selection without summary: the scientific name alone, and only id, name, and rank', () => {
+    const doc = projectedTaxonDocument();
+    const [heading, scalars] = renderTaxonDocument({
+      id: doc.id,
+      name: doc.name,
+      rank: doc.rank,
+      photos: doc.photos,
+    });
+    expect(heading).toBe('## Danaus plexippus');
+    expect(scalars).toBe('id 48662 · name Danaus plexippus · rank species');
+  });
+
+  it('(b) a selection without summary whose name is null keeps the unnamed-taxon placeholder', () => {
+    const doc = projectedTaxonDocument();
+    const [heading, scalars] = renderTaxonDocument({
+      id: doc.id,
+      name: null,
+      rank: doc.rank,
+      children: doc.children,
+    });
+    expect(heading).toBe('## *(taxon name not recorded)*');
+    expect(scalars).toBe('id 48662 · name name not recorded · rank species');
+  });
+
+  it('(c) a selection including summary: the full heading and all eleven scalars', () => {
+    const doc = projectedTaxonDocument();
+    const [heading, scalars] = renderTaxonDocument({ ...summaryOf(doc), children: doc.children });
+    expect(heading).toBe('## Monarch (Danaus plexippus)');
+    expect(scalars).toBe(FULL_SCALAR_LINE);
+  });
+});
+
+/**
  * Conservation status text, authority names, and community-editable common
  * names are third-party strings rendered inline. A line break inside one ends
  * its line and lets the remainder read as structure this renderer never
