@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   areaInputShape,
   dateRangeInputShape,
+  emptyPageNotice,
   exceedsWindow,
   LEADERBOARD_WINDOW,
   observationFilterInputShape,
@@ -104,7 +105,9 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nobody matched, or how to reach further down the ranking.'),
+      .describe(
+        'Guidance when nobody matched, when the page is past the last one holding entries, or how to reach further down the ranking.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -201,12 +204,18 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       input.kind === 'observers' ? ('observations' as const) : ('identifications' as const);
 
     if (entries.length === 0) {
-      const lead =
-        input.kind === 'observers'
-          ? 'Nobody has recorded observations matching those filters.'
-          : 'Nobody has made identifications matching those filters.';
-      const guidance = wideningGuidance(input, Object.keys(area.value).length > 0);
-      ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+      if (total > 0) {
+        ctx.enrich.notice(
+          emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'people' }),
+        );
+      } else {
+        const lead =
+          input.kind === 'observers'
+            ? 'Nobody has recorded observations matching those filters.'
+            : 'Nobody has made identifications matching those filters.';
+        const guidance = wideningGuidance(input, Object.keys(area.value).length > 0);
+        ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+      }
       return { kind: input.kind, count_metric: countMetric, total_results: total, entries };
     }
 

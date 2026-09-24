@@ -1,8 +1,8 @@
 /**
  * @fileoverview Tests for inaturalist_get_leaderboard — area validation, the
  * leaderboard_window_exceeded contract at exactly the 500-entry boundary, the
- * unknown_taxon_id passthrough, zero-hit and truncation enrichment (including
- * the ceiling-reached guidance branch), and format().
+ * unknown_taxon_id passthrough, zero-hit, past-the-end, and truncation
+ * enrichment (including the ceiling-reached guidance branch), and format().
  * @module tests/mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.test
  */
 
@@ -223,6 +223,51 @@ describe('zero-hit and truncation enrichment', () => {
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
     expect(text).toContain(expected);
+  });
+
+  it('says a page past the end is past the end, naming the last page, on both surfaces', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 30, entries: [] });
+
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'observers',
+      place_id: 14,
+      page: 3,
+      per_page: 25,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const expected =
+      'Page 3 is past the end: 30 people match, so the last page holding results at per_page 25 is 2. Request page 2 or lower — the filters are not what emptied this page.';
+    expect(result.structuredContent).toMatchObject({
+      total_results: 30,
+      entries: [],
+      truncated: false,
+      shown: 0,
+      notice: expected,
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(expected);
+    expect(text).not.toContain('Nobody has recorded');
+  });
+
+  it('does not call a page inside the reported range "past the end" when it comes back empty', async () => {
+    // Inside the 500-entry window with 5,000 people matching, page 2 at 250
+    // should carry entries; an empty one means the count ran ahead of the rows.
+    fake.getLeaderboard.mockResolvedValue({ total: 5000, entries: [] });
+    const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
+    const input = inaturalistGetLeaderboard.input.parse({
+      kind: 'identifiers',
+      page: 2,
+      per_page: 250,
+    });
+
+    await inaturalistGetLeaderboard.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'Page 2 came back empty although 5000 people match — upstream’s count runs ahead of the rows it serves. Request an earlier page; the filters are not what emptied this page.',
+    );
   });
 
   it('discloses truncation with "raise page" guidance when the next page is still reachable', async () => {
