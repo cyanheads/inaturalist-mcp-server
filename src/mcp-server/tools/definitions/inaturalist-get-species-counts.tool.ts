@@ -9,10 +9,13 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   areaInputShape,
   dateRangeInputShape,
+  emptyPageNotice,
   observationFilterInputShape,
+  observerProjectInputShape,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
+  resolveObserver,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
@@ -23,6 +26,11 @@ import {
 
 const SpeciesSchema = z
   .object({
+    position: z
+      .number()
+      .describe(
+        'Absolute place in this ranking, counted from page 1 — 7 is the seventh most-observed species. Not the taxonomic rank, which is rank.',
+      ),
     taxon_id: z
       .number()
       .describe(
@@ -44,7 +52,7 @@ const SpeciesSchema = z
 
 export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts', {
   description:
-    'Rank the distinct species recorded in an area and period, most-observed first — the "what lives here" answer, without paging through individual sightings. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Narrow to a clade by passing taxon_id, e.g. the birds of a park. Defaults to research-grade, wild-only records and echoes those defaults back. For the most active people rather than the most recorded species, use inaturalist_get_leaderboard.',
+    'Rank the distinct species recorded in an area and period, most-observed first — the "what lives here" answer, without paging through individual sightings. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Narrow to a clade by passing taxon_id, e.g. the birds of a park, or to one observer or one project by user_id, user_login, or project_id. Defaults to research-grade, wild-only records and echoes those defaults back. For the most active people rather than the most recorded species, use inaturalist_get_leaderboard.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -59,6 +67,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       ),
     ...dateRangeInputShape,
     ...observationFilterInputShape,
+    ...observerProjectInputShape,
     page: z.number().int().min(1).default(1).describe('Page number. Defaults to 1.'),
     per_page: z
       .number()
@@ -79,7 +88,9 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       ),
     species: z
       .array(SpeciesSchema)
-      .describe('The species, ranked by observation_count, most-observed first.'),
+      .describe(
+        'The species, ranked by observation_count, most-observed first, each at its absolute position.',
+      ),
   }),
 
   enrichment: {
@@ -101,7 +112,9 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, or how to reach the species beyond this page.'),
+      .describe(
+        'Guidance when nothing matched, when the page is past the last one holding species, or how to reach the species beyond this page.',
+      ),
   },
 
   enrichmentTrailer: {
@@ -134,11 +147,34 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         'Pass term_id alongside term_value_id; list the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.',
     },
     {
+      reason: 'conflicting_observer',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'user_id and user_login were both supplied.',
+      recovery:
+        'Pass one observer, as user_id or user_login — each names the observer on its own, and a mismatched pair matches nothing.',
+    },
+    {
       reason: 'unknown_taxon_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'iNaturalist answered 422 because the taxon_id does not exist.',
       recovery:
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_user',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      recovery:
+        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_project_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the project_id does not exist.',
+      recovery:
+        'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
       thrownBy: 'service',
     },
   ],
@@ -165,10 +201,18 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       });
     }
 
-    const params: QueryParams = {
+    const observer = resolveObserver(input);
+    if (!observer.ok) {
+      throw ctx.fail('conflicting_observer', observer.message, {
+        ...ctx.recoveryFor('conflicting_observer'),
+      });
+    }
+
+    const params: QueryParams & { page: number; per_page: number } = {
       ...area.value,
       ...annotation.value,
       ...dates.value,
+      ...observer.value,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       captive: input.captive,
@@ -193,9 +237,15 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     });
 
     if (species.length === 0) {
-      const lead = 'No species recorded for those filters.';
-      const guidance = wideningGuidance(input, hasArea);
-      ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+      if (total > 0) {
+        ctx.enrich.notice(
+          emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'species' }),
+        );
+      } else {
+        const lead = 'No species recorded for those filters.';
+        const guidance = wideningGuidance(input, hasArea);
+        ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+      }
       return { total_results: total, species };
     }
 
@@ -216,10 +266,10 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
 
   format: (result) => {
     const lines: string[] = [`**total_results:** ${result.total_results} distinct species`];
-    for (const [index, species] of result.species.entries()) {
+    for (const species of result.species) {
       lines.push(
         '',
-        `${index + 1}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — ${species.observation_count} observations · ${inlineText(species.rank ?? 'rank not recorded')} · ${inlineText(species.iconic_taxon_name ?? 'no iconic group')} · taxon_id ${species.taxon_id}`,
+        `${species.position}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — ${species.observation_count} observations · ${inlineText(species.rank ?? 'rank not recorded')} · ${inlineText(species.iconic_taxon_name ?? 'no iconic group')} · taxon_id ${species.taxon_id}`,
       );
       if (species.photo) lines.push(...renderPhoto(species.photo, 'Photo'));
     }

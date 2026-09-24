@@ -1,15 +1,24 @@
 /**
  * @fileoverview Tests for inaturalist_get_species_counts — area validation,
  * the unpaired-annotation-value contract, the unknown_taxon_id passthrough,
- * the zero-hit and truncation enrichment, and format().
+ * the observer/project filters, absolute positions, the zero-hit, past-the-end,
+ * and truncation enrichment, and format().
  * @module tests/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetSpeciesCounts } from '@/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import { failingUpstream } from '../../../helpers/failing-upstream.js';
 import {
   asService,
@@ -300,6 +309,197 @@ describe('zero-hit and truncation enrichment', () => {
       quality_grade: ['research'],
       captive: false,
     });
+  });
+});
+
+describe('a page past the end of the ranking', () => {
+  it('says the page is past the end and names the last page, on both surfaces', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 99_891, species: [] });
+
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      place_id: 1,
+      per_page: 50,
+      page: 2000,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const expected =
+      'Page 2000 is past the end: 99891 species match, so the last page holding results at per_page 50 is 1998. Request page 1998 or lower — the filters are not what emptied this page.';
+    expect(result.structuredContent).toMatchObject({
+      total_results: 99_891,
+      species: [],
+      truncated: false,
+      shown: 0,
+      cap: 50,
+      notice: expected,
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain(expected);
+    expect(text).not.toContain('Widen the area');
+  });
+});
+
+describe('absolute position', () => {
+  it('carries each row’s position on structuredContent and numbers the rendered list from it', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({
+      total: 99_891,
+      species: [
+        speciesCount({ position: 7, taxon_id: 9083, common_name: 'Northern Cardinal' }),
+        speciesCount({ position: 8, taxon_id: 7089, common_name: 'Canada Goose' }),
+        speciesCount({ position: 9, taxon_id: 46017, common_name: 'Eastern Gray Squirrel' }),
+      ],
+    });
+
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      place_id: 1,
+      per_page: 3,
+      page: 3,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const rows = (result.structuredContent as { species: { position: number; rank: string }[] })
+      .species;
+    expect(rows.map((row) => row.position)).toEqual([7, 8, 9]);
+    expect(rows.every((row) => row.rank === 'species')).toBe(true);
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('7. **Northern Cardinal**');
+    expect(text).toContain('9. **Eastern Gray Squirrel**');
+    expect(text).not.toMatch(/^1\. /m);
+  });
+
+  it('forwards page and per_page so the service can offset the positions', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 1, species: species(1) });
+    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+
+    await inaturalistGetSpeciesCounts.handler(
+      inaturalistGetSpeciesCounts.input.parse({ page: 3, per_page: 3 }),
+      ctx,
+    );
+
+    expect(fake.getSpeciesCounts.mock.calls[0]?.[0]).toMatchObject({ page: 3, per_page: 3 });
+  });
+});
+
+describe('observer and project filters', () => {
+  it('forwards user_id, user_login, and project_id to species_counts', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 1, species: species(1) });
+    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+
+    await inaturalistGetSpeciesCounts.handler(
+      inaturalistGetSpeciesCounts.input.parse({ user_login: 'loarie', project_id: 189155 }),
+      ctx,
+    );
+
+    expect(fake.getSpeciesCounts.mock.calls[0]?.[0]).toMatchObject({
+      user_login: 'loarie',
+      project_id: 189155,
+    });
+    expect(fake.getSpeciesCounts.mock.calls[0]?.[0]?.user_id).toBeUndefined();
+  });
+
+  it('rejects user_id with user_login before any request', async () => {
+    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+    const input = inaturalistGetSpeciesCounts.input.parse({ user_id: 1, user_login: 'kueda' });
+
+    await expect(inaturalistGetSpeciesCounts.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'conflicting_observer',
+        recovery: { hint: expect.stringContaining('user_id or user_login') },
+      },
+    });
+    expect(fake.getSpeciesCounts).not.toHaveBeenCalled();
+  });
+
+  it('names the observer and the project among the widening options only when supplied', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+
+    await inaturalistGetSpeciesCounts.handler(
+      inaturalistGetSpeciesCounts.input.parse({ user_id: 1, project_id: 227779 }),
+      ctx,
+    );
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'No species recorded for those filters. Drop user_id or confirm the observer with inaturalist_resolve_name, drop project_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
+    );
+  });
+
+  it('surfaces an unknown project as unknown_project_id with the resolve_name recovery', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/species_counts\?/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Unknown project_id: [999999999]', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSpeciesCounts, {
+        project_id: 999_999_999,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'unknown_project_id',
+            recovery: { hint: expect.stringContaining('inaturalist_resolve_name type project') },
+          },
+        },
+      });
+      expect(http.calls[0]?.request.url).toContain('project_id=999999999');
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('request URL without the observer or project filters', () => {
+  it('builds the same query string as before those filters existed', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/species_counts\?/,
+        respond: () => Response.json({ total_results: 0, results: [] }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSpeciesCounts, {
+        place_id: 1,
+        taxon_id: 3,
+        page: 2,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(http.calls[0]?.request.url).toBe(
+        'https://api.inaturalist.org/v1/observations/species_counts?captive=false&page=2&per_page=25&place_id=1&quality_grade=research&taxon_id=3',
+      );
+    } finally {
+      http.restore();
+    }
   });
 });
 
