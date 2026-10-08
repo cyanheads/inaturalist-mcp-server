@@ -10,10 +10,6 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
-import { inaturalistGetSpeciesCounts } from '@/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
-import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
-import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
 import type { Endpoint, QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import { INaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import {
@@ -371,11 +367,9 @@ describe('upstream error mapping', () => {
     }
   });
 
-  it("resolves the unknown_taxon_id recovery hint from the calling tool's own error contract", async () => {
-    // getObservedUsage (behind inaturalist_list_reference's taxon_id param)
-    // hits the same taxon_id-filtered endpoint shape as searchObservations, so
-    // an unknown id 422s the same way — the recovery hint only appears when
-    // the calling tool declares the reason in its own errors[] contract.
+  it("leaves the recovery hint to the calling tool's error contract", async () => {
+    // The service throws the reason alone; the tool handler factory fills the
+    // hint from whichever tool's errors[] declares that reason.
     const http = createFetchMock([
       {
         match: /\/observations\/popular_field_values/,
@@ -388,20 +382,21 @@ describe('upstream error mapping', () => {
     http.install();
     try {
       const service = newService();
-      const ctx = createMockContext({ errors: inaturalistListReference.errors });
+      const ctx = createMockContext();
 
-      await expect(service.getObservedUsage(999_999_999, ctx)).rejects.toMatchObject({
-        data: {
-          reason: 'unknown_taxon_id',
-          recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
-        },
-      });
+      const error = await service
+        .getObservedUsage(999_999_999, ctx)
+        .then(() => undefined)
+        .catch((err: unknown) => err);
+
+      expect(error).toMatchObject({ data: { reason: 'unknown_taxon_id', retryable: false } });
+      expect((error as McpError).data).not.toHaveProperty('recovery');
     } finally {
       http.restore();
     }
   });
 
-  it('maps a 422 "is not genus or finer" body to a typed taxon_rank_too_coarse error with the contract recovery and no upstream path', async () => {
+  it('maps a 422 "is not genus or finer" body to a typed taxon_rank_too_coarse error with no upstream path', async () => {
     // The body is the one upstream returned live for taxon_id=3 (Aves, class).
     const http = createFetchMock([
       {
@@ -415,7 +410,7 @@ describe('upstream error mapping', () => {
     http.install();
     try {
       const service = newService();
-      const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+      const ctx = createMockContext();
 
       const error = await service
         .getSimilarSpecies({ taxon_id: 3 }, ctx)
@@ -425,11 +420,7 @@ describe('upstream error mapping', () => {
       expect(error).toBeInstanceOf(McpError);
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: {
-          reason: 'taxon_rank_too_coarse',
-          retryable: false,
-          recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
-        },
+        data: { reason: 'taxon_rank_too_coarse', retryable: false },
       });
       expect((error as McpError).data).not.toHaveProperty('endpoint');
       expect((error as McpError).data).not.toHaveProperty('body');
@@ -453,16 +444,10 @@ describe('upstream error mapping', () => {
     http.install();
     try {
       const service = newService();
-      const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
+      const ctx = createMockContext();
 
       await expect(service.getSimilarSpecies({ taxon_id: 999_999_999 }, ctx)).rejects.toMatchObject(
-        {
-          code: JsonRpcErrorCode.ValidationError,
-          data: {
-            reason: 'unknown_taxon_id',
-            recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
-          },
-        },
+        { code: JsonRpcErrorCode.ValidationError, data: { reason: 'unknown_taxon_id' } },
       );
     } finally {
       http.restore();
@@ -475,7 +460,7 @@ describe('upstream error mapping', () => {
       'an unknown login, which upstream also reports as user_id',
       'Unknown user_id zz-no-such-login-xq9',
     ],
-  ])('maps a 422 naming %s to unknown_user with the contract recovery', async (_label, body) => {
+  ])('maps a 422 naming %s to unknown_user', async (_label, body) => {
     const http = createFetchMock([
       {
         match: /\/observations\/species_counts\?/,
@@ -485,7 +470,7 @@ describe('upstream error mapping', () => {
     http.install();
     try {
       const service = newService();
-      const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+      const ctx = createMockContext();
 
       const error = await service
         .getSpeciesCounts({ user_login: 'x', page: 1, per_page: 25 }, ctx)
@@ -494,11 +479,7 @@ describe('upstream error mapping', () => {
 
       expect(error).toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: {
-          reason: 'unknown_user',
-          retryable: false,
-          recovery: { hint: expect.stringContaining('inaturalist_resolve_name type user') },
-        },
+        data: { reason: 'unknown_user', retryable: false },
       });
       expect((error as McpError).data).not.toHaveProperty('body');
       expect(http.calls).toHaveLength(1);
@@ -507,7 +488,7 @@ describe('upstream error mapping', () => {
     }
   });
 
-  it('maps a 422 "Unknown project_id" body to unknown_project_id with the contract recovery', async () => {
+  it('maps a 422 "Unknown project_id" body to unknown_project_id', async () => {
     const http = createFetchMock([
       {
         match: /\/observations\?/,
@@ -520,17 +501,13 @@ describe('upstream error mapping', () => {
     http.install();
     try {
       const service = newService();
-      const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+      const ctx = createMockContext();
 
       await expect(
         service.searchObservations({ project_id: 999_999_999, per_page: 10 }, new Set(), ctx),
       ).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
-        data: {
-          reason: 'unknown_project_id',
-          retryable: false,
-          recovery: { hint: expect.stringContaining('inaturalist_resolve_name type project') },
-        },
+        data: { reason: 'unknown_project_id', retryable: false },
       });
       expect(http.calls).toHaveLength(1);
     } finally {

@@ -153,7 +153,6 @@ export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
       throw ctx.fail(
         'unknown_section',
         `This profile carries no section named ${describeUnknownSections(unknown)}. The sections are ${TAXON_SECTIONS.join(', ')}.`,
-        { ...ctx.recoveryFor('unknown_section') },
       );
     }
 
@@ -167,9 +166,7 @@ export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
     // so the outline and the selection share one request within that window.
     const doc = await getINaturalistService().getTaxon(input.taxon_id, ctx);
     if (!doc) {
-      throw ctx.fail('not_found', `iNaturalist holds no taxon with id ${input.taxon_id}.`, {
-        ...ctx.recoveryFor('not_found'),
-      });
+      throw ctx.fail('not_found', `iNaturalist holds no taxon with id ${input.taxon_id}.`);
     }
 
     ctx.enrich({ sections_applied: requested });

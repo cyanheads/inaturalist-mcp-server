@@ -151,16 +151,12 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
   async handler(input, ctx) {
     const area = resolveArea(input);
     if (!area.ok) {
-      throw ctx.fail('invalid_geography', area.message, {
-        ...ctx.recoveryFor('invalid_geography'),
-      });
+      throw ctx.fail('invalid_geography', area.message);
     }
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
-      throw ctx.fail('inverted_date_range', dates.message, {
-        ...ctx.recoveryFor('inverted_date_range'),
-      });
+      throw ctx.fail('inverted_date_range', dates.message);
     }
 
     // Past 500 both endpoints answer 200 with an empty page, which an agent
@@ -169,7 +165,6 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       throw ctx.fail(
         'leaderboard_window_exceeded',
         `page ${input.page} × per_page ${input.per_page} reaches past the ${LEADERBOARD_WINDOW} entries these endpoints rank; upstream would answer with an empty page and no error.`,
-        { ...ctx.recoveryFor('leaderboard_window_exceeded') },
       );
     }
 

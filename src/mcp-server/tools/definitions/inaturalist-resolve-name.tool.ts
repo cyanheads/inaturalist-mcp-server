@@ -141,9 +141,7 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
 
   async handler(input, ctx) {
     if (input.rank !== undefined && input.type !== 'taxon') {
-      throw ctx.fail('rank_not_applicable', `rank does not apply to type "${input.type}".`, {
-        ...ctx.recoveryFor('rank_not_applicable'),
-      });
+      throw ctx.fail('rank_not_applicable', `rank does not apply to type "${input.type}".`);
     }
 
     ctx.log.info('Resolving a name', { type: input.type, limit: input.limit });

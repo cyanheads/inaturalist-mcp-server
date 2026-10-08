@@ -75,22 +75,24 @@ describe('area validation', () => {
 
 describe('ordered date range', () => {
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const args = { place_id: 14, taxon_id: 47126, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
-    const input = inaturalistGetHistogram.input.parse({
-      place_id: 14,
-      taxon_id: 47126,
-      d1: '2026-01-01',
-      d2: '2025-01-01',
-    });
 
-    await expect(inaturalistGetHistogram.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'inverted_date_range',
-        recovery: { hint: expect.stringContaining('on or before d2') },
-      },
-    });
+    await expect(
+      inaturalistGetHistogram.handler(inaturalistGetHistogram.input.parse(args), ctx),
+    ).rejects.toMatchObject({ data: { reason: 'inverted_date_range' } });
     expect(fake.getHistogram).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistGetHistogram, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_date_range',
+          recovery: { hint: expect.stringContaining('on or before d2') },
+        },
+      },
+    });
   });
 });
 
@@ -351,14 +353,19 @@ describe('annotation and iconic-group filters', () => {
   });
 
   it('rejects term_value_id without term_id before any request', async () => {
-    const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
-    const input = inaturalistGetHistogram.input.parse({ taxon_id: 48662, term_value_id: [6] });
+    const result = await runToolContract(inaturalistGetHistogram, {
+      taxon_id: 48662,
+      term_value_id: [6],
+    });
 
-    await expect(inaturalistGetHistogram.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'unpaired_annotation_value',
-        recovery: { hint: expect.stringContaining('inaturalist_list_reference') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'unpaired_annotation_value',
+          recovery: { hint: expect.stringContaining('inaturalist_list_reference') },
+        },
       },
     });
     expect(fake.getHistogram).not.toHaveBeenCalled();

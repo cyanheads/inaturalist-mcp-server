@@ -134,16 +134,12 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
   async handler(input, ctx) {
     const area = resolveArea(input);
     if (!area.ok) {
-      throw ctx.fail('invalid_geography', area.message, {
-        ...ctx.recoveryFor('invalid_geography'),
-      });
+      throw ctx.fail('invalid_geography', area.message);
     }
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
-      throw ctx.fail('inverted_date_range', dates.message, {
-        ...ctx.recoveryFor('inverted_date_range'),
-      });
+      throw ctx.fail('inverted_date_range', dates.message);
     }
 
     const params: QueryParams = {

@@ -151,7 +151,6 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
       throw ctx.fail(
         'taxon_id_not_applicable',
         `taxon_id does not apply to topic "${input.topic}".`,
-        { ...ctx.recoveryFor('taxon_id_not_applicable') },
       );
     }
 

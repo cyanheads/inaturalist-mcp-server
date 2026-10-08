@@ -449,7 +449,7 @@ export class INaturalistService {
       });
       text = await response.text();
     } catch (err) {
-      throw mapUpstreamError(err, ctx);
+      throw mapUpstreamError(err);
     }
 
     // An edge or maintenance page is upstream degradation, not malformed data,
@@ -771,7 +771,8 @@ export class INaturalistService {
  * coarse for `/identifications/similar_species`, `Unknown user_id X` names an
  * observer that does not exist — upstream words an unknown `user_login` the
  * same way — and `Unknown project_id: [X]` a project. The reason each carries
- * is what routes the agent to its recovery.
+ * is what routes the agent to its recovery: the framework fills the calling
+ * tool's declared `recovery` for that reason onto the wire.
  *
  * The upstream path stays out of the returned `data`: that object reaches the
  * caller on `structuredContent.error.data`, where the REST path names nothing
@@ -779,7 +780,7 @@ export class INaturalistService {
  * already logs the endpoint against this same request, which is where triage
  * reads it.
  */
-function mapUpstreamError(err: unknown, ctx: Context): unknown {
+function mapUpstreamError(err: unknown): unknown {
   if (!(err instanceof McpError)) return err;
   const status = err.data?.status;
   const body = err.data?.body;
@@ -788,31 +789,24 @@ function mapUpstreamError(err: unknown, ctx: Context): unknown {
     return validationError('iNaturalist does not recognize that taxon_id.', {
       reason: 'unknown_taxon_id',
       retryable: false,
-      ...ctx.recoveryFor('unknown_taxon_id'),
     });
   }
   if (body.includes('is not genus or finer')) {
     return validationError(
       'iNaturalist lists look-alikes only for a genus or a finer rank, and that taxon_id is coarser.',
-      {
-        reason: 'taxon_rank_too_coarse',
-        retryable: false,
-        ...ctx.recoveryFor('taxon_rank_too_coarse'),
-      },
+      { reason: 'taxon_rank_too_coarse', retryable: false },
     );
   }
   if (body.includes('Unknown user_id')) {
     return validationError('iNaturalist does not recognize that observer.', {
       reason: 'unknown_user',
       retryable: false,
-      ...ctx.recoveryFor('unknown_user'),
     });
   }
   if (body.includes('Unknown project_id')) {
     return validationError('iNaturalist does not recognize that project_id.', {
       reason: 'unknown_project_id',
       retryable: false,
-      ...ctx.recoveryFor('unknown_project_id'),
     });
   }
   return err;

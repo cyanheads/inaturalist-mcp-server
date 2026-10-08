@@ -82,21 +82,24 @@ describe('area validation', () => {
 
 describe('ordered date range', () => {
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const args = { kind: 'observers' as const, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
-    const input = inaturalistGetLeaderboard.input.parse({
-      kind: 'observers',
-      d1: '2026-01-01',
-      d2: '2025-01-01',
-    });
 
-    await expect(inaturalistGetLeaderboard.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'inverted_date_range',
-        recovery: { hint: expect.stringContaining('on or before d2') },
-      },
-    });
+    await expect(
+      inaturalistGetLeaderboard.handler(inaturalistGetLeaderboard.input.parse(args), ctx),
+    ).rejects.toMatchObject({ data: { reason: 'inverted_date_range' } });
     expect(fake.getLeaderboard).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistGetLeaderboard, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_date_range',
+          recovery: { hint: expect.stringContaining('on or before d2') },
+        },
+      },
+    });
   });
 });
 

@@ -125,16 +125,21 @@ describe('input validation', () => {
   });
 
   it('rejects page × per_page past the 10,000-result window, routing to an id-descending cursor walk', async () => {
-    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({ page: 501, per_page: 20 });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      page: 501,
+      per_page: 20,
+    });
 
-    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'result_window_exceeded',
-        recovery: {
-          hint: expect.stringContaining(
-            're-run with order_by "id" and order "desc", then pass each page\'s next_cursor as cursor',
-          ),
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'result_window_exceeded',
+          recovery: {
+            hint: expect.stringContaining(
+              're-run with order_by "id" and order "desc", then pass each page\'s next_cursor as cursor',
+            ),
+          },
         },
       },
     });
@@ -152,42 +157,51 @@ describe('input validation', () => {
 
 describe('ordered pairs', () => {
   it('rejects an hrank finer than lrank before any request, without a zero-hit notice', async () => {
+    const args = { place_id: 1, hrank: 'family' as const, lrank: 'order' as const };
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({
-      place_id: 1,
-      hrank: 'family',
-      lrank: 'order',
-    });
 
-    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
+    await expect(
+      inaturalistSearchObservations.handler(inaturalistSearchObservations.input.parse(args), ctx),
+    ).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'inverted_rank_range',
-        recovery: { hint: expect.stringContaining('coarser rank') },
-      },
+      data: { reason: 'inverted_rank_range' },
     });
     expect(fake.searchObservations).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistSearchObservations, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_rank_range',
+          recovery: { hint: expect.stringContaining('coarser rank') },
+        },
+      },
+    });
   });
 
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const args = { place_id: 1, taxon_id: 48662, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({
-      place_id: 1,
-      taxon_id: 48662,
-      d1: '2026-01-01',
-      d2: '2025-01-01',
-    });
 
-    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
+    await expect(
+      inaturalistSearchObservations.handler(inaturalistSearchObservations.input.parse(args), ctx),
+    ).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'inverted_date_range',
-        recovery: { hint: expect.stringContaining('on or before d2') },
-      },
+      data: { reason: 'inverted_date_range' },
     });
     expect(fake.searchObservations).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistSearchObservations, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_date_range',
+          recovery: { hint: expect.stringContaining('on or before d2') },
+        },
+      },
+    });
   });
 
   it('sends equal rank and date pairs through unchanged', async () => {
@@ -250,18 +264,20 @@ describe('areas upstream answers with HTTP 500', () => {
     vi.mocked(getINaturalistService).mockReturnValue(service);
     http.install();
     try {
-      const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-      const input = inaturalistSearchObservations.input.parse({
+      const result = await runToolContract(inaturalistSearchObservations, {
         lat: 37,
         lng: -120,
         radius: 0,
         per_page: 1,
       });
 
-      await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
-        data: {
-          reason: 'invalid_geography',
-          recovery: { hint: expect.stringContaining('radius above 0') },
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_geography',
+            recovery: { hint: expect.stringContaining('radius above 0') },
+          },
         },
       });
       expect(http.calls).toHaveLength(0);
@@ -894,14 +910,19 @@ describe('observer and project filters', () => {
   });
 
   it('rejects user_id with user_login before any request, since a mismatched pair returns nothing', async () => {
-    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({ user_id: 1, user_login: 'loarie' });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      user_id: 1,
+      user_login: 'loarie',
+    });
 
-    await expect(inaturalistSearchObservations.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'conflicting_observer',
-        recovery: { hint: expect.stringContaining('user_id or user_login') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'conflicting_observer',
+          recovery: { hint: expect.stringContaining('user_id or user_login') },
+        },
       },
     });
     expect(fake.searchObservations).not.toHaveBeenCalled();

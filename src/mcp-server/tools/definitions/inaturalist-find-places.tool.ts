@@ -162,7 +162,6 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
         throw ctx.fail(
           'invalid_geography',
           'A place-name query and a bounding box cannot be combined.',
-          { ...ctx.recoveryFor('invalid_geography') },
         );
       }
       ctx.log.info('Resolving a place name');
@@ -190,13 +189,12 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       throw ctx.fail(
         'invalid_geography',
         `The bounding box is incomplete — ${supplied} of four corners were supplied, and no q was given.`,
-        { ...ctx.recoveryFor('invalid_geography') },
       );
     }
 
     const boxProblem = checkBoundingBox({ nelat, swlat });
     if (boxProblem) {
-      throw ctx.fail('invalid_geography', boxProblem, { ...ctx.recoveryFor('invalid_geography') });
+      throw ctx.fail('invalid_geography', boxProblem);
     }
 
     ctx.log.info('Listing places covering a map area');

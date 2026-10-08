@@ -112,9 +112,7 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
     );
 
     if (observations.length === 0) {
-      throw ctx.fail('not_found', `None of the ${requested} requested observation ids resolved.`, {
-        ...ctx.recoveryFor('not_found'),
-      });
+      throw ctx.fail('not_found', `None of the ${requested} requested observation ids resolved.`);
     }
 
     // The notice is last-wins, so both conditions are composed into one write.

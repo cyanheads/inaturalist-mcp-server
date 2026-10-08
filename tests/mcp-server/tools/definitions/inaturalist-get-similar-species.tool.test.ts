@@ -78,21 +78,24 @@ describe('area validation', () => {
 
 describe('ordered date range', () => {
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const args = { taxon_id: 48662, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
-    const input = inaturalistGetSimilarSpecies.input.parse({
-      taxon_id: 48662,
-      d1: '2026-01-01',
-      d2: '2025-01-01',
-    });
 
-    await expect(inaturalistGetSimilarSpecies.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'inverted_date_range',
-        recovery: { hint: expect.stringContaining('on or before d2') },
-      },
-    });
+    await expect(
+      inaturalistGetSimilarSpecies.handler(inaturalistGetSimilarSpecies.input.parse(args), ctx),
+    ).rejects.toMatchObject({ data: { reason: 'inverted_date_range' } });
     expect(fake.getSimilarSpecies).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistGetSimilarSpecies, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_date_range',
+          recovery: { hint: expect.stringContaining('on or before d2') },
+        },
+      },
+    });
   });
 });
 

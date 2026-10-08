@@ -6,10 +6,18 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import {
   asService,
   createFakeService,
@@ -216,5 +224,49 @@ describe('errors', () => {
     await expect(inaturalistListReference.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'unknown_taxon_id' },
     });
+  });
+
+  it('carries the contract recovery for an upstream unknown taxon_id onto the wire', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/controlled_terms$/,
+        respond: () => Response.json({ total_results: 0, results: [] }),
+      },
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/popular_field_values\?/,
+        respond: () =>
+          new Response(JSON.stringify({ error: 'Unknown taxon_id 999999999', status: 422 }), {
+            status: 422,
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistListReference, {
+        topic: 'controlled_terms',
+        taxon_id: 999_999_999,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'unknown_taxon_id',
+            recovery: { hint: expect.stringContaining('inaturalist_resolve_name') },
+          },
+        },
+      });
+    } finally {
+      http.restore();
+    }
   });
 });

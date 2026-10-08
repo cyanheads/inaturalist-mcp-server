@@ -263,18 +263,20 @@ describe('bounding-box arm', () => {
     vi.mocked(getINaturalistService).mockReturnValue(service);
     http.install();
     try {
-      const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
-      const input = inaturalistFindPlaces.input.parse({
+      const result = await runToolContract(inaturalistFindPlaces, {
         nelat: 37,
         nelng: -120,
         swlat: 38,
         swlng: -121,
       });
 
-      await expect(inaturalistFindPlaces.handler(input, ctx)).rejects.toMatchObject({
-        data: {
-          reason: 'invalid_geography',
-          recovery: { hint: expect.stringContaining('nelat at or north of swlat') },
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_geography',
+            recovery: { hint: expect.stringContaining('nelat at or north of swlat') },
+          },
         },
       });
       expect(http.calls).toHaveLength(0);

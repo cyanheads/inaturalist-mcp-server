@@ -91,21 +91,24 @@ describe('area validation', () => {
 
 describe('ordered date range', () => {
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
+    const args = { place_id: 14, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
-    const input = inaturalistGetSpeciesCounts.input.parse({
-      place_id: 14,
-      d1: '2026-01-01',
-      d2: '2025-01-01',
-    });
 
-    await expect(inaturalistGetSpeciesCounts.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'inverted_date_range',
-        recovery: { hint: expect.stringContaining('on or before d2') },
-      },
-    });
+    await expect(
+      inaturalistGetSpeciesCounts.handler(inaturalistGetSpeciesCounts.input.parse(args), ctx),
+    ).rejects.toMatchObject({ data: { reason: 'inverted_date_range' } });
     expect(fake.getSpeciesCounts).not.toHaveBeenCalled();
     expect(getEnrichment(ctx).notice).toBeUndefined();
+
+    const result = await runToolContract(inaturalistGetSpeciesCounts, args);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'inverted_date_range',
+          recovery: { hint: expect.stringContaining('on or before d2') },
+        },
+      },
+    });
   });
 });
 
@@ -117,8 +120,7 @@ describe('areas upstream answers with HTTP 500', () => {
     vi.mocked(getINaturalistService).mockReturnValue(service);
     http.install();
     try {
-      const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
-      const input = inaturalistGetSpeciesCounts.input.parse({
+      const result = await runToolContract(inaturalistGetSpeciesCounts, {
         nelat: 37,
         nelng: -120,
         swlat: 38,
@@ -126,10 +128,13 @@ describe('areas upstream answers with HTTP 500', () => {
         per_page: 1,
       });
 
-      await expect(inaturalistGetSpeciesCounts.handler(input, ctx)).rejects.toMatchObject({
-        data: {
-          reason: 'invalid_geography',
-          recovery: { hint: expect.stringContaining('nelat at or north of swlat') },
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_geography',
+            recovery: { hint: expect.stringContaining('nelat at or north of swlat') },
+          },
         },
       });
       expect(http.calls).toHaveLength(0);
@@ -402,13 +407,18 @@ describe('observer and project filters', () => {
   });
 
   it('rejects user_id with user_login before any request', async () => {
-    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
-    const input = inaturalistGetSpeciesCounts.input.parse({ user_id: 1, user_login: 'kueda' });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      user_id: 1,
+      user_login: 'kueda',
+    });
 
-    await expect(inaturalistGetSpeciesCounts.handler(input, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'conflicting_observer',
-        recovery: { hint: expect.stringContaining('user_id or user_login') },
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'conflicting_observer',
+          recovery: { hint: expect.stringContaining('user_id or user_login') },
+        },
       },
     });
     expect(fake.getSpeciesCounts).not.toHaveBeenCalled();

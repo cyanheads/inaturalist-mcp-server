@@ -312,44 +312,33 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
   async handler(input, ctx) {
     const area = resolveArea(input);
     if (!area.ok) {
-      throw ctx.fail('invalid_geography', area.message, {
-        ...ctx.recoveryFor('invalid_geography'),
-      });
+      throw ctx.fail('invalid_geography', area.message);
     }
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
-      throw ctx.fail('inverted_date_range', dates.message, {
-        ...ctx.recoveryFor('inverted_date_range'),
-      });
+      throw ctx.fail('inverted_date_range', dates.message);
     }
 
     const ranks = resolveRankRange(input);
     if (!ranks.ok) {
-      throw ctx.fail('inverted_rank_range', ranks.message, {
-        ...ctx.recoveryFor('inverted_rank_range'),
-      });
+      throw ctx.fail('inverted_rank_range', ranks.message);
     }
 
     const annotation = resolveAnnotation(input);
     if (!annotation.ok) {
-      throw ctx.fail('unpaired_annotation_value', annotation.message, {
-        ...ctx.recoveryFor('unpaired_annotation_value'),
-      });
+      throw ctx.fail('unpaired_annotation_value', annotation.message);
     }
 
     const observer = resolveObserver(input);
     if (!observer.ok) {
-      throw ctx.fail('conflicting_observer', observer.message, {
-        ...ctx.recoveryFor('conflicting_observer'),
-      });
+      throw ctx.fail('conflicting_observer', observer.message);
     }
 
     if (input.search_on !== undefined && input.q === undefined) {
       throw ctx.fail(
         'search_on_without_query',
         'search_on narrows what q matches, so it does nothing without q.',
-        { ...ctx.recoveryFor('search_on_without_query') },
       );
     }
 
@@ -357,7 +346,6 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       throw ctx.fail(
         'conflicting_pagination',
         'page and cursor are different mechanisms and cannot be combined.',
-        { ...ctx.recoveryFor('conflicting_pagination') },
       );
     }
 
@@ -367,7 +355,6 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       throw ctx.fail(
         'result_window_exceeded',
         `page ${page} × per_page ${input.per_page} reaches past the ${RESULT_WINDOW}-result window upstream will serve.`,
-        { ...ctx.recoveryFor('result_window_exceeded') },
       );
     }
 

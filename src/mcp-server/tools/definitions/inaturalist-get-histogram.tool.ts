@@ -167,23 +167,17 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
   async handler(input, ctx) {
     const area = resolveArea(input);
     if (!area.ok) {
-      throw ctx.fail('invalid_geography', area.message, {
-        ...ctx.recoveryFor('invalid_geography'),
-      });
+      throw ctx.fail('invalid_geography', area.message);
     }
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
-      throw ctx.fail('inverted_date_range', dates.message, {
-        ...ctx.recoveryFor('inverted_date_range'),
-      });
+      throw ctx.fail('inverted_date_range', dates.message);
     }
 
     const annotation = resolveAnnotation(input);
     if (!annotation.ok) {
-      throw ctx.fail('unpaired_annotation_value', annotation.message, {
-        ...ctx.recoveryFor('unpaired_annotation_value'),
-      });
+      throw ctx.fail('unpaired_annotation_value', annotation.message);
     }
 
     const params: QueryParams & { interval: string } = {
