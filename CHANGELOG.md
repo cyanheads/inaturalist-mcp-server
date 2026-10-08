@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-10-08
+
+Framework ^0.13.6 → ^0.13.14: tool errors carry a request id, argument repair accepts numeric strings, lone strings for lists, and null optionals, and the Docker image installs its dependencies without emulation.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-09-23
 
 next_cursor now only continues an id-descending page, a page past the end names the last page instead of reading as zero matches, get_species_counts rows carry an absolute position, and search/species-counts/histogram gain observer, project, licence, and annotation filters.
