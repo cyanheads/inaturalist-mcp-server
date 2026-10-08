@@ -18,18 +18,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/inaturalist-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.2.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
@@ -60,7 +50,7 @@
         },
         {
           "name": "INATURALIST_DAILY_REQUEST_BUDGET",
-          "description": "Outbound requests allowed per UTC day, counted in-process. The default sits under the 10,000 per day the upstream asks for, and exhaustion fails loudly rather than degrading silently.",
+          "description": "Outbound requests allowed per UTC day, counted in-process. The default sits under the 10,000 per day the upstream asks for, and exhaustion fails loudly rather than degrading silently. The counter is per process and resets on restart.",
           "format": "number",
           "isRequired": false,
           "default": "9000"
@@ -74,19 +64,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/inaturalist-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.2.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
