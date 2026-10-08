@@ -6,6 +6,7 @@
 /docs/idea.md
 /logs/
 /.cache/
+/coverage/
 /tests/
 /Dockerfile
 /bun.lock
