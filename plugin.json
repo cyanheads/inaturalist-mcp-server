@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "inaturalist-mcp-server",
+  "version": "0.2.2",
+  "description": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/inaturalist-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/inaturalist-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "inaturalist",
+    "biodiversity",
+    "citizen-science",
+    "species",
+    "wildlife",
+    "observations",
+    "natural-history"
+  ]
+}
