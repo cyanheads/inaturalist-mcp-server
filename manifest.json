@@ -19,7 +19,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "INATURALIST_CLAMP_LIMITS": "${user_config.clamp_limits}"
       }
     }
   },
@@ -28,5 +29,12 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "clamp_limits": {
+      "type": "string",
+      "title": "Clamp read limits",
+      "description": "Clamp oversized read limits and defer oversized by-id batches. Set false for strict rejection.",
+      "default": ""
+    }
+  }
 }

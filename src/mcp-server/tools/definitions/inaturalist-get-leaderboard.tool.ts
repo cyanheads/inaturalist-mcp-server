@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   dateRangeInputShape,
@@ -48,15 +49,11 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     ...dateRangeInputShape,
     quality_grade,
     page: z.number().int().min(1).default(1).describe('Page number. Defaults to 1.'),
-    per_page: z
-      .number()
-      .int()
-      .min(1)
-      .max(250)
-      .default(25)
-      .describe(
-        'Entries per page, maximum 250. An entry costs roughly 140 bytes across structuredContent and the rendered text together, so 250 is a full page near 34 KB — and two such pages cover the whole 500-entry window these endpoints rank.',
-      ),
+    per_page: limitSchema(
+      LIMIT_CAPS.leaderboard,
+      25,
+      'Entries per page. Two ceiling-sized pages cover the 500-entry window.',
+    ),
   }),
 
   output: z.object({
@@ -118,6 +115,13 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
 
   errors: [
     {
+      reason: 'unknown_place_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because place_id does not exist.',
+      recovery: 'Find the area with inaturalist_find_places and pass the place id it returns.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
@@ -148,7 +152,19 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requestedInput, ctx) {
+    requestedInput = {
+      ...requestedInput,
+      quality_grade: [...new Set(requestedInput.quality_grade)],
+    };
+    const { applied, notice: clampNotice } = applyLimit(
+      requestedInput.per_page,
+      LIMIT_CAPS.leaderboard,
+      ctx,
+      'inaturalist_get_leaderboard',
+      'per_page',
+    );
+    const input = { ...requestedInput, per_page: applied };
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -201,7 +217,12 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     if (entries.length === 0) {
       if (total > 0) {
         ctx.enrich.notice(
-          emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'people' }),
+          [
+            clampNotice,
+            emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'people' }),
+          ]
+            .filter(Boolean)
+            .join(' '),
         );
       } else {
         const lead =
@@ -209,21 +230,26 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
             ? 'Nobody has recorded observations matching those filters.'
             : 'Nobody has made identifications matching those filters.';
         const guidance = wideningGuidance(input, Object.keys(area.value).length > 0);
-        ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+        ctx.enrich.notice([clampNotice, lead, guidance].filter(Boolean).join(' '));
       }
       return { kind: input.kind, count_metric: countMetric, total_results: total, entries };
     }
 
     const nextPageReachable = !exceedsWindow(input.page + 1, input.per_page, LEADERBOARD_WINDOW);
-    if (entries.length >= input.per_page) {
+    if (entries.length >= input.per_page && input.page * input.per_page < total) {
       ctx.enrich.truncated({
         shown: entries.length,
         cap: input.per_page,
-        guidance: nextPageReachable
-          ? `Raise page to reach further down the ranking, up to the ${LEADERBOARD_WINDOW}-entry ceiling these endpoints serve.`
-          : `This page ends at the ${LEADERBOARD_WINDOW}-entry ceiling these endpoints serve, though ${total} people match. Narrow the area, date range, or taxon_id to rank a smaller field.`,
+        guidance: [
+          clampNotice,
+          nextPageReachable
+            ? `Raise page to reach further down the ranking, up to the ${LEADERBOARD_WINDOW}-entry ceiling these endpoints serve.`
+            : `This page ends at the ${LEADERBOARD_WINDOW}-entry ceiling these endpoints serve, though ${total} people match. Narrow the area, date range, or taxon_id to rank a smaller field.`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
-    }
+    } else if (clampNotice) ctx.enrich.notice(clampNotice);
 
     return { kind: input.kind, count_metric: countMetric, total_results: total, entries };
   },

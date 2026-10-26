@@ -42,6 +42,38 @@ beforeEach(() => {
 });
 
 describe('happy path', () => {
+  it.each([null, '', '  <b>literal</b> &amp;\r\n\nend\n'])(
+    'retains JSON detail states without a Markdown formatter: %j',
+    async (description) => {
+      const observation = projectedObservation({
+        description,
+        observation_fields: [],
+        observation_fields_total: 0,
+        observation_fields_shown: 0,
+        photos: [],
+        annotations: [],
+        sounds: [],
+      });
+      fake.getObservations.mockResolvedValue({ observations: [observation], unresolved: [] });
+      const result = await inaturalistObservationResource.handler(
+        { observation_id: '401617560' },
+        createMockContext(),
+      );
+      expect(inaturalistObservationResource.mimeType).toBe('application/json');
+      expect(inaturalistObservationResource.format).toBeUndefined();
+      expect(inaturalistObservationResource.output?.parse(result)).toEqual(observation);
+      expect(JSON.parse(JSON.stringify(result))).toMatchObject({
+        description,
+        observation_fields: [],
+        observation_fields_total: 0,
+        observation_fields_shown: 0,
+        photos: [],
+        annotations: [],
+        sounds: [],
+      });
+    },
+  );
+
   it('resolves the id with the identifications expansion, always', async () => {
     const observation = projectedObservation();
     fake.getObservations.mockResolvedValue({ observations: [observation], unresolved: [] });

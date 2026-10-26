@@ -74,6 +74,53 @@ describe('area validation', () => {
 });
 
 describe('ordered date range', () => {
+  it('validates and forwards upload bounds without clipping upstream keys', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '2020-05-02', count: 3 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      date_field: 'created',
+      created_d1: '2020-05-01',
+      created_d2: '2020-05-01',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      created_d1: '2020-05-01',
+      created_d2: '2020-05-01',
+    });
+    expect(result.structuredContent).toMatchObject({
+      buckets: [{ key: '2020-05-02', count: 3 }],
+      total: 3,
+    });
+    expect(JSON.stringify(result.content)).toContain('2020-05-02');
+    expect(inaturalistGetHistogram.input.safeParse({ created_d1: '2026-02-30' }).success).toBe(
+      false,
+    );
+    expect(inaturalistGetHistogram.input.parse({ created_d1: '' }).created_d1).toBeUndefined();
+  });
+  it('rejects inverted upload bounds before requesting', async () => {
+    const result = await runToolContract(inaturalistGetHistogram, {
+      created_d1: '2021-01-01',
+      created_d2: '2020-01-01',
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'inverted_date_range' } },
+    });
+    expect(fake.getHistogram).not.toHaveBeenCalled();
+  });
+  it('composes ignored empty filters with honest supplied-bound guidance', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      d1: '2020-01-01',
+      created_d2: '2021-01-01',
+      term_id: [],
+      iconic_taxa: [],
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    for (const word of ['term_id', 'iconic_taxa', 'd1/d2', 'created_d1/created_d2', 'may'])
+      expect(notice).toContain(word);
+    expect(notice).not.toContain('fall in');
+    expect(JSON.stringify(result.content)).toContain(notice);
+  });
   it('rejects d1 after d2 before any request, without a zero-hit notice', async () => {
     const args = { place_id: 14, taxon_id: 47126, d1: '2026-01-01', d2: '2025-01-01' };
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
@@ -130,7 +177,7 @@ describe('zero-hit notice', () => {
 
     expect(result.total).toBe(0);
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — nothing is recorded. Relax quality_grade or captive.',
+      'Every bucket is zero — nothing is recorded. Relax quality_grade.',
     );
   });
 
@@ -142,7 +189,7 @@ describe('zero-hit notice', () => {
     await inaturalistGetHistogram.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — nothing is recorded in that area. Widen the area, or relax quality_grade or captive.',
+      'Every bucket is zero — nothing is recorded in that area. Widen the area, or relax quality_grade.',
     );
   });
 
@@ -183,12 +230,12 @@ describe('zero-hit notice', () => {
 
     expect(result.isError).toBeFalsy();
     const expected =
-      'Every bucket is zero — no records of this taxon in that area fall in 2090-01-01…any end. Widen or drop d1/d2. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
+      'Every bucket is zero — no records of this taxon in that area match the combined filters. The supplied observation-date d1/d2 2090-01-01…any end may narrow the intersection; widen or drop those bounds. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
     expect(result.structuredContent).toMatchObject({ total: 0, notice: expected });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
-    expect(text).toContain('fall in 2090-01-01…any end. Widen or drop d1/d2.');
+    expect(text).toContain('observation-date d1/d2 2090-01-01…any end may narrow the intersection');
   });
 
   it('names the date range without taxon wording when only d2 was set', async () => {
@@ -199,7 +246,8 @@ describe('zero-hit notice', () => {
     await inaturalistGetHistogram.handler(input, ctx);
 
     const notice = getEnrichment(ctx).notice as string;
-    expect(notice).toContain('no records in that area fall in any start…1800-01-01');
+    expect(notice).toContain('no records in that area match the combined filters');
+    expect(notice).toContain('observation-date d1/d2 any start…1800-01-01');
     expect(notice).not.toContain('this taxon');
   });
 
@@ -407,7 +455,7 @@ describe('annotation and iconic-group filters', () => {
     );
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — no records in that area match iconic_taxa Aves, Insecta. Drop iconic_taxa or choose another group. Widen the area, or relax quality_grade or captive.',
+      'Every bucket is zero — no records in that area match iconic_taxa Aves, Insecta. Drop iconic_taxa or choose another group. Widen the area, or relax quality_grade.',
     );
   });
 
@@ -421,7 +469,7 @@ describe('annotation and iconic-group filters', () => {
     );
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — no records fall in 2090-01-01…any end. Widen or drop d1/d2. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms, or drop the annotation filter. Relax quality_grade or captive.',
+      'Every bucket is zero — no records match the combined filters. The supplied observation-date d1/d2 2090-01-01…any end may narrow the intersection; widen or drop those bounds. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms, or drop the annotation filter. Relax quality_grade.',
     );
   });
 

@@ -16,6 +16,12 @@ function defaultUserAgent(): string {
 }
 
 const ServerConfigSchema = z.object({
+  clampLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Clamp oversized read limits to their documented ceiling. False restores strict rejection.',
+    ),
   userAgent: z
     .string()
     .default(() => defaultUserAgent())
@@ -53,7 +59,13 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 let _config: ServerConfig | undefined;
 
 export function getServerConfig(): ServerConfig {
+  /**
+   * The framework loads .env on the first core config read. Resolve it before
+   * parseEnvConfig snapshots the server variables, including schema policy.
+   */
+  void config.mcpServerVersion;
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    clampLimits: 'INATURALIST_CLAMP_LIMITS',
     userAgent: 'INATURALIST_USER_AGENT',
     minRequestIntervalMs: 'INATURALIST_MIN_REQUEST_INTERVAL_MS',
     maxConcurrentRequests: 'INATURALIST_MAX_CONCURRENT_REQUESTS',

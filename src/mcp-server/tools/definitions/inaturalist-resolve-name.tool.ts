@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { RANKS } from '@/services/inaturalist/vocabularies.js';
@@ -52,13 +53,11 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       .describe(
         'Restrict taxon candidates to one rank. Honoured only on type "taxon" — the cross-kind search has no rank filter.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(30)
-      .default(10)
-      .describe('Maximum candidates to return, applied to every type.'),
+    limit: limitSchema(
+      LIMIT_CAPS.resolveName,
+      10,
+      'Maximum candidates to return, applied to every type.',
+    ),
   }),
 
   output: z.object({
@@ -124,6 +123,10 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
   }),
 
   enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Requested and applied limits when an oversized limit was clamped.'),
     totalCount: z
       .number()
       .describe('Total candidates upstream matched, before the limit was applied.'),
@@ -144,23 +147,28 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       throw ctx.fail('rank_not_applicable', `rank does not apply to type "${input.type}".`);
     }
 
-    ctx.log.info('Resolving a name', { type: input.type, limit: input.limit });
+    const { applied: limit, notice } = applyLimit(
+      input.limit,
+      LIMIT_CAPS.resolveName,
+      ctx,
+      'inaturalist_resolve_name',
+      'limit',
+    );
+    if (notice) ctx.enrich.notice(notice);
+    ctx.log.info('Resolving a name', { type: input.type, limit });
     const service = getINaturalistService();
 
     const result =
       input.type === 'taxon'
-        ? await service.autocompleteTaxa({ q: input.q, rank: input.rank, limit: input.limit }, ctx)
-        : await service.searchRecords(
-            { q: input.q, sources: SOURCES[input.type], limit: input.limit },
-            ctx,
-          );
+        ? await service.autocompleteTaxa({ q: input.q, rank: input.rank, limit }, ctx)
+        : await service.searchRecords({ q: input.q, sources: SOURCES[input.type], limit }, ctx);
 
     ctx.enrich.total(result.total);
 
     // The taxon autocomplete returns related taxa past its per_page, so limit
     // is applied here on every route rather than trusted to upstream.
     if (result.candidates.length > 0) {
-      return { found: true, candidates: result.candidates.slice(0, input.limit) };
+      return { found: true, candidates: result.candidates.slice(0, limit) };
     }
 
     const guidance =

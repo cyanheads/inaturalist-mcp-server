@@ -20,6 +20,7 @@ import {
   resetFakeService,
 } from '../../../helpers/fake-inaturalist-service.js';
 import { projectedTaxonDocument } from '../../../helpers/fixtures.js';
+import { markdownNodes, markdownText } from '../../../helpers/rendering-commonmark.js';
 
 vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) => {
   const actual =
@@ -247,6 +248,34 @@ describe('the sections re-call path', () => {
 });
 
 describe('format()', () => {
+  it('relays literal encyclopedia text and its URL on both surfaces', async () => {
+    const summary = '  <b>literal</b> &amp; *text*\r\n\nend\n';
+    const url = 'https://example.test/a_(b)?q=&amp;';
+    fake.getTaxon.mockResolvedValue(
+      projectedTaxonDocument({
+        encyclopedia: { wikipedia_summary: summary, wikipedia_url: url },
+      }),
+    );
+    const result = await runToolContract(inaturalistGetTaxon, {
+      taxon_id: 48662,
+      sections: ['encyclopedia'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      encyclopedia: { wikipedia_summary: summary, wikipedia_url: url },
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n');
+    expect(markdownText(text)).toContain(summary);
+    expect(
+      markdownNodes(text)
+        .filter((node) => node.type === 'link')
+        .map((node) => node.destination),
+    ).toContain(url);
+    expect(markdownNodes(text).filter((node) => node.type === 'html_inline')).toEqual([]);
+  });
+
   it('renders the kind line and the full taxon-document block on the full arm', () => {
     const doc = projectedTaxonDocument();
     const result = { ...doc, kind: 'full' as const };

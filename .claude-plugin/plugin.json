@@ -17,8 +17,17 @@
       "command": "npx",
       "args": ["-y", "@cyanheads/inaturalist-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "INATURALIST_CLAMP_LIMITS": "${user_config.clamp_limits}"
       }
+    }
+  },
+  "userConfig": {
+    "clamp_limits": {
+      "type": "string",
+      "title": "Clamp read limits",
+      "description": "Clamp oversized read limits and defer oversized by-id batches. Set false for strict rejection.",
+      "default": ""
     }
   }
 }

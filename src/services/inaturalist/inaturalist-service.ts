@@ -164,6 +164,7 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     'photo_licensed',
     'license',
     'photo_license',
+    'sounds',
     'q',
     'search_on',
     'order_by',
@@ -184,6 +185,8 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     ...OBSERVATION_FILTER_PARAMS,
     'interval',
     'date_field',
+    'created_d1',
+    'created_d2',
   ]),
   'observations/observers': new Set(LEADERBOARD_PARAMS),
   'observations/identifiers': new Set(LEADERBOARD_PARAMS),
@@ -788,6 +791,12 @@ function mapUpstreamError(err: unknown): unknown {
   if (body.includes('Unknown taxon_id')) {
     return validationError('iNaturalist does not recognize that taxon_id.', {
       reason: 'unknown_taxon_id',
+      retryable: false,
+    });
+  }
+  if (body.includes('Unknown place_id')) {
+    return validationError('iNaturalist does not recognize that place_id.', {
+      reason: 'unknown_place_id',
       retryable: false,
     });
   }

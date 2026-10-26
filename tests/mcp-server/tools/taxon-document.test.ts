@@ -15,6 +15,33 @@ import {
   TAXON_SUMMARY_KEYS,
 } from '@/mcp-server/tools/taxon-document.js';
 import { projectedTaxonDocument } from '../../helpers/fixtures.js';
+import { markdownNodes, markdownText } from '../../helpers/rendering-commonmark.js';
+
+describe('literal taxon rendering', () => {
+  it('preserves encyclopedia strings and each URL independently of scalar encoding', () => {
+    const summary = '  <b>butterfly</b> &amp; *literal*\r\n\ntrailing\n';
+    const url = 'https://example.test/a_(b)?q=&amp;';
+    const doc = projectedTaxonDocument({
+      common_name: '  <b>Monarch</b>\r\n# literal  ',
+      encyclopedia: { wikipedia_summary: summary, wikipedia_url: url },
+      conservation: {
+        statuses: [{ status: '[EN]', authority: 'A &amp; B', iucn: 30, place: null, url }],
+        global_status: null,
+      },
+    });
+    const before = structuredClone(doc);
+    const rendered = renderTaxonDocument(doc).join('\n');
+    expect(markdownText(rendered)).toContain(summary);
+    expect(markdownText(rendered)).toContain('  <b>Monarch</b>\r\n# literal  ');
+    expect(
+      markdownNodes(rendered)
+        .filter((node) => node.type === 'link')
+        .map((node) => node.destination),
+    ).toEqual(expect.arrayContaining([url]));
+    expect(markdownNodes(rendered).filter((node) => node.type === 'html_inline')).toEqual([]);
+    expect(doc).toEqual(before);
+  });
+});
 
 describe('section vocabulary', () => {
   it('names the six sections, with summary as the virtual root-scalar group', () => {
@@ -85,14 +112,24 @@ describe('renderTaxonDocument — full record', () => {
   it('renders the photos section with the photo block and large_url', () => {
     const text = renderTaxonDocument(doc).join('\n');
     expect(text).toContain('### Photos');
-    expect(text).toContain('large_url https://static.inaturalist.org/photos/1/large.jpg');
+    expect(markdownText(text)).toContain(
+      'large_url https://static.inaturalist.org/photos/1/large.jpg',
+    );
+    expect(
+      markdownNodes(text)
+        .filter((node) => node.type === 'link')
+        .map((node) => node.destination),
+    ).toContain('https://static.inaturalist.org/photos/1/large.jpg');
   });
 
   it('renders the encyclopedia section as a blockquote plus the wikipedia_url', () => {
     const text = renderTaxonDocument(doc).join('\n');
     expect(text).toContain('### Encyclopedia');
-    expect(text).toContain('> The <b>monarch butterfly</b> is a milkweed butterfly.');
-    expect(text).toContain('**wikipedia_url:** https://en.wikipedia.org/wiki/Monarch_butterfly');
+    expect(markdownText(text)).toContain('The <b>monarch butterfly</b> is a milkweed butterfly.');
+    expect(markdownText(text)).toContain(
+      'wikipedia_url: https://en.wikipedia.org/wiki/Monarch_butterfly',
+    );
+    expect(markdownNodes(text).filter((node) => node.type === 'html_inline')).toEqual([]);
   });
 });
 
@@ -311,7 +348,7 @@ describe('line breaks in taxon text cannot forge markdown structure', () => {
       },
     });
     const lines = renderTaxonDocument(doc);
-    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(markdownText(lines.join('\n'))).toContain(`A butterfly.\r${FORGERY}`);
     expect(forgedLines(lines)).toEqual([]);
   });
 });

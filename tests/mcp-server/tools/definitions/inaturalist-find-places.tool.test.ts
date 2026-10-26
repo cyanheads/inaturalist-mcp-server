@@ -106,6 +106,28 @@ describe('name-prefix arm', () => {
 
 describe('bounding-box arm', () => {
   const bbox = { nelat: 47.7, nelng: -122.2, swlat: 47.5, swlng: -122.4 };
+  it.each([0, 30])(
+    'uses the applied ceiling with %s places, composing the notice on both surfaces',
+    async (count) => {
+      fake.nearbyPlaces.mockResolvedValue({
+        total: count,
+        standard: Array.from({ length: count }, (_, id) => projectedPlace({ id })),
+        community: [],
+      });
+      const result = await runToolContract(inaturalistFindPlaces, { ...bbox, per_page: 31 });
+      expect(fake.nearbyPlaces).toHaveBeenCalledWith(bbox, 30, expect.anything());
+      expect(result.structuredContent).toMatchObject({
+        cap: 60,
+        shown: count,
+        notice: expect.stringContaining('per_page 31 was clamped to 30'),
+      });
+      const text = (result.content ?? [])
+        .map((block) => ('text' in block ? block.text : ''))
+        .join('\n');
+      expect(text).toContain('per_page 31 was clamped to 30');
+      expect(text).toContain(count === 0 ? 'No place covers that box' : 'Shrink the box');
+    },
+  );
 
   it('resolves places covering a map area via nearbyPlaces', async () => {
     fake.nearbyPlaces.mockResolvedValue({

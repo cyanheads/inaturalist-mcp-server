@@ -37,14 +37,30 @@ function entries(count: number) {
 }
 
 describe('input validation', () => {
-  it('bounds per_page and its default to the response budget, two pages covering the window', () => {
+  it.each(['observers', 'identifiers'] as const)(
+    'does not truncate an exactly full final %s page',
+    async (kind) => {
+      for (const page of [1, 2, 5]) {
+        fake.getLeaderboard.mockResolvedValue({ total: page * 100, entries: entries(100) });
+        const result = await runToolContract(inaturalistGetLeaderboard, {
+          kind,
+          page,
+          per_page: 100,
+        });
+        expect(result.structuredContent).toMatchObject({ truncated: false, shown: 100 });
+        expect(result.structuredContent).not.toHaveProperty('notice');
+        expect(JSON.stringify(result.content)).not.toContain('Raise page');
+      }
+    },
+  );
+  it('keeps the default and accepts oversized per_page for clamping', () => {
     expect(inaturalistGetLeaderboard.input.parse({ kind: 'observers' }).per_page).toBe(25);
     expect(
       inaturalistGetLeaderboard.input.safeParse({ kind: 'observers', per_page: 250 }).success,
     ).toBe(true);
     expect(
       inaturalistGetLeaderboard.input.safeParse({ kind: 'observers', per_page: 251 }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(250 * 2).toBe(LEADERBOARD_WINDOW);
   });
 });
@@ -118,8 +134,7 @@ describe('the 500-entry leaderboard window', () => {
   });
 
   it('rejects page × per_page exactly at 501, making no upstream call', async () => {
-    // per_page maxes at 500 in the schema, so 3 × 167 = 501 is the boundary
-    // pair one past 500 without hitting that per-field cap.
+    // 3 × 167 = 501 crosses the window without exceeding the per-page cap.
     const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
     const input = inaturalistGetLeaderboard.input.parse({
       kind: 'observers',
@@ -290,7 +305,7 @@ describe('zero-hit and truncation enrichment', () => {
   });
 
   it('discloses truncation with "narrow the field" guidance once the next page would exceed the window', async () => {
-    fake.getLeaderboard.mockResolvedValue({ total: 500, entries: entries(100) });
+    fake.getLeaderboard.mockResolvedValue({ total: 501, entries: entries(100) });
     const ctx = createMockContext({ errors: inaturalistGetLeaderboard.errors });
     const input = inaturalistGetLeaderboard.input.parse({
       kind: 'observers',

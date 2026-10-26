@@ -7,10 +7,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   blankAsUnset,
   dateRangeInputShape,
+  emptyFilterNotice,
   emptyPageNotice,
   exceedsWindow,
   observationFilterInputShape,
@@ -22,7 +24,10 @@ import {
   resolveObserver,
   resolveRankRange,
 } from '@/mcp-server/tools/observation-filters.js';
-import { ObservationSchema, renderObservation } from '@/mcp-server/tools/observation-record.js';
+import {
+  renderObservation,
+  SearchObservationSchema,
+} from '@/mcp-server/tools/observation-record.js';
 import {
   getINaturalistService,
   type QueryParams,
@@ -33,6 +38,10 @@ import {
   LICENSE_CODES,
   RANKS,
 } from '@/services/inaturalist/vocabularies.js';
+
+const RESPONSE_BUDGET_BYTES = 50_000;
+const RESPONSE_OVERHEAD_BYTES = 4_096;
+const utf8 = new TextEncoder();
 
 const ORDER_BY = [
   'created_at',
@@ -55,6 +64,43 @@ const licenseCode = z.preprocess(
   (value) => (typeof value === 'string' ? value.toLowerCase() : value),
   z.enum(LICENSE_CODES),
 );
+
+const SearchPageSchema = z.object({
+  total_results: z
+    .number()
+    .describe(
+      'How many records upstream reports as matching. An estimate over a live index — it drifts between calls seconds apart.',
+    ),
+  observations: z.array(SearchObservationSchema).describe('The matching sightings, projected.'),
+  deferred: z
+    .array(
+      z
+        .object({
+          observation_id: z
+            .number()
+            .describe(
+              'Observation id to retrieve through inaturalist_get_observation with the same include values.',
+            ),
+        })
+        .describe('One fetched observation deferred for a by-id call.'),
+    )
+    .describe(
+      'Ordered ids of the fetched-page suffix omitted from observations to meet the response budget. Empty when the whole page fits; independent of has_more.',
+    ),
+  next_cursor: z
+    .string()
+    .optional()
+    .describe(
+      'Pass back as cursor to continue past this page. Present only when has_more is true and the page was ordered by id descending; under any other ordering, raise page instead.',
+    ),
+  has_more: z
+    .boolean()
+    .describe(
+      'True when the fetched page filled the applied per_page and more records follow, independent of deferred ids. On the page path an exactly full final page is false; under a cursor, where the offset is unknown, every full page is true.',
+    ),
+});
+
+type SearchPage = z.infer<typeof SearchPageSchema>;
 
 export const inaturalistSearchObservations = tool('inaturalist_search_observations', {
   description:
@@ -123,6 +169,12 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       .describe(
         'Restrict to records whose own license_code is one of these, e.g. ["cc-by","cc0"] for reuse with attribution only. Decode the codes with inaturalist_list_reference topic licenses; all-rights-reserved records have no code to pass.',
       ),
+    sounds: z
+      .boolean()
+      .optional()
+      .describe(
+        'True selects observations with sounds; false selects those without. Omit for either. Use include: ["sounds"] to expand sound metadata; no media is downloaded.',
+      ),
     photo_license: z
       .array(licenseCode)
       .optional()
@@ -159,15 +211,11 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     ).describe(
       'next_cursor from a previous id-descending page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces order_by "id", order "desc".',
     ),
-    per_page: z
-      .number()
-      .int()
-      .min(1)
-      .max(25)
-      .default(10)
-      .describe(
-        'Records per page, maximum 25. A projected record costs roughly 1.9 KB across structuredContent and the rendered text together, so 25 is a full page near 49 KB and the default of 10 near 20 KB. Walk further with page or cursor rather than a larger page.',
-      ),
+    per_page: limitSchema(
+      LIMIT_CAPS.searchObservations,
+      10,
+      'Records fetched per page. Complete records may be deferred to keep the response within its byte budget; retrieve deferred ids through inaturalist_get_observation with the same include values.',
+    ),
     include: z
       .array(z.enum(['photos', 'annotations', 'sounds']))
       .optional()
@@ -176,31 +224,17 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       ),
   }),
 
-  output: z.object({
-    total_results: z
-      .number()
-      .describe(
-        'How many records upstream reports as matching. An estimate over a live index — it drifts between calls seconds apart.',
-      ),
-    observations: z.array(ObservationSchema).describe('The matching sightings, projected.'),
-    next_cursor: z
-      .string()
-      .optional()
-      .describe(
-        'Pass back as cursor to continue past this page. Present only when has_more is true and the page was ordered by id descending; under any other ordering, raise page instead.',
-      ),
-    has_more: z
-      .boolean()
-      .describe(
-        'True when this page filled per_page and more records follow. On the page path an exactly full final page is false; under a cursor, where the offset is unknown, every full page is true.',
-      ),
-  }),
+  output: SearchPageSchema,
 
   enrichment: {
     applied_filters: z
       .object({
-        quality_grade: z.array(z.string()).describe('Identification tiers actually searched.'),
-        captive: z.boolean().describe('Whether captive and cultivated records were included.'),
+        quality_grade: z
+          .array(z.string())
+          .describe(
+            'Identification tiers actually searched, normalized to unique values in first-appearance order.',
+          ),
+        captive: z.boolean().describe('Captive-only when true, wild-only when false.'),
         order_by: z.string().describe('Sort field actually sent upstream.'),
         order: z.string().describe('Sort direction actually sent upstream.'),
         ordering_forced_by_cursor: z
@@ -208,14 +242,14 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
           .describe('True when a cursor overrode the requested ordering.'),
       })
       .describe('The server-applied defaults and overrides that determine what this answer means.'),
-    truncated: z.boolean().describe('True when the page filled per_page and more records follow.'),
+    truncated: z.boolean().describe('True when records were deferred or more pages follow.'),
     shown: z.number().describe('How many records this page carries.'),
     cap: z.number().describe('The per_page that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when nothing matched, when the page is past the last one holding results, or how to continue past a full page.',
+        'Composed guidance for applied limits, ignored filters, empty pages, deferred ids and pagination.',
       ),
   },
 
@@ -227,6 +261,13 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
   },
 
   errors: [
+    {
+      reason: 'unknown_place_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because place_id does not exist.',
+      recovery: 'Find the area with inaturalist_find_places and pass the place id it returns.',
+      thrownBy: 'service',
+    },
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
@@ -310,6 +351,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
   ],
 
   async handler(input, ctx) {
+    input = { ...input, quality_grade: [...new Set(input.quality_grade)] };
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -349,12 +391,20 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       );
     }
 
+    const limit = applyLimit(
+      input.per_page,
+      LIMIT_CAPS.searchObservations,
+      ctx,
+      'inaturalist_search_observations',
+      'per_page',
+    );
+    const perPage = limit.applied;
     const page = input.page ?? 1;
     const usingCursor = input.cursor !== undefined;
-    if (!usingCursor && exceedsWindow(page, input.per_page, RESULT_WINDOW)) {
+    if (!usingCursor && exceedsWindow(page, perPage, RESULT_WINDOW)) {
       throw ctx.fail(
         'result_window_exceeded',
-        `page ${page} × per_page ${input.per_page} reaches past the ${RESULT_WINDOW}-result window upstream will serve.`,
+        `page ${page} × per_page ${perPage} reaches past the ${RESULT_WINDOW}-result window upstream will serve.`,
       );
     }
 
@@ -377,18 +427,19 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       endemic: input.endemic,
       licensed: input.licensed,
       photo_licensed: input.photo_licensed,
+      sounds: input.sounds,
       license: input.license,
       photo_license: input.photo_license,
       q: input.q,
       search_on: input.search_on,
       order_by: orderBy,
       order,
-      per_page: input.per_page,
+      per_page: perPage,
       ...(usingCursor ? { id_below: input.cursor } : { page }),
     };
 
     ctx.log.info('Searching observations', {
-      perPage: input.per_page,
+      perPage,
       usingCursor,
       hasArea: Object.keys(area.value).length > 0,
     });
@@ -399,10 +450,12 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       include,
       ctx,
     );
+    const ignoredFilters = emptyFilterNotice(input);
+    const notices = [limit.notice, ignoredFilters].filter(
+      (notice): notice is string => notice !== undefined,
+    );
 
-    // The baseline disclosure rides every path — the enrichment block declares
-    // these three as required, and `ctx.enrich.truncated` below overwrites them
-    // on the one path where the page actually filled.
+    /** Required disclosure on every path; nonempty pages update it after budgeting. */
     ctx.enrich({
       applied_filters: {
         quality_grade: input.quality_grade,
@@ -413,7 +466,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       },
       truncated: false,
       shown: observations.length,
-      cap: input.per_page,
+      cap: perPage,
     });
 
     if (observations.length === 0) {
@@ -421,19 +474,23 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       // back empty. A cursor walk has no page offset, and its upstream total
       // counts only what lies below the cursor.
       ctx.enrich.notice(
-        !usingCursor && total > 0
-          ? emptyPageNotice({ page, perPage: input.per_page, total, noun: 'records' })
-          : zeroHitNotice(input),
+        [
+          ...notices,
+          !usingCursor && total > 0
+            ? emptyPageNotice({ page, perPage, total, noun: 'records' })
+            : zeroHitNotice(input),
+        ]
+          .filter(Boolean)
+          .join(' '),
       );
-      return { total_results: total, observations, has_more: false };
+      return { total_results: total, observations, deferred: [], has_more: false };
     }
 
     // A full page is necessary but not sufficient: on the page path the offset
     // is known, so an exactly-full final page is reported as the end rather than
     // sending the agent after a page that does not exist. Under a cursor the
     // offset is unknown and a full page is the only signal there is.
-    const hasMore =
-      observations.length >= input.per_page && (usingCursor || page * input.per_page < total);
+    const hasMore = observations.length >= perPage && (usingCursor || page * perPage < total);
     // `id_below` continues only an id-descending walk: under any other ordering
     // it repeats or skips records, and under `id asc` it walks back over page 1.
     const idDescending = orderBy === 'id' && order === 'desc';
@@ -443,31 +500,62 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       let guidance = `More records match. Raise page to ${page + 1} to continue.`;
       if (nextCursor) {
         guidance = `More records match. Pass cursor "${nextCursor}" to continue; beyond 10,000 results the cursor is the only mechanism that works.`;
-      } else if (exceedsWindow(page + 1, input.per_page, RESULT_WINDOW)) {
+      } else if (exceedsWindow(page + 1, perPage, RESULT_WINDOW)) {
         guidance = `This page ends at the 10,000-result window upstream serves, and no cursor continues order_by "${orderBy}", order "${order}". To continue past it, re-run with order_by "id" and order "desc" and follow next_cursor, or narrow the filters.`;
       }
-      ctx.enrich.truncated({ shown: observations.length, cap: input.per_page, guidance });
+      notices.push(guidance);
     }
 
-    return {
+    const result: SearchPage = {
       total_results: total,
       observations,
+      deferred: [],
       ...(nextCursor ? { next_cursor: nextCursor } : {}),
       has_more: hasMore,
     };
+    /** The delivery formatter sizes both surfaces; the reserve covers enrichment, its trailer and SDK metadata. */
+    let shown = observations.length;
+    while (
+      shown > 0 &&
+      utf8.encode(JSON.stringify({ content: formatSearchPage(result), structuredContent: result }))
+        .byteLength >
+        RESPONSE_BUDGET_BYTES - RESPONSE_OVERHEAD_BYTES
+    ) {
+      shown -= 1;
+      result.observations = observations.slice(0, shown);
+      result.deferred = observations.slice(shown).map(({ id }) => ({ observation_id: id }));
+    }
+    if (result.deferred.length > 0)
+      notices.push(
+        'Some fetched records were deferred to keep this response within its byte budget. Retrieve every deferred observation_id with inaturalist_get_observation using the same include values. Deferred records remain available even when has_more is false.',
+      );
+    ctx.enrich({
+      truncated: hasMore || result.deferred.length > 0,
+      shown: result.observations.length,
+      cap: perPage,
+    });
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    return result;
   },
 
-  format: (result) => {
-    const lines: string[] = [
-      `**total_results:** ${result.total_results} (upstream estimate) · **returned:** ${result.observations.length} · **has_more:** ${result.has_more} · **next_cursor:** ${result.next_cursor ?? 'none'}`,
-    ];
-    for (const observation of result.observations) {
-      lines.push('');
-      lines.push(...renderObservation(observation));
-    }
-    return [{ type: 'text', text: lines.join('\n') }];
-  },
+  format: formatSearchPage,
 });
+
+function formatSearchPage(result: SearchPage) {
+  const lines: string[] = [
+    `**total_results:** ${result.total_results} (upstream estimate) · **returned:** ${result.observations.length} · **has_more:** ${result.has_more} · **next_cursor:** ${result.next_cursor ?? 'none'}`,
+  ];
+  for (const observation of result.observations) {
+    lines.push('');
+    lines.push(...renderObservation(observation));
+  }
+  lines.push(`**deferred:** ${JSON.stringify(result.deferred)}`);
+  if (result.deferred.length > 0)
+    lines.push(
+      'Retrieve deferred observation_id values through inaturalist_get_observation with the same include values.',
+    );
+  return [{ type: 'text' as const, text: lines.join('\n') }];
+}
 
 /**
  * Names the filter most likely to be responsible for an empty page, so the agent
@@ -477,6 +565,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
 function zeroHitNotice(input: {
   quality_grade: readonly string[];
   captive: boolean;
+  sounds?: boolean | undefined;
   taxon_id?: number | undefined;
   d1?: string | undefined;
   d2?: string | undefined;
@@ -495,7 +584,12 @@ function zeroHitNotice(input: {
   }
   if (!input.captive) {
     fragments.push(
-      'Captive and cultivated records were excluded. Set captive to true to include zoo animals and garden plantings.',
+      'Only wild records were searched. To search captive/cultivated-only records, use captive: true in a separate call.',
+    );
+  }
+  if (input.sounds !== undefined) {
+    fragments.push(
+      `sounds: ${input.sounds} selected records ${input.sounds ? 'with' : 'without'} sound attachments. Omit sounds to search either cohort.`,
     );
   }
   if (input.d1 !== undefined || input.d2 !== undefined) {

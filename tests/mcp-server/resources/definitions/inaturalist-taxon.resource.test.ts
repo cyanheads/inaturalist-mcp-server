@@ -32,6 +32,25 @@ beforeEach(() => {
 });
 
 describe('happy path', () => {
+  it('retains literal HTML, entities, and separators in its JSON representation', async () => {
+    const summary = '  <b>literal</b> &amp;\r\n\nend\n';
+    const doc = projectedTaxonDocument({
+      encyclopedia: { wikipedia_summary: summary, wikipedia_url: 'https://example.test/?q=&amp;' },
+    });
+    fake.getTaxon.mockResolvedValue(doc);
+    const result = await inaturalistTaxonResource.handler(
+      { taxon_id: '48662' },
+      createMockContext(),
+    );
+    expect(inaturalistTaxonResource.mimeType).toBe('application/json');
+    expect(inaturalistTaxonResource.format).toBeUndefined();
+    expect(
+      JSON.parse(JSON.stringify(inaturalistTaxonResource.output?.parse(result))),
+    ).toMatchObject({
+      encyclopedia: { wikipedia_summary: summary, wikipedia_url: 'https://example.test/?q=&amp;' },
+    });
+  });
+
   it('returns the whole projected document, with no section-selection arm', async () => {
     const doc = projectedTaxonDocument();
     fake.getTaxon.mockResolvedValue(doc);

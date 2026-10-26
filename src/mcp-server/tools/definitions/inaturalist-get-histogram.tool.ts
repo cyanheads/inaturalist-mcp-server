@@ -8,7 +8,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   areaInputShape,
+  creationDateRangeInputShape,
   dateRangeInputShape,
+  emptyFilterNotice,
   observationFilterInputShape,
   resolveAnnotation,
   resolveArea,
@@ -71,6 +73,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         'Which date to bucket by: when the organism was observed, or when the record was uploaded.',
       ),
     ...dateRangeInputShape,
+    ...creationDateRangeInputShape,
     d1: dateRangeInputShape.d1.describe(
       `Earliest observation date, YYYY-MM-DD. Inclusive. Must be on or before d2. With interval set to day or hour, a wide range can exceed the ${HISTOGRAM_BUCKET_CAP}-bucket cap — narrow d1/d2 to reach buckets past it.`,
     ),
@@ -110,7 +113,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     applied_filters: z
       .object({
         quality_grade: z.array(z.string()).describe('Identification tiers actually searched.'),
-        captive: z.boolean().describe('Whether captive and cultivated records were included.'),
+        captive: z.boolean().describe('Captive-only when true, wild-only when false.'),
         date_field: z.string().describe('Which date the buckets were built from.'),
       })
       .describe('The server-applied defaults that determine what this answer means.'),
@@ -134,6 +137,13 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
 
   errors: [
     {
+      reason: 'unknown_place_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because place_id does not exist.',
+      recovery: 'Find the area with inaturalist_find_places and pass the place id it returns.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat.',
@@ -143,9 +153,9 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     {
       reason: 'inverted_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'd1 is after d2.',
+      when: 'd1 is after d2, or created_d1 is after created_d2.',
       recovery:
-        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
+        'Pass d1 on or before d2 and created_d1 on or before created_d2 — both ranges are inclusive, so equal dates select a single calendar day.',
     },
     {
       reason: 'unpaired_annotation_value',
@@ -165,6 +175,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
   ],
 
   async handler(input, ctx) {
+    input = { ...input, quality_grade: [...new Set(input.quality_grade)] };
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -219,15 +230,24 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     // so a genuinely empty answer is recognised even when the cap bites — and
     // its notice replaces the truncation guidance, since narrowing the range
     // would not help. The notice is written once, on whichever call applies.
-    const notice =
-      total === 0 ? zeroHitNotice(input, Object.keys(area.value).length > 0) : undefined;
+    const notice = [
+      emptyFilterNotice(input),
+      total === 0 ? zeroHitNotice(input, Object.keys(area.value).length > 0) : undefined,
+    ]
+      .filter(Boolean)
+      .join(' ');
     if (truncated) {
       ctx.enrich.truncated({
         shown: buckets.length,
         cap: HISTOGRAM_BUCKET_CAP,
-        guidance:
-          notice ??
-          `Upstream returned ${allBuckets.length} buckets; only the first ${HISTOGRAM_BUCKET_CAP} are shown. Narrow d1/d2, or choose a coarser interval, to bring the rest into range.`,
+        guidance: [
+          notice,
+          total !== 0
+            ? `Upstream returned ${allBuckets.length} buckets; only the first ${HISTOGRAM_BUCKET_CAP} are shown. Narrow d1/d2 or created_d1/created_d2, or choose a coarser interval, to bring the rest into range.`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
     } else if (notice) {
       ctx.enrich.notice(notice);
@@ -260,6 +280,8 @@ function zeroHitNotice(
     taxon_id?: number | undefined;
     d1?: string | undefined;
     d2?: string | undefined;
+    created_d1?: string | undefined;
+    created_d2?: string | undefined;
     term_id?: readonly number[] | undefined;
     iconic_taxa?: readonly string[] | undefined;
   },
@@ -276,8 +298,18 @@ function zeroHitNotice(
   ];
 
   let finding = `Every bucket is zero — ${hasTaxon ? 'this taxon has no records' : 'nothing is recorded'}${where}.`;
-  if (input.d1 !== undefined || input.d2 !== undefined) {
-    finding = `Every bucket is zero — no records${of}${where} fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen or drop d1/d2.`;
+  const bounds = [
+    ...(input.d1 !== undefined || input.d2 !== undefined
+      ? [`observation-date d1/d2 ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}`]
+      : []),
+    ...(input.created_d1 !== undefined || input.created_d2 !== undefined
+      ? [
+          `upload-date created_d1/created_d2 ${input.created_d1 ?? 'any start'}…${input.created_d2 ?? 'any end'}`,
+        ]
+      : []),
+  ];
+  if (bounds.length > 0) {
+    finding = `Every bucket is zero — no records${of}${where} match the combined filters. The supplied ${bounds.join(' and ')} may narrow the intersection; widen or drop those bounds.`;
   } else if (narrowing.length > 0) {
     finding = `Every bucket is zero — no records${of}${where} match ${narrowing.join(' and ')}.`;
   }
@@ -291,6 +323,6 @@ function zeroHitNotice(
   ];
   const remedy = hasTaxon
     ? `Confirm the taxon with inaturalist_resolve_name${hasArea ? ', or widen the area' : ''}.`
-    : `${hasArea ? 'Widen the area, or relax' : 'Relax'} quality_grade or captive.`;
+    : `${hasArea ? 'Widen the area, or relax' : 'Relax'} quality_grade.`;
   return [finding, ...filterChecks, remedy].join(' ');
 }

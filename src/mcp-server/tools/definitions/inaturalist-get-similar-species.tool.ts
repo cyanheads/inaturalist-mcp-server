@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   dateRangeInputShape,
@@ -61,15 +62,11 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     ...dateRangeInputShape,
     quality_grade,
     captive,
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(50)
-      .default(20)
-      .describe(
-        'Maximum look-alikes to return. Applied in-process — the upstream endpoint publishes no page size and returns its whole confusion set.',
-      ),
+    limit: limitSchema(
+      LIMIT_CAPS.similarSpecies,
+      20,
+      'Maximum look-alikes to return. Applied in-process to the whole upstream confusion set.',
+    ),
   }),
 
   output: z.object({
@@ -99,6 +96,13 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
   },
 
   errors: [
+    {
+      reason: 'unknown_place_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because place_id does not exist.',
+      recovery: 'Find the area with inaturalist_find_places and pass the place id it returns.',
+      thrownBy: 'service',
+    },
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
@@ -131,7 +135,19 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requestedInput, ctx) {
+    requestedInput = {
+      ...requestedInput,
+      quality_grade: [...new Set(requestedInput.quality_grade)],
+    };
+    const { applied, notice: clampNotice } = applyLimit(
+      requestedInput.limit,
+      LIMIT_CAPS.similarSpecies,
+      ctx,
+      'inaturalist_get_similar_species',
+      'limit',
+    );
+    const input = { ...requestedInput, limit: applied };
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -170,9 +186,14 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         ...(input.d1 !== undefined || input.d2 !== undefined ? ['the d1/d2 range'] : []),
       ];
       ctx.enrich.notice(
-        scope.length === 0
-          ? 'No look-alikes are recorded for this taxon — it is rarely misidentified.'
-          : `No look-alikes are recorded for this taxon — either it is rarely misidentified, or ${scope.join(' and ')} ${scope.length > 1 ? 'are' : 'is'} too narrow. Re-run without ${scope.length > 1 ? 'them' : scope[0]} to see the global confusion set.`,
+        [
+          clampNotice,
+          scope.length === 0
+            ? 'No look-alikes are recorded for this taxon — it is rarely misidentified.'
+            : `No look-alikes are recorded for this taxon — either it is rarely misidentified, or ${scope.join(' and ')} ${scope.length > 1 ? 'are' : 'is'} too narrow. Re-run without ${scope.length > 1 ? 'them' : scope[0]} to see the global confusion set.`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       );
     } else if (similar.length > shown.length) {
       // The ranking is descending, so the last count shown bounds every
@@ -182,9 +203,14 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         shown: shown.length,
         cap: input.limit,
         ...(ceiling === undefined ? {} : { ceiling }),
-        guidance: `${similar.length} look-alikes are recorded. Raise limit (max 50) to see the rest of the confusion set.`,
+        guidance: [
+          clampNotice,
+          `${similar.length} look-alikes are recorded. Raise limit (max ${LIMIT_CAPS.similarSpecies}) to see the rest of the confusion set.`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
-    }
+    } else if (clampNotice) ctx.enrich.notice(clampNotice);
 
     return { taxon_id: input.taxon_id, similar_species: shown };
   },

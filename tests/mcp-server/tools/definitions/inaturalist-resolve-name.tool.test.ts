@@ -91,6 +91,34 @@ describe('routing', () => {
 });
 
 describe('limit', () => {
+  it.each([false, true])(
+    'clamps both routing arms with found=%s and exposes the requested/applied notice',
+    async (found) => {
+      const candidates = found ? [resolvedCandidate()] : [];
+      fake.autocompleteTaxa.mockResolvedValue({ total: candidates.length, candidates });
+      fake.searchRecords.mockResolvedValue({ total: candidates.length, candidates });
+      for (const type of ['taxon', 'any'] as const) {
+        const result = await runToolContract(inaturalistResolveName, { q: 'x', type, limit: 31 });
+        expect(result.structuredContent).toMatchObject({
+          found,
+          notice: 'limit 31 was clamped to 30.',
+        });
+        const text = (result.content ?? [])
+          .map((block) => ('text' in block ? block.text : ''))
+          .join('\n');
+        expect(text).toContain('limit 31 was clamped to 30.');
+        if (!found) expect(text).toContain(type === 'taxon' ? 'No taxon name' : 'Nothing matched');
+      }
+      expect(fake.autocompleteTaxa).toHaveBeenCalledWith(
+        { q: 'x', rank: undefined, limit: 30 },
+        expect.anything(),
+      );
+      expect(fake.searchRecords).toHaveBeenCalledWith(
+        { q: 'x', sources: undefined, limit: 30 },
+        expect.anything(),
+      );
+    },
+  );
   function taxa(count: number) {
     return Array.from({ length: count }, (_, i) => resolvedCandidate({ id: i + 1 }));
   }

@@ -6,9 +6,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   dateRangeInputShape,
+  emptyFilterNotice,
   emptyPageNotice,
   observationFilterInputShape,
   observerProjectInputShape,
@@ -69,15 +71,11 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     ...observationFilterInputShape,
     ...observerProjectInputShape,
     page: z.number().int().min(1).default(1).describe('Page number. Defaults to 1.'),
-    per_page: z
-      .number()
-      .int()
-      .min(1)
-      .max(50)
-      .default(25)
-      .describe(
-        'Species per page, maximum 50. A ranked species costs roughly 860 bytes across structuredContent and the rendered text together, so 50 is a full page near 43 KB. Upstream would serve 500 in one page — raise page rather than asking for it.',
-      ),
+    per_page: limitSchema(
+      LIMIT_CAPS.speciesCounts,
+      25,
+      'Species per page. Raise page to continue the ranking.',
+    ),
   }),
 
   output: z.object({
@@ -97,7 +95,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     applied_filters: z
       .object({
         quality_grade: z.array(z.string()).describe('Identification tiers actually searched.'),
-        captive: z.boolean().describe('Whether captive and cultivated records were included.'),
+        captive: z.boolean().describe('Captive-only when true, wild-only when false.'),
       })
       .describe('The server-applied defaults that determine what this answer means.'),
     truncated: z.boolean().describe('True when the page filled per_page and more species follow.'),
@@ -125,6 +123,13 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
   },
 
   errors: [
+    {
+      reason: 'unknown_place_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because place_id does not exist.',
+      recovery: 'Find the area with inaturalist_find_places and pass the place id it returns.',
+      thrownBy: 'service',
+    },
     {
       reason: 'invalid_geography',
       code: JsonRpcErrorCode.ValidationError,
@@ -179,7 +184,19 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     },
   ],
 
-  async handler(input, ctx) {
+  async handler(requestedInput, ctx) {
+    requestedInput = {
+      ...requestedInput,
+      quality_grade: [...new Set(requestedInput.quality_grade)],
+    };
+    const { applied, notice: clampNotice } = applyLimit(
+      requestedInput.per_page,
+      LIMIT_CAPS.speciesCounts,
+      ctx,
+      'inaturalist_get_species_counts',
+      'per_page',
+    );
+    const input = { ...requestedInput, per_page: applied };
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -217,6 +234,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     ctx.log.info('Ranking species for an area', { perPage: input.per_page, hasArea });
 
     const { total, species } = await getINaturalistService().getSpeciesCounts(params, ctx);
+    const ignoredFilters = [clampNotice, emptyFilterNotice(input)].filter(Boolean).join(' ');
 
     // The baseline disclosure rides every path — the enrichment block declares
     // these three as required, and `ctx.enrich.truncated` below overwrites them
@@ -231,12 +249,17 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     if (species.length === 0) {
       if (total > 0) {
         ctx.enrich.notice(
-          emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'species' }),
+          [
+            ignoredFilters,
+            emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'species' }),
+          ]
+            .filter(Boolean)
+            .join(' '),
         );
       } else {
         const lead = 'No species recorded for those filters.';
         const guidance = wideningGuidance(input, hasArea);
-        ctx.enrich.notice(guidance ? `${lead} ${guidance}` : lead);
+        ctx.enrich.notice([ignoredFilters, lead, guidance].filter(Boolean).join(' '));
       }
       return { total_results: total, species };
     }
@@ -249,9 +272,14 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         shown: species.length,
         cap: input.per_page,
         ...(ceiling === undefined ? {} : { ceiling }),
-        guidance: `${total} distinct species match. Raise page to walk further down the ranking, or raise per_page (max 50).`,
+        guidance: [
+          ignoredFilters,
+          `${total} distinct species match. Raise page to walk further down the ranking, or raise per_page (max ${LIMIT_CAPS.speciesCounts}).`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
-    }
+    } else if (ignoredFilters) ctx.enrich.notice(ignoredFilters);
 
     return { total_results: total, species };
   },

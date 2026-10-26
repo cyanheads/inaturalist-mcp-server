@@ -2,10 +2,10 @@
 
 **Server:** inaturalist-mcp-server
 **Version:** 0.2.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -13,7 +13,7 @@
 
 ## Domain
 
-Read-only, keyless access to the iNaturalist v1 API (`https://api.inaturalist.org/v1/`) — georeferenced citizen-science sightings, the community identification thread behind each record, taxon profiles, phenology histograms, the similar-species confusion graph, places, controlled vocabularies, and observer/identifier leaderboards. Ten tools, two resources, no prompts, one service.
+Read-only, keyless access to the iNaturalist v1 API (`https://api.inaturalist.org/v1/`) — georeferenced citizen-science sightings, the community identification thread behind each record, taxon profiles, phenology histograms, the similar-species confusion graph, places, controlled vocabularies, and observer/identifier leaderboards. Ten tools, two domain resource templates, one published caller skill with SDK skill discovery/resource surfaces, no prompts, one service.
 
 `docs/design.md` is the as-built contract: the response projection tables, the measured payload sizes the page caps derive from, the input-validation rules, the licensing posture, and a Decisions Log explaining why each is the way it is. Read it before changing a tool's surface — most of what looks arbitrary was measured against the live API.
 
@@ -56,6 +56,12 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ---
 
 ## Patterns
+
+Search returns a prefix of whole records within 50,000 UTF-8 bytes of the serialized `CallToolResult`, counting both surfaces, enrichment, and SDK fields. Its ordered `deferred` IDs account for the remaining upstream-page suffix; retrieve them with `inaturalist_get_observation` and the same `include` before following the full page's continuation. Detail strings stay complete, with no universal byte ceiling. By-id lookup accepts up to 100 submitted IDs by default, deduplicates in first-seen order, attempts ten distinct IDs, and separates deferred work from attempted misses; strict mode restores the ten-submitted-ID schema limit.
+
+`INATURALIST_CLAMP_LIMITS` defaults on and clamps list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, with notice, log, and counter. Off restores prior advertised schema caps. Empty optional filter arrays are ignored with a composed notice; nonempty annotation values still require nonempty attributes. `include: []` is unchanged. `captive: true` selects captive/cultivated records only, and false selects wild records only. Histogram upload bounds `created_d1`/`created_d2` are independent of observation bounds `d1`/`d2`; `date_field` selects bucketing only. Search's optional boolean `sounds` filters records separately from expansion. Unknown places map to `unknown_place_id` with `inaturalist_find_places` recovery on all five area-filter tools.
+
+Render upstream strings as literal CommonMark text, preserving CR/LF, HTML, entities, and whitespace. NUL-containing strings use labeled JSON string literals; URLs use Markdown links. Present empty expansions, zero counts, and null/empty descriptions remain distinguishable. Search derives its schema from the shared observation schema, omitting only twelve unreachable detail fields; detail and resource schemas stay full.
 
 ### Tool
 
@@ -162,7 +168,7 @@ None, deliberately. The server is lookup- and discovery-oriented: the workflow c
 
 ### Server config
 
-Abridged from `src/config/server-config.ts`. There is no API key — the four vars are the outbound traffic posture against `api.inaturalist.org`, and all four are optional with defaults.
+Abridged from `src/config/server-config.ts`. There is no API key — four traffic settings govern requests to `api.inaturalist.org`; `INATURALIST_CLAMP_LIMITS` controls compatible limit normalization. All five settings are optional with defaults.
 
 ```ts
 // src/config/server-config.ts — lazy-parsed, separate from framework config
@@ -170,6 +176,7 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { config, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
+  clampLimits: z.stringbool().default(true).describe('Clamp oversized list limits; false restores strict rejection.'),
   userAgent: z
     .string()
     .default(() => `inaturalist-mcp-server/${config.mcpServerVersion} (+https://github.com/cyanheads/inaturalist-mcp-server)`)
@@ -181,7 +188,10 @@ const ServerConfigSchema = z.object({
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
+  // Load .env before parseEnvConfig snapshots variables, including schema policy.
+  void config.mcpServerVersion;
   _config ??= parseEnvConfig(ServerConfigSchema, {
+    clampLimits: 'INATURALIST_CLAMP_LIMITS',
     userAgent: 'INATURALIST_USER_AGENT',
     minRequestIntervalMs: 'INATURALIST_MIN_REQUEST_INTERVAL_MS',
     maxConcurrentRequests: 'INATURALIST_MAX_CONCURRENT_REQUESTS',
@@ -318,7 +328,7 @@ src/
       inaturalist-observation.resource.ts   # inaturalist://observations/{observation_id}
 ```
 
-No `prompts/` directory — see Prompts above. `tests/` mirrors this layout file for file.
+No `prompts/` directory — see Prompts above. `tests/` mirrors this layout file for file. `skills/inaturalist-guide/SKILL.md` is the published caller guide.
 
 ---
 
@@ -335,9 +345,20 @@ No `prompts/` directory — see Prompts above. `tests/` mirrors this layout file
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. Absent by default; usually none is needed |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+The published `skills/inaturalist-guide/SKILL.md` covers identifier provenance, cohort matching, annotation parentage, and evidence coverage. It is registered through `createApp({ skills: 'skills' })`; SDK skill discovery and resources supplement the two domain templates.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -349,6 +370,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -396,7 +418,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — env-var parity, bundle exclusions, plugin manifests, and published skills (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -416,7 +438,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

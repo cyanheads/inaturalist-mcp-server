@@ -148,6 +148,31 @@ export const dateRangeInputShape = {
   d2: blankAsUnset(observedOnDate).describe('Latest observation date, YYYY-MM-DD. Inclusive.'),
 };
 
+/** Upload-calendar bounds, accepted only by the histogram tool. */
+export const creationDateRangeInputShape = {
+  created_d1: blankAsUnset(observedOnDate).describe(
+    'Earliest upload date, YYYY-MM-DD. Inclusive. Must be on or before created_d2.',
+  ),
+  created_d2: blankAsUnset(observedOnDate).describe('Latest upload date, YYYY-MM-DD. Inclusive.'),
+};
+
+/** Names ignored optional filter arrays without changing their accepted shape. */
+export function emptyFilterNotice(input: object): string | undefined {
+  const fields = Object.entries(input)
+    .filter(
+      ([key, value]) =>
+        ['license', 'photo_license', 'csi', 'term_id', 'term_value_id', 'iconic_taxa'].includes(
+          key,
+        ) &&
+        Array.isArray(value) &&
+        value.length === 0,
+    )
+    .map(([key]) => key);
+  return fields.length > 0
+    ? `${fields.join(', ')} ${fields.length === 1 ? 'was' : 'were'} empty and ignored; omit empty filters to search without those restrictions.`
+    : undefined;
+}
+
 /** The two defaults that most determine what an answer means, plus the annotation pair. */
 export const observationFilterInputShape = {
   quality_grade: z
@@ -155,13 +180,13 @@ export const observationFilterInputShape = {
     .min(1)
     .default(['research'])
     .describe(
-      'Identification confidence tiers to include. Defaults to research-grade only; adding "needs_id" roughly doubles the corpus and lowers identification confidence.',
+      'Identification confidence tiers to include, normalized to unique values in first-appearance order. Defaults to research-grade only; adding "needs_id" roughly doubles the corpus and lowers identification confidence.',
     ),
   captive: z
     .boolean()
     .default(false)
     .describe(
-      'Whether to include captive and cultivated records — zoo animals, garden plantings. Defaults to wild organisms only.',
+      'True returns captive and cultivated records only — zoo animals, garden plantings; false returns wild records only. Defaults to false.',
     ),
   term_id: z
     .array(z.number().int().min(1))
@@ -308,6 +333,8 @@ export function checkBoundingBox(box: {
 export function resolveDateRange(input: {
   d1?: string | undefined;
   d2?: string | undefined;
+  created_d1?: string | undefined;
+  created_d2?: string | undefined;
 }): FilterResult<QueryParams> {
   const { d1, d2 } = input;
   if (d1 !== undefined && d2 !== undefined && d1 > d2) {
@@ -316,7 +343,22 @@ export function resolveDateRange(input: {
       message: `d1 ${d1} is after d2 ${d2}. Upstream answers an inverted range with zero results rather than an error.`,
     };
   }
-  return { ok: true, value: { d1, d2 } };
+  const { created_d1, created_d2 } = input;
+  if (created_d1 !== undefined && created_d2 !== undefined && created_d1 > created_d2) {
+    return {
+      ok: false,
+      message: `created_d1 ${created_d1} is after created_d2 ${created_d2}. Pass the earlier upload date first.`,
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      d1,
+      d2,
+      ...(created_d1 !== undefined ? { created_d1 } : {}),
+      ...(created_d2 !== undefined ? { created_d2 } : {}),
+    },
+  };
 }
 
 /**

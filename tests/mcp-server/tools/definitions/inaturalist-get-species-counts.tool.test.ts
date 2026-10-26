@@ -47,10 +47,10 @@ function species(count: number) {
 }
 
 describe('input validation', () => {
-  it('bounds per_page and its default to the response budget', () => {
+  it('keeps the default and accepts oversized per_page for clamping', () => {
     expect(inaturalistGetSpeciesCounts.input.parse({}).per_page).toBe(25);
     expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 50 }).success).toBe(true);
-    expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 51 }).success).toBe(false);
+    expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 51 }).success).toBe(true);
   });
 });
 

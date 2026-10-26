@@ -25,12 +25,7 @@ const EntrySchema = z
       .number()
       .optional()
       .describe('Numeric attribute id, on the controlled_terms topic. Pass it as term_id.'),
-    code: z
-      .string()
-      .optional()
-      .describe(
-        'The literal filter value to pass, on the static topics — e.g. "needs_id", "cc0", "Aves".',
-      ),
+    code: z.string().optional().describe('Static filter value, e.g. "needs_id", "cc0", "Aves".'),
     label: z.string().nullable().describe('Human-readable name for the entry.'),
     notes: z
       .string()
@@ -61,22 +56,20 @@ const EntrySchema = z
 
 export const inaturalistListReference = tool('inaturalist_list_reference', {
   description:
-    'Decode the vocabularies the other iNaturalist tools take as input: annotation attributes and values, quality grades, license codes, taxonomic ranks, iconic taxa, and IUCN conservation-status codes. An unrecognized filter value is not rejected upstream — it silently returns nothing — so read the codes here before filtering. Note that the conservation codes are the normalised csi search filter; a taxon record’s own conservation_statuses[].status is authority-specific free text and reads differently. With topic controlled_terms and a taxon_id, the response also carries which annotations identifiers have actually recorded for that taxon, with counts.',
+    'Look up annotation attributes/values, quality grades, licences, ranks, iconic taxa, and conservation codes before filtering; unknown values can silently return nothing. Conservation codes are the normalised csi filter, distinct from authority-specific taxon status text. With topic controlled_terms and taxon_id, also return observed annotation usage and counts.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     topic: z
       .enum(TOPICS)
-      .describe(
-        'Which vocabulary to decode. controlled_terms is fetched live and cached; the rest are spec-derived static tables.',
-      ),
+      .describe('Vocabulary to decode; controlled_terms is live/cached, the rest static.'),
     taxon_id: z
       .number()
       .int()
       .min(1)
       .optional()
       .describe(
-        'Add observed annotation usage for this taxon, ranked by how often each attribute/value pair has been recorded. Valid only with topic controlled_terms. Resolve a name to an id with inaturalist_resolve_name.',
+        'Add annotation usage counts, most-used first; only with controlled_terms. Get the id from inaturalist_resolve_name.',
       ),
   }),
 
@@ -84,9 +77,7 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
     topic: z.enum(TOPICS).describe('The vocabulary that was decoded.'),
     source: z
       .enum(['upstream', 'static'])
-      .describe(
-        '"upstream" when the table was fetched from iNaturalist, "static" when spec-derived.',
-      ),
+      .describe('"upstream" for fetched data, "static" for spec-derived tables.'),
     entries: z.array(EntrySchema).describe('The vocabulary, one entry per code or attribute.'),
     observed_usage: z
       .array(
@@ -97,28 +88,24 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
               .number()
               .nullable()
               .describe(
-                'Attribute id — pass it as term_id to filter search, species counts, or the histogram. Null when upstream omitted it.',
+                'Attribute id for term_id on search, species counts, or histogram; null when omitted upstream.',
               ),
             value: z
               .string()
               .nullable()
-              .describe(
-                'Annotation value label. Labels repeat across attributes, so filter by the ids rather than the label.',
-              ),
+              .describe('Value label; use ids for filtering because labels can repeat.'),
             term_value_id: z
               .number()
               .nullable()
               .describe(
-                'Value id — pass it as term_value_id alongside term_id. Null when upstream omitted it.',
+                'Value id for term_value_id alongside term_id; null when omitted upstream.',
               ),
             count: z.number().describe('How many observations of this taxon carry the pair.'),
           })
           .describe('One attribute/value pair and how often it has been recorded.'),
       )
       .optional()
-      .describe(
-        'Observed annotation usage for taxon_id, most-used first. Present only when taxon_id was given.',
-      ),
+      .describe('Annotation usage, most-used first; present with taxon_id.'),
   }),
 
   enrichment: {
@@ -199,7 +186,7 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
 
     for (const entry of result.entries) {
       const parts: string[] = [`**${inlineText(entry.label ?? 'label not published')}**`];
-      if (entry.code !== undefined) parts.push(`code \`${inlineText(entry.code)}\``);
+      if (entry.code !== undefined) parts.push(`code ${inlineText(entry.code)}`);
       if (entry.id !== undefined) parts.push(`id ${entry.id}`);
       if (entry.multivalued !== undefined) parts.push(`multivalued: ${entry.multivalued}`);
       lines.push(`- ${parts.join(' · ')}`);

@@ -9,6 +9,7 @@
  * @module tests/mcp-server/tools/definitions/inaturalist-search-observations.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -17,6 +18,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { inaturalistGetObservation } from '@/mcp-server/tools/definitions/inaturalist-get-observation.tool.js';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
 import {
   getINaturalistService,
@@ -29,7 +31,10 @@ import {
   resetFakeService,
 } from '../../../helpers/fake-inaturalist-service.js';
 import {
+  projectedAnnotation,
   projectedObservation,
+  projectedPhoto,
+  projectedSound,
   rawIdentification,
   rawObservation,
 } from '../../../helpers/fixtures.js';
@@ -52,10 +57,323 @@ function observations(count: number, idOffset = 0) {
 }
 
 describe('input validation', () => {
+  it('retrieves a deferred oversized record whole by id with the same expansions', async () => {
+    const locality = '🌿'.repeat(20_000);
+    const record = projectedObservation({
+      id: 3,
+      place_guess: locality,
+      photos: [projectedPhoto(), projectedPhoto({ attribution: 'second photo' })],
+      sounds: [projectedSound(), projectedSound({ attribution: 'second sound' })],
+    });
+    fake.searchObservations.mockResolvedValue({ total: 1, observations: [record] });
+    const search = await runToolContract(inaturalistSearchObservations, {
+      include: ['photos', 'sounds'],
+    });
+    expect(search.structuredContent).toMatchObject({
+      observations: [],
+      deferred: [{ observation_id: 3 }],
+      has_more: false,
+    });
+    fake.getObservations.mockResolvedValue({ observations: [record], unresolved: [] });
+    const detail = await runToolContract(inaturalistGetObservation, {
+      observation_id: [3],
+      include: ['photos', 'sounds'],
+    });
+    expect(detail.isError).toBeFalsy();
+    expect(detail.structuredContent).toMatchObject({
+      observations: [record],
+      unresolved: [],
+      deferred: [],
+    });
+    const text = detail.content.map((block) => ('text' in block ? block.text : '')).join('');
+    expect(text).toContain(locality);
+    expect(text).toContain('second photo');
+    expect(text).toContain('second sound');
+    expect(fake.getObservations.mock.calls[0]?.slice(0, 2)).toEqual([
+      [3],
+      new Set(['photos', 'sounds']),
+    ]);
+    expect(fake.searchObservations).toHaveBeenCalledTimes(1);
+    expect(fake.getObservations).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    [21_860, 1],
+    [21_861, 0],
+  ])('keeps complete records at the measured reserve boundary (%s)', async (length, shown) => {
+    fake.searchObservations.mockResolvedValue({
+      total: 1,
+      observations: [projectedObservation({ place_guess: 'x'.repeat(length) })],
+    });
+    const result = await runToolContract(inaturalistSearchObservations, {});
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      shown,
+      has_more: false,
+      deferred: shown === 1 ? [] : [{ observation_id: 401617560 }],
+    });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
+    if (shown === 1) expect(text).toContain('x'.repeat(21_860));
+    else expect(text).toContain('inaturalist_get_observation');
+  });
+
+  it('composes clamp, ignored-filter, pagination and deferred guidance once', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 100, observations: observations(25) });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      per_page: 26,
+      order_by: 'id',
+      license: [],
+      include: Array(10_000).fill('photos'),
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      cap: 25,
+      shown: 23,
+      has_more: true,
+      next_cursor: '25',
+      deferred: [{ observation_id: 24 }, { observation_id: 25 }],
+    });
+    const notice = z.object({ notice: z.string() }).parse(result.structuredContent).notice;
+    for (const fragment of [
+      'per_page 26 was clamped to 25.',
+      'license was empty and ignored',
+      'Pass cursor "25"',
+      'Some fetched records were deferred',
+    ]) {
+      expect(notice).toContain(fragment);
+      expect(notice.indexOf(fragment)).toBe(notice.lastIndexOf(fragment));
+      expect(result.content.map((block) => ('text' in block ? block.text : '')).join('')).toContain(
+        fragment,
+      );
+    }
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+  });
+  it('defers an oversized first record and every later record on a final page', async () => {
+    const records = [
+      projectedObservation({ id: 3, place_guess: '🌿'.repeat(20_000) }),
+      projectedObservation({ id: 2 }),
+    ];
+    fake.searchObservations.mockResolvedValue({ total: 2, observations: records });
+    const result = await runToolContract(inaturalistSearchObservations, { per_page: 25 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observations: [],
+      deferred: [{ observation_id: 3 }, { observation_id: 2 }],
+      has_more: false,
+      truncated: true,
+      shown: 0,
+      cap: 25,
+    });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('observation_id');
+    expect(text).toContain('inaturalist_get_observation');
+    expect(text).toContain('even when has_more is false');
+    expect(fake.searchObservations).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves nested expansion entries whole in every retained record', async () => {
+    const records = observations(25).map((record) => ({
+      ...record,
+      photos: Array.from({ length: 3 }, (_, i) =>
+        projectedPhoto({ attribution: `photo ${i} 🌿"\\`.repeat(30) }),
+      ),
+      sounds: Array.from({ length: 3 }, (_, i) =>
+        projectedSound({ attribution: `sound ${i} 🌿"\\`.repeat(30) }),
+      ),
+      annotations: Array.from({ length: 3 }, (_, i) =>
+        projectedAnnotation({ by: `observer-${i}`, value: `value-${i}` }),
+      ),
+    }));
+    fake.searchObservations.mockResolvedValue({ total: 25, observations: records });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      per_page: 25,
+      include: ['photos', 'sounds', 'annotations'],
+    });
+    expect(result.isError).toBeFalsy();
+    const output = inaturalistSearchObservations.output.parse(result.structuredContent);
+    expect(output.observations.length).toBeGreaterThan(0);
+    expect(output.observations.length).toBeLessThan(25);
+    expect(output.observations).toEqual(records.slice(0, output.observations.length));
+    expect(output.deferred).toEqual(
+      records.slice(output.observations.length).map(({ id }) => ({ observation_id: id })),
+    );
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Photo 3');
+    expect(text).toContain('sound 2');
+    expect(text).toContain('value-2');
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+  });
+
+  it('continues from the full fetched page across multiple deferred cursor hops', async () => {
+    const seen: number[] = [];
+    for (const [hop, ids] of [
+      [0, [6, 5]],
+      [1, [4, 3]],
+      [2, [2, 1]],
+    ] as const) {
+      const records = ids.map((id) =>
+        projectedObservation({ id, place_guess: '🌿'.repeat(20_000) }),
+      );
+      fake.searchObservations.mockResolvedValueOnce({ total: 6 - hop * 2, observations: records });
+      const result = await runToolContract(inaturalistSearchObservations, {
+        per_page: 2,
+        ...(hop === 0 ? { order_by: 'id' } : { cursor: String(7 - hop * 2) }),
+      });
+      expect(result.isError).toBeFalsy();
+      const output = inaturalistSearchObservations.output.parse(result.structuredContent);
+      seen.push(
+        ...output.observations.map(({ id }) => id),
+        ...output.deferred.map(({ observation_id }) => observation_id),
+      );
+      expect(output.observations).toEqual([]);
+      expect(output.next_cursor).toBe(String(ids[1]));
+      expect(output.has_more).toBe(true);
+      expect(result.content.map((block) => ('text' in block ? block.text : '')).join('')).toContain(
+        `Pass cursor "${ids[1]}"`,
+      );
+    }
+    expect(seen).toEqual([6, 5, 4, 3, 2, 1]);
+    expect(fake.searchObservations.mock.calls.map(([params]) => params.id_below)).toEqual([
+      undefined,
+      '5',
+      '3',
+    ]);
+  });
+
+  it('bounds enrichment and trailer reserve across all composed notice branches', async () => {
+    const common = {
+      per_page: Number.MAX_SAFE_INTEGER,
+      license: [],
+      photo_license: [],
+      csi: [],
+      term_value_id: [],
+      iconic_taxa: [],
+    };
+    const cases = [
+      {
+        args: {
+          ...common,
+          taxon_id: 1,
+          d1: '0000-01-01',
+          d2: '9999-12-31',
+          term_id: [1],
+          lat: 1,
+          lng: 1,
+          radius: 500,
+          user_id: 1,
+          project_id: 1,
+          sounds: true,
+        },
+        total: 0,
+        records: [],
+      },
+      {
+        args: { ...common, page: 400, order_by: 'observed_on' as const, term_id: [] },
+        total: Number.MAX_VALUE,
+        records: observations(25),
+      },
+      {
+        args: { ...common, cursor: '999999999', term_id: [] },
+        total: Number.MAX_VALUE,
+        records: observations(25),
+      },
+      { args: { ...common, page: 400, term_id: [] }, total: 93, records: [] },
+    ];
+    for (const { args, total, records } of cases) {
+      fake.searchObservations.mockResolvedValueOnce({ total, observations: records });
+      const result = await runToolContract(inaturalistSearchObservations, args);
+      expect(result.isError).toBeFalsy();
+      const output = inaturalistSearchObservations.output.parse(result.structuredContent);
+      const domainBytes = Buffer.byteLength(
+        JSON.stringify({
+          content: inaturalistSearchObservations.format?.(output),
+          structuredContent: output,
+        }),
+      );
+      expect(Buffer.byteLength(JSON.stringify(result)) - domainBytes).toBeLessThan(4_096);
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+      expect(JSON.stringify(result.content)).toContain('was clamped to 25');
+    }
+  });
+  it('keeps whole-record search replies within the byte budget and discloses deferred ids', async () => {
+    const records = observations(25).map((record) => ({
+      ...record,
+      place_guess: '🌿"\\\n'.repeat(300),
+    }));
+    fake.searchObservations.mockResolvedValue({ total: 100, observations: records });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      per_page: 25,
+      order_by: 'id',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+    const output = inaturalistSearchObservations.output.parse(result.structuredContent);
+    expect(output.observations.length).toBeGreaterThan(0);
+    expect(output.observations.length).toBeLessThan(25);
+    expect(output.observations).toEqual(records.slice(0, output.observations.length));
+    expect(output).toMatchObject({
+      deferred: records.slice(output.observations.length).map(({ id }) => ({ observation_id: id })),
+      next_cursor: '25',
+      has_more: true,
+    });
+    expect(JSON.stringify(result.content)).toContain('inaturalist_get_observation');
+    expect(fake.searchObservations).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes repeated quality grades before request and enrichment', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      quality_grade: Array.from({ length: 10_000 }, (_, i) => (i % 2 ? 'research' : 'casual')),
+    });
+    expect(result.structuredContent).toMatchObject({
+      applied_filters: { quality_grade: ['casual', 'research'] },
+    });
+    expect(fake.searchObservations.mock.calls[0]?.[0].quality_grade).toEqual([
+      'casual',
+      'research',
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
+  });
+
+  it('clamps search before its page-window check and composes the notice', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 50_000, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      per_page: 26,
+      page: 400,
+      license: [],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.searchObservations.mock.calls[0]?.[0]).toMatchObject({ per_page: 25, page: 400 });
+    expect(result.structuredContent).toMatchObject({
+      cap: 25,
+      deferred: [],
+      notice: expect.stringContaining('per_page 26 was clamped to 25'),
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('license was empty and ignored');
+    expect(text).toContain('Page 400 came back empty');
+  });
+  it('preserves a complete ordinary record on both contract surfaces', async () => {
+    const record = projectedObservation();
+    fake.searchObservations.mockResolvedValue({ total: 1, observations: [record] });
+    const result = await runToolContract(inaturalistSearchObservations, {});
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observations: [record],
+      has_more: false,
+      shown: 1,
+      cap: 10,
+    });
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
+    expect(text).toContain('## Monarch (Danaus plexippus)');
+    expect(text).toContain('401617560');
+    expect(fake.searchObservations).toHaveBeenCalledTimes(1);
+  });
   it('bounds per_page and its default to the response budget', () => {
     expect(inaturalistSearchObservations.input.parse({}).per_page).toBe(10);
     expect(inaturalistSearchObservations.input.safeParse({ per_page: 25 }).success).toBe(true);
-    expect(inaturalistSearchObservations.input.safeParse({ per_page: 26 }).success).toBe(false);
+    expect(inaturalistSearchObservations.input.safeParse({ per_page: 26 }).success).toBe(true);
   });
 
   it('rejects an area given in two forms at once', async () => {
@@ -459,11 +777,19 @@ describe('has_more / next_cursor', () => {
 
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Record<string, unknown>;
-    expect(structured).toMatchObject({ has_more: true, truncated: true, shown: 25, cap: 25 });
+    expect(structured).toMatchObject({
+      has_more: true,
+      truncated: true,
+      shown: 23,
+      cap: 25,
+      deferred: [{ observation_id: 24 }, { observation_id: 25 }],
+    });
     expect(structured).not.toHaveProperty('next_cursor');
     const expected =
       'This page ends at the 10,000-result window upstream serves, and no cursor continues order_by "votes", order "desc". To continue past it, re-run with order_by "id" and order "desc" and follow next_cursor, or narrow the filters.';
-    expect(structured.notice).toBe(expected);
+    expect(structured.notice).toBe(
+      `${expected} Some fetched records were deferred to keep this response within its byte budget. Retrieve every deferred observation_id with inaturalist_get_observation using the same include values. Deferred records remain available even when has_more is false.`,
+    );
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
@@ -485,7 +811,7 @@ describe('has_more / next_cursor', () => {
 
     expect(result.next_cursor).toBeUndefined();
     expect(getEnrichment(ctx).notice).toBe(
-      'This page ends at the 10,000-result window upstream serves, and no cursor continues order_by "id", order "asc". To continue past it, re-run with order_by "id" and order "desc" and follow next_cursor, or narrow the filters.',
+      'This page ends at the 10,000-result window upstream serves, and no cursor continues order_by "id", order "asc". To continue past it, re-run with order_by "id" and order "desc" and follow next_cursor, or narrow the filters. Some fetched records were deferred to keep this response within its byte budget. Retrieve every deferred observation_id with inaturalist_get_observation using the same include values. Deferred records remain available even when has_more is false.',
     );
   });
 
@@ -548,7 +874,7 @@ describe('has_more / next_cursor', () => {
 
     const result = await inaturalistSearchObservations.handler(input, ctx);
 
-    expect(result).toEqual({ total_results: 0, observations: [], has_more: false });
+    expect(result).toEqual({ total_results: 0, observations: [], deferred: [], has_more: false });
   });
 });
 
@@ -562,7 +888,7 @@ describe('zero-hit notice composition', () => {
 
     const notice = getEnrichment(ctx).notice as string;
     expect(notice).toContain('Only research-grade records were searched.');
-    expect(notice).toContain('Captive and cultivated records were excluded.');
+    expect(notice).toContain('Only wild records were searched.');
   });
 
   it('names the date range when the defaults were widened', async () => {
@@ -727,6 +1053,7 @@ describe('format()', () => {
     const result = {
       total_results: 4_660_480,
       observations: [projectedObservation()],
+      deferred: [],
       next_cursor: '401617560',
       has_more: true,
     };
@@ -741,7 +1068,7 @@ describe('format()', () => {
   });
 
   it('renders next_cursor as "none" when absent', () => {
-    const result = { total_results: 0, observations: [], has_more: false };
+    const result = { total_results: 0, observations: [], deferred: [], has_more: false };
     const [block] = inaturalistSearchObservations.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
 

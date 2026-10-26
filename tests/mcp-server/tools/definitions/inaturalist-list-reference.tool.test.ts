@@ -24,6 +24,24 @@ import {
   resetFakeService,
 } from '../../../helpers/fake-inaturalist-service.js';
 import { controlledTerm, observedUsage } from '../../../helpers/fixtures.js';
+import { markdownNodes, markdownText } from '../../../helpers/rendering-commonmark.js';
+
+describe('literal vocabulary rendering', () => {
+  it('renders filter codes in a prose slot that decodes escapes', () => {
+    const code = '[literal] &amp; `tick`\r\nend';
+    const [block] =
+      inaturalistListReference.format?.({
+        topic: 'ranks',
+        source: 'static',
+        entries: [{ code, label: '<b>rank</b>' }],
+      }) ?? [];
+    const text = block && 'text' in block ? block.text : '';
+    expect(markdownText(text)).toContain(code);
+    expect(
+      markdownNodes(text).filter((node) => node.type === 'code' || node.type === 'html_inline'),
+    ).toEqual([]);
+  });
+});
 
 vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) => {
   const actual =
@@ -67,9 +85,9 @@ describe('static topics', () => {
     const text = block && 'text' in block ? block.text : '';
 
     expect(text).toContain('**licenses** — source: static');
-    expect(text).toContain('code `cc0`');
+    expect(markdownText(text)).toContain('code cc0');
     const nullEntryLine = text.split('\n').find((line) => line.includes('All rights reserved'));
-    expect(nullEntryLine).toContain('code `null`');
+    expect(nullEntryLine).toContain('code null');
   });
 });
 

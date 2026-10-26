@@ -13,6 +13,7 @@ const ENV_KEYS = [
   'INATURALIST_MIN_REQUEST_INTERVAL_MS',
   'INATURALIST_MAX_CONCURRENT_REQUESTS',
   'INATURALIST_DAILY_REQUEST_BUDGET',
+  'INATURALIST_CLAMP_LIMITS',
 ] as const;
 
 let savedEnv: Record<(typeof ENV_KEYS)[number], string | undefined>;
@@ -32,6 +33,21 @@ afterEach(() => {
 });
 
 describe('getServerConfig', () => {
+  it.each([
+    ['true', true],
+    ['false', false],
+    ['1', true],
+    ['0', false],
+  ] as const)('strictly parses clamp mode %s', async (value, expected) => {
+    process.env.INATURALIST_CLAMP_LIMITS = value;
+    const { getServerConfig } = await import('@/config/server-config.js');
+    expect(getServerConfig().clampLimits).toBe(expected);
+  });
+  it('rejects an invalid clamp switch', async () => {
+    process.env.INATURALIST_CLAMP_LIMITS = 'sometimes';
+    const { getServerConfig } = await import('@/config/server-config.js');
+    expect(() => getServerConfig()).toThrow(/INATURALIST_CLAMP_LIMITS/);
+  });
   it('applies the documented defaults when no env vars are set', async () => {
     const { getServerConfig } = await import('@/config/server-config.js');
     const config = getServerConfig();
@@ -39,6 +55,7 @@ describe('getServerConfig', () => {
     expect(config.minRequestIntervalMs).toBe(1100);
     expect(config.maxConcurrentRequests).toBe(4);
     expect(config.dailyRequestBudget).toBe(9000);
+    expect(config.clampLimits).toBe(true);
     expect(config.userAgent).toContain('inaturalist-mcp-server/');
     expect(config.userAgent).toContain('(+https://github.com/cyanheads/inaturalist-mcp-server)');
   });

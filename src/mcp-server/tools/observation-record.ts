@@ -6,13 +6,14 @@
  * Everything an observation carries from a third party — `place_guess`, photo
  * attributions, identification and comment bodies — renders inside a blockquote,
  * so a reading model sees it as quoted content rather than instruction. Upstream
- * text rendered inline instead of quoted — names, logins, URLs, timestamps —
- * goes through {@link inlineText} so it cannot end the line it was placed in.
+ * text rendered inline instead of quoted goes through {@link inlineText}; URLs
+ * use {@link urlText}. Neither can end the physical line it was placed in.
  *
  * @module mcp-server/tools/observation-record
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
 import { QUALITY_GRADES } from '@/services/inaturalist/vocabularies.js';
 
 /** Heading stand-in for an observation nobody has identified yet. */
@@ -31,23 +32,19 @@ export const PhotoSchema = z
       .string()
       .optional()
       .describe(
-        'Medium variant. Supplied by upstream where it publishes every size, otherwise derived by substituting the size qualifier in the path. Absent when the path did not match the documented shape.',
+        'Medium image URL; derived from the size path if needed. Absent when no variant is available.',
       ),
     attribution: z
       .string()
       .nullable()
-      .describe(
-        'Attribution string, verbatim and never reformatted. Reproduce it with any use of the image.',
-      ),
+      .describe('Verbatim attribution; reproduce with any use of the image.'),
     license_code: z
       .string()
       .nullable()
       .describe('Photo licence code. Null means all rights reserved, independent of the record.'),
     open: z
       .boolean()
-      .describe(
-        'True when the photo is served from the host the upstream reserves for open licences. A photo can move hosts when its licence changes, so this reflects fetch time.',
-      ),
+      .describe('True when served from the open-licence host at fetch time; licences can change.'),
   })
   .describe('A photo with the attribution and licence that must travel with it.');
 
@@ -67,13 +64,8 @@ export const AnnotationSchema = z
     attribute: z
       .string()
       .nullable()
-      .describe(
-        'Decoded attribute label, e.g. "Life Stage". Null when the id is not in the vocabulary.',
-      ),
-    value: z
-      .string()
-      .nullable()
-      .describe('Decoded value label, e.g. "Larva". Null when the id is not in the vocabulary.'),
+      .describe('Attribute label, e.g. "Life Stage"; null for an unknown id.'),
+    value: z.string().nullable().describe('Value label, e.g. "Larva"; null for an unknown id.'),
     attribute_id: z.number().describe('Attribute id, usable as term_id on the search tools.'),
     value_id: z.number().describe('Value id, usable as term_value_id on the search tools.'),
     by: z.string().nullable().describe('Login of the member who added the annotation.'),
@@ -128,10 +120,7 @@ export const CommentSchema = z
 
 export const ObservationFieldSchema = z
   .object({
-    name: z
-      .string()
-      .nullable()
-      .describe('Field name, as its creator wrote it, e.g. "Habitat_Description".'),
+    name: z.string().nullable().describe('Verbatim field name, e.g. "Habitat_Description".'),
     value: z.string().describe('The value filled in, verbatim.'),
   })
   .describe('One filled observation field.');
@@ -143,14 +132,13 @@ export const CoordinateSchema = z.object({
     .number()
     .nullable()
     .describe(
-      'Public positional accuracy radius in metres. On an obscured record this is tens of kilometres and the point is a locality, not a sighting position.',
+      'Public accuracy radius, metres. An obscured point is a locality, not a sighting position.',
     ),
 });
 
 /**
- * The projected observation. The expansion arms and the two by-id fields are
- * presence-based, so one schema serves both tools and `format()` renders each
- * arm on presence rather than by branching.
+ * The full projected observation. Search derives its reachable fields from this
+ * definition; detail tools and JSON resources retain every presence-based arm.
  */
 export const ObservationSchema = z
   .object({
@@ -174,9 +162,7 @@ export const ObservationSchema = z
     ),
     obscured: z
       .boolean()
-      .describe(
-        'True when the true coordinate is withheld, typically for a threatened taxon. The point is never resolved or approximated.',
-      ),
+      .describe('True when the true coordinate is withheld; the public point is a locality.'),
     geoprivacy: z
       .string()
       .nullable()
@@ -198,18 +184,13 @@ export const ObservationSchema = z
       .boolean()
       .describe('True for a zoo animal, a garden planting, or other cultivation.'),
     photo: PhotoSchema.nullable().describe('First photo on the record. Null when there are none.'),
-    photo_count: z
-      .number()
-      .describe('How many photos the record carries, so include "photos" can be spent knowingly.'),
+    photo_count: z.number().describe('Photo count; include "photos" for every photo.'),
     sound_count: z.number().describe('How many audio recordings the record carries.'),
-    observer: z
-      .string()
-      .nullable()
-      .describe('Login of the observer. The rest of the upstream profile is not relayed.'),
+    observer: z.string().nullable().describe('Observer login.'),
     identifications_count: z
       .number()
       .describe(
-        'Upstream’s tally of identifications currently agreeing or disagreeing with the community taxon — agreements + disagreements. Not the thread size: it leaves out the observer’s own identification and any that neither agrees nor disagrees, such as a coarser or withdrawn one. The thread size is identifications_total, on inaturalist_get_observation.',
+        'Tally against the community taxon: agreements + disagreements. Excludes the observer and neutral/withdrawn ids; thread size is identifications_total on inaturalist_get_observation.',
       ),
     agreements: z
       .number()
@@ -237,102 +218,106 @@ export const ObservationSchema = z
       .array(IdentificationSchema)
       .optional()
       .describe(
-        'The identification thread, cut to its first entries in upstream order (roughly but not strictly chronological) when it exceeds the per-record share of a 40-entry budget. Present when "identifications" was included.',
+        'Requested identification thread, first entries in upstream order (not strictly chronological), sharing a 40-entry budget across records.',
       ),
     identifications_total: z
       .number()
       .optional()
-      .describe(
-        'How many identifications upstream holds on the record — the thread size. Present when "identifications" was included.',
-      ),
+      .describe('Thread size before the cap; present with "identifications".'),
     identifications_shown: z
       .number()
       .optional()
-      .describe(
-        'How many of them identifications carries. Below identifications_total when the thread was cut. Present when "identifications" was included.',
-      ),
+      .describe('Identification entries returned; below identifications_total when capped.'),
     comments: z
       .array(CommentSchema)
       .optional()
       .describe(
-        'Discussion comments, cut to their first entries in upstream order (not strictly chronological) when they exceed the per-record share of a 40-entry budget. Present when "comments" was included.',
+        'Requested comments, first entries in upstream order (not strictly chronological), sharing a 40-entry budget across records.',
       ),
     comments_total: z
       .number()
       .optional()
-      .describe(
-        'How many comments upstream holds on the record. Present when "comments" was included.',
-      ),
+      .describe('Comment count before the cap; present with "comments".'),
     comments_shown: z
       .number()
       .optional()
-      .describe(
-        'How many of them comments carries. Below comments_total when the thread was cut. Present when "comments" was included.',
-      ),
+      .describe('Comment entries returned; below comments_total when capped.'),
     community_taxon: TaxonSummarySchema.nullable()
       .optional()
-      .describe(
-        'Consensus taxon, resolved. Present on the by-id tool; null when the thread has reached none.',
-      ),
+      .describe('Resolved consensus taxon on detail records; null without consensus.'),
     identification_disagreements_count: z
       .number()
       .optional()
-      .describe(
-        'Count of disagreeing identifications as upstream tallies it. Present on the by-id tool.',
-      ),
+      .describe('Upstream disagreement count on detail records.'),
     description: z
       .string()
       .nullable()
       .optional()
       .describe(
-        'The observer’s own note on the sighting — host plant, behaviour, habitat, count. Third-party free text. Present on the by-id tool; null when the observer wrote none.',
+        'Verbatim observer note on detail records; null when none was written, distinct from an empty string.',
       ),
     observation_fields: z
       .array(ObservationFieldSchema)
       .optional()
       .describe(
-        'Observation-field values filled in on the record, usually by a project; fields left blank are dropped. Cut to the first filled fields in upstream order when they exceed the per-record share of a 40-entry budget. Present on the by-id tool.',
+        'Filled fields on detail records, verbatim; blanks omitted. First entries in upstream order, sharing a 40-entry budget across records.',
       ),
     observation_fields_total: z
       .number()
       .optional()
-      .describe(
-        'How many filled observation fields the record carries. Present on the by-id tool.',
-      ),
+      .describe('Filled field count before the cap on detail records.'),
     observation_fields_shown: z
       .number()
       .optional()
-      .describe(
-        'How many of them observation_fields carries. Below observation_fields_total when the list was cut. Present on the by-id tool.',
-      ),
+      .describe('Filled fields returned; below observation_fields_total when capped.'),
   })
   .describe('One projected observation record.');
+
+/** Search emits the shared record and media expansions, without detail/thread arms. */
+export const SearchObservationSchema = ObservationSchema.omit({
+  identifications: true,
+  identifications_total: true,
+  identifications_shown: true,
+  comments: true,
+  comments_total: true,
+  comments_shown: true,
+  community_taxon: true,
+  identification_disagreements_count: true,
+  description: true,
+  observation_fields: true,
+  observation_fields_total: true,
+  observation_fields_shown: true,
+}).describe('One complete projected search record, with requested media expansions.');
 
 export type ObservationOutput = z.infer<typeof ObservationSchema>;
 type TaxonSummaryOutput = z.infer<typeof TaxonSummarySchema>;
 type PhotoOutput = z.infer<typeof PhotoSchema>;
 
 /**
- * Every separator a markdown reader treats as a line ending. CommonMark ends a
- * line on a bare carriage return as well as on a newline, so splitting on the
- * newline alone leaves the tail of a CR-separated string outside the structure
- * it was rendered into.
- */
-const LINE_BREAK = /\r\n|[\n\r]/g;
-
-/**
- * Flattens an upstream string so it cannot escape the line it is rendered into.
- *
- * Inline slots interpolate third-party text — member-created place and project
- * names, community-editable common names, logins, authority status text, media
- * URLs — into a single rendered line. A line break inside one of those values
- * ends that line early and lets the remainder read as markdown structure this
- * server never emitted, which is the injection the blockquote rule prevents for
- * the free-text fields. `structuredContent` keeps every value verbatim; only the
- * rendered twin is flattened.
+ * Encodes literal text for a single physical Markdown line, retaining CR/LF as
+ * character references, including vertical tabs that a blank quoted line loses.
+ * NUL-containing values use a labeled JSON string literal because CommonMark
+ * cannot represent NUL directly. Do not wrap this in a code span.
  */
 export function inlineText(text: string): string {
-  return text.replace(LINE_BREAK, ' ');
+  const literal = text.includes('\u0000') ? `JSON string literal: ${JSON.stringify(text)}` : text;
+  return literal
+    .split(/([\r\n])/)
+    .map((segment) =>
+      segment === '\r'
+        ? '&#13;'
+        : segment === '\n'
+          ? '&#10;'
+          : escapeMarkdownInline(segment).replaceAll('\u000b', '&#11;'),
+    )
+    .join('');
+}
+
+/** Link a URL without normalizing its value; non-linkable values remain literal text. */
+export function urlText(url: string): string {
+  return url.includes('\r') || url.includes('\n') || url.includes('\u0000')
+    ? inlineText(url)
+    : markdownLink(url, url);
 }
 
 /** A null licence is a fact about the record, so it renders in words rather than as a blank. */
@@ -342,7 +327,13 @@ export function licenceLabel(code: string | null): string {
 
 /** Quotes third-party text so a reading model treats it as content, not instruction. */
 export function blockquote(text: string): string[] {
-  return text.split(LINE_BREAK).map((line) => `> ${line}`);
+  const encoded = text.includes('\u0000')
+    ? inlineText(text)
+    : text
+        .split('\r')
+        .map((segment) => escapeMarkdownInline(segment).replaceAll('\u000b', '&#11;'))
+        .join('&#13;');
+  return encoded.split('\n').map((line) => `> ${line}`);
 }
 
 function taxonLine(taxon: TaxonSummaryOutput): string {
@@ -354,10 +345,11 @@ function taxonLine(taxon: TaxonSummaryOutput): string {
 }
 
 export function renderPhoto(photo: PhotoOutput, label: string): string[] {
-  const link = inlineText(photo.medium_url ?? photo.square_url ?? 'no image URL published');
+  const url = photo.medium_url ?? photo.square_url;
+  const link = url === null ? 'no image URL published' : urlText(url);
   const lines = [
     `**${label}:** ${link}`,
-    `square_url ${inlineText(photo.square_url ?? 'not published')} · ${licenceLabel(photo.license_code)} · ${photo.open ? 'open licence' : 'licence not open'}`,
+    `square_url ${photo.square_url === null ? 'not published' : urlText(photo.square_url)} · ${licenceLabel(photo.license_code)} · ${photo.open ? 'open licence' : 'licence not open'}`,
   ];
   if (photo.attribution) lines.push(...blockquote(photo.attribution));
   else lines.push('_No attribution string published._');
@@ -374,7 +366,9 @@ function cappedHeading(
   shown: number | undefined,
   total: number | undefined,
 ): string {
-  if (shown === undefined || total === undefined) return `### ${label}`;
+  if (shown === undefined && total === undefined) return `### ${label}`;
+  if (shown === undefined) return `### ${label} — ${total} total`;
+  if (total === undefined) return `### ${label} — ${shown} shown`;
   return shown < total
     ? `### ${label} — first ${shown} of ${total} shown, in upstream order`
     : `### ${label} — ${shown} of ${total} shown`;
@@ -399,7 +393,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
   const lines: string[] = [`## ${observationHeading(observation)}`];
 
   lines.push(
-    `**id** ${observation.id} · **uuid** ${inlineText(observation.uuid ?? 'not published')} · ${inlineText(observation.url ?? 'no page URL published')}`,
+    `**id** ${observation.id} · **uuid** ${inlineText(observation.uuid ?? 'not published')} · ${observation.url === null ? 'no page URL published' : urlText(observation.url)}`,
   );
   if (observation.taxon) lines.push(`**Identified as:** ${taxonLine(observation.taxon)}`);
   lines.push(
@@ -447,20 +441,26 @@ export function renderObservation(observation: ObservationOutput): string[] {
     );
   }
 
-  if (observation.description) {
-    lines.push('**Observer’s description:**');
-    lines.push(...blockquote(observation.description));
+  if (observation.description !== undefined) {
+    if (observation.description === null) lines.push('**Observer’s description:** no description');
+    else if (observation.description === '') lines.push('**Observer’s description:** empty string');
+    else {
+      lines.push('**Observer’s description:**');
+      lines.push(...blockquote(observation.description));
+    }
   }
 
-  if (observation.photos?.length) {
+  if (observation.photos !== undefined) {
     lines.push('### Photos');
+    if (observation.photos.length === 0) lines.push('_none_');
     for (const [index, photo] of observation.photos.entries()) {
       lines.push(...renderPhoto(photo, `Photo ${index + 1}`));
     }
   }
 
-  if (observation.annotations?.length) {
+  if (observation.annotations !== undefined) {
     lines.push('### Annotations');
+    if (observation.annotations.length === 0) lines.push('_none_');
     for (const annotation of observation.annotations) {
       lines.push(
         `- **${inlineText(annotation.attribute ?? 'undecoded attribute')}** = ${inlineText(annotation.value ?? 'undecoded value')} (term_id ${annotation.attribute_id}, term_value_id ${annotation.value_id}) — by ${inlineText(annotation.by ?? 'unknown')}`,
@@ -468,9 +468,11 @@ export function renderObservation(observation: ObservationOutput): string[] {
     }
   }
 
-  // Unlike an opted-in thread arm, the fields ride every by-id record, so a record
-  // with none renders no block — its zero counts stay in structuredContent.
-  if (observation.observation_fields?.length) {
+  if (
+    observation.observation_fields !== undefined ||
+    observation.observation_fields_shown !== undefined ||
+    observation.observation_fields_total !== undefined
+  ) {
     lines.push(
       cappedHeading(
         'Observation fields',
@@ -478,16 +480,18 @@ export function renderObservation(observation: ObservationOutput): string[] {
         observation.observation_fields_total,
       ),
     );
-    for (const field of observation.observation_fields) {
+    if (observation.observation_fields?.length === 0) lines.push('_none_');
+    for (const field of observation.observation_fields ?? []) {
       lines.push(`- **${inlineText(field.name ?? 'unnamed field')}:** ${inlineText(field.value)}`);
     }
   }
 
-  if (observation.sounds?.length) {
+  if (observation.sounds !== undefined) {
     lines.push('### Sounds');
+    if (observation.sounds.length === 0) lines.push('_none_');
     for (const sound of observation.sounds) {
       lines.push(
-        `- ${inlineText(sound.url ?? 'no audio URL published')} — ${licenceLabel(sound.license_code)}`,
+        `- ${sound.url === null ? 'no audio URL published' : urlText(sound.url)} — ${licenceLabel(sound.license_code)}`,
       );
       if (sound.attribution) lines.push(...blockquote(sound.attribution));
     }

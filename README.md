@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/inaturalist-mcp-server</h1>
   <p><b>Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools • 2 Resources</div>
+  <div>10 Tools • 2 Domain Resources • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/inaturalist-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/inaturalist-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/inaturalist-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/inaturalist-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/inaturalist-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/inaturalist-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the species of an area; and check what a look-alike is most often confused with. Keyless and read-only, it runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the species of an area; and check what a look-alike is most often confused with. No API key required.
 
 ### Tools
 
@@ -55,6 +55,8 @@ iNaturalist's index of 387M+ georeferenced citizen-science observations of plant
 
 Both resources mirror data also reachable through `inaturalist_get_taxon` and `inaturalist_get_observation`, for clients that don't surface MCP resources.
 
+The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers identifier provenance, matched cohorts, annotations, and evidence coverage across calls. It ships with npm, plugin, MCPB, and Docker installs; clients supporting MCP skill discovery can retrieve it directly. The SDK also exposes skill resources alongside the two domain resources.
+
 ## Capability reference
 
 ### `inaturalist_list_reference` <sub>tool</sub>
@@ -66,37 +68,38 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 
 ### `inaturalist_resolve_name` <sub>tool</sub>
 
-- `q` plus `type`: `taxon` (default; name-prefix autocomplete, so "monarch" hits where "monarch butterfly" misses, with an optional `rank`) or `place` / `project` / `user` / `any` (scored cross-kind search); `limit` 1–30, default 10
+- `q` plus `type`: `taxon` (default; name-prefix autocomplete, so "monarch" hits where "monarch butterfly" misses, with an optional `rank`) or `place` / `project` / `user` / `any` (scored cross-kind search); applied `limit` up to 30, default 10
 - Each candidate carries `kind` and `id`, plus `login` on users; a miss returns `found: false` with `guidance` instead of an error
 
 ---
 
 ### `inaturalist_find_places` <sub>tool</sub>
 
-- Exactly one of `q` (place-name prefix) or all four of `nelat`, `nelng`, `swlat`, `swlng`, otherwise `invalid_geography`; `per_page` 1–30 (default 10) applies to the box arm only, per list
+- Exactly one of `q` (place-name prefix) or all four of `nelat`, `nelng`, `swlat`, `swlng`, otherwise `invalid_geography`; applied `per_page` up to 30 (default 10) applies to the box arm only, per list
 - `q` returns `places[]`, a box returns `standard[]` and `community[]`; each place carries `id`, `bbox`, `ancestor_place_ids`, `place_type`, `admin_level`, and `location`, with boundary polygons stripped
 
 ---
 
 ### `inaturalist_search_observations` <sub>tool</sub>
 
-- One area form plus `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `user_id` or `user_login`, `project_id`, and `q`+`search_on`; `per_page` 1–25, default 10; `include` expands `photos`, `annotations`, `sounds` (identification threads live on `inaturalist_get_observation`)
+- One area form plus `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `user_id` or `user_login`, `project_id`, and `q`+`search_on`; applied `per_page` up to 25, default 10; optional `sounds` filters for audio-bearing records, while `include` expands `photos`, `annotations`, `sounds` (identification threads live on `inaturalist_get_observation`)
 - `page` walks the first 10,000 results; past that, order by `id` descending and pass each page's `next_cursor` as `cursor`. Returns `total_results` (a live estimate) and `has_more`, and echoes `applied_filters`
 - `license` / `photo_license` take the seven CC codes, OR-joined; `photo_license` matches any photo under the code, independent of the record's own `license_code`
+- The complete serialized reply stays within 50,000 UTF-8 bytes by returning a prefix of whole records. Ordered `deferred` observation IDs identify the suffix; fetch them with `inaturalist_get_observation` and the same `include` before following the upstream page continuation
 
 ---
 
 ### `inaturalist_get_observation` <sub>tool</sub>
 
-- 1–10 `observation_id`s in one upstream request; `include` defaults to `["identifications"]`, with `comments`, `photos`, `annotations`, and `sounds` available
-- Resolved records come back in `observations` in request order, misses in `unresolved`; fails as `not_found` only when none resolve. Adds `community_taxon`, `description`, and filled `observation_fields`
+- Submit 1–100 `observation_id`s: duplicates are removed in first-seen order, the first ten distinct IDs are attempted in one upstream request, and the rest return in `deferred`; with limit clamping disabled, at most ten submitted IDs are accepted. `include` defaults to `["identifications"]`, with `comments`, `photos`, `annotations`, and `sounds` available
+- Resolved records come back in `observations` in request order, attempted misses in `unresolved`; fails as `not_found` only when none resolve and nothing is deferred. Adds `community_taxon`, `description`, and filled `observation_fields`; strings remain complete, so detail replies have no universal byte ceiling
 - Identifications, comments, and observation fields share a 40-entry budget: each record keeps `max(4, floor(40 / records returned))` entries per array and reports `*_total` beside `*_shown`
 
 ---
 
 ### `inaturalist_get_species_counts` <sub>tool</sub>
 
-- One area form plus the search filters for taxon, dates, quality grade, captive, annotations, iconic taxa, observer, and project; `per_page` 1–50, default 25, with `page` offset
+- One area form plus the search filters for taxon, dates, quality grade, captive, annotations, iconic taxa, observer, and project; applied `per_page` up to 50, default 25, with `page` offset
 - Rows carry `position` (absolute, counted from page 1), `taxon_id`, and `observation_count`; `truncationCeiling` is the last count shown, which nothing off the page exceeds
 
 ---
@@ -105,19 +108,21 @@ Both resources mirror data also reachable through `inaturalist_get_taxon` and `i
 
 - `interval`: `month_of_year` (default) or `week_of_year` for a seasonal curve, or `year` / `month` / `week` / `day` / `hour` for absolute dates; `date_field` `observed` (default) or `created`; `taxon_id` optional, and an annotation pair (Life Stage `1` = Larva `6`) or `iconic_taxa` narrows the curve
 - Returns every bucket in order, zeros included, plus a `total` across all of them; capped at 800 buckets from the start of the range, with `truncated` / `shown` / `cap`
+- `d1`/`d2` bound observation dates; `created_d1`/`created_d2` separately bound upload dates. `date_field` selects which date is bucketed without changing either filter pair
 
 ---
 
 ### `inaturalist_get_leaderboard` <sub>tool</sub>
 
-- `kind`: `observers` or `identifiers`, with one area form, `taxon_id`, `d1`/`d2`, and `quality_grade`; `per_page` 1–250, default 25
+- `kind`: `observers` or `identifiers`, with one area form, `taxon_id`, `d1`/`d2`, and `quality_grade`; applied `per_page` up to 250, default 25
 - Only the top 500 are addressable, so `page × per_page` past 500 fails as `leaderboard_window_exceeded`; entries carry `rank`, `login`, and `count` (measured per `count_metric`), plus `species_count` for observers
+- A full final page reports `truncated: false` when the matching set is exhausted
 
 ---
 
 ### `inaturalist_get_similar_species` <sub>tool</sub>
 
-- `taxon_id` at genus or finer, otherwise `taxon_rank_too_coarse`; an optional area, `d1`/`d2`, `quality_grade`, and `captive` scope the set to a region; `limit` 1–50, default 20
+- `taxon_id` at genus or finer, otherwise `taxon_rank_too_coarse`; an optional area, `d1`/`d2`, `quality_grade`, and `captive` scope the set to a region; applied `limit` up to 50, default 20
 - Ranked by `misidentification_count`, with `truncationCeiling` when the limit cuts the set
 
 ---
@@ -155,10 +160,12 @@ iNaturalist-specific:
 
 Agent-friendly output:
 
-- Applied defaults echoed: search, species counts, histograms, and leaderboards return `applied_filters` (research-grade and wild-only unless widened, plus any ordering a cursor forced)
+- Applied defaults echoed: search, species counts, histograms, and leaderboards return `applied_filters` (research-grade and wild-only by default, plus any ordering a cursor forced). `captive: true` selects captive or cultivated records only; `false` selects wild records only
 - Zero-hit notices name the filter most likely responsible and the tool that decodes it (`inaturalist_list_reference` for vocabularies, since an unrecognised value returns nothing); a page past the end names the last page with results
 - Truncation disclosed on every path: `truncated`, `shown`, and `cap`, plus `truncationCeiling` on descending rankings
-- Upstream free text (encyclopedia summaries, identification and comment bodies, place guesses, photo attributions) renders inside a markdown blockquote, marking it as third-party content
+- Empty filter arrays are ignored with a notice; nonempty annotation values still require a nonempty attribute array. `include: []` retains its explicit expansion selection
+- An unknown `place_id` returns typed `unknown_place_id` guidance to resolve it with `inaturalist_find_places`
+- Upstream free text renders as literal quoted content, preserving line separators, HTML, entities, and complete strings after CommonMark parsing. NUL-containing strings use a labeled JSON string literal; URL fields render as links. Present empty expansions, zero counts, and null or empty descriptions remain visible
 
 ## Getting started
 
@@ -276,6 +283,7 @@ cp .env.example .env
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | Minimum gap between outbound request starts, in ms. The default holds the rate near 54 per minute. | `1100` |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | Maximum outbound requests in flight. | `4` |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | Outbound requests allowed per UTC day, counted in-process and reset on restart. | `9000` |
+| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp oversized list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, with a notice, log, and counter. `false` restores the prior advertised schema caps and rejects oversized input. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |

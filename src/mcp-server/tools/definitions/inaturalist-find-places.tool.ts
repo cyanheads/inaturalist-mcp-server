@@ -6,11 +6,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import { blankAsUnset, checkBoundingBox } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
-const PER_PAGE_MAX = 30;
+const PER_PAGE_MAX = LIMIT_CAPS.findPlaces;
 
 const PlaceSchema = z
   .object({
@@ -94,15 +95,11 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       .max(180)
       .optional()
       .describe('South-west corner longitude of the map area. All four corners or none.'),
-    per_page: z
-      .number()
-      .int()
-      .min(1)
-      .max(PER_PAGE_MAX)
-      .default(10)
-      .describe(
-        'Maximum places per list. Honoured on the bounding-box arm only, where it bounds the standard and community lists separately, so up to twice this many places come back. The name-prefix endpoint publishes no page size and returns a fixed page.',
-      ),
+    per_page: limitSchema(
+      PER_PAGE_MAX,
+      10,
+      'Maximum places per list. Honoured on the bounding-box arm only, where it bounds the standard and community lists separately, so up to twice this many places come back. The name-prefix endpoint publishes no page size and returns a fixed page.',
+    ),
   }),
 
   output: z.object({
@@ -156,6 +153,14 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     const { q, nelat, nelng, swlat, swlng } = input;
     const supplied = [nelat, nelng, swlat, swlng].filter((corner) => corner !== undefined).length;
     const service = getINaturalistService();
+    const { applied: perPage, notice: clampNotice } = applyLimit(
+      input.per_page,
+      PER_PAGE_MAX,
+      ctx,
+      'inaturalist_find_places',
+      'per_page',
+    );
+    const withClamp = (notice: string) => [clampNotice, notice].filter(Boolean).join(' ');
 
     if (q !== undefined) {
       if (supplied > 0) {
@@ -173,15 +178,19 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       ctx.enrich({ truncated: false, shown: places.length, cap: places.length });
       if (places.length === 0) {
         ctx.enrich.notice(
-          'No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.',
+          withClamp(
+            'No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.',
+          ),
         );
       } else if (total > places.length) {
         ctx.enrich.truncated({
           shown: places.length,
           cap: places.length,
-          guidance: `The place-name endpoint returns a fixed page of ${places.length} and publishes no pagination, so ${total - places.length} further matches are unreachable. Narrow the prefix, or pass a bounding box to list the places covering a map area.`,
+          guidance: withClamp(
+            `The place-name endpoint returns a fixed page of ${places.length} and publishes no pagination, so ${total - places.length} further matches are unreachable. Narrow the prefix, or pass a bounding box to list the places covering a map area.`,
+          ),
         });
-      }
+      } else if (clampNotice) ctx.enrich.notice(clampNotice);
       return { places };
     }
 
@@ -200,37 +209,40 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     ctx.log.info('Listing places covering a map area');
     const { total, standard, community } = await service.nearbyPlaces(
       { nelat, nelng, swlat, swlng },
-      input.per_page,
+      perPage,
       ctx,
     );
     // per_page bounds each list on its own, so the response ceiling is twice
     // it, and only a list that reached per_page can have been cut.
     const shown = standard.length + community.length;
-    const cap = input.per_page * 2;
+    const cap = perPage * 2;
     const filled = [
-      ...(standard.length >= input.per_page ? ['standard'] : []),
-      ...(community.length >= input.per_page ? ['community'] : []),
+      ...(standard.length >= perPage ? ['standard'] : []),
+      ...(community.length >= perPage ? ['community'] : []),
     ];
     ctx.enrich.total(total);
     ctx.enrich({ truncated: false, shown, cap });
     if (shown === 0) {
       ctx.enrich.notice(
-        'No place covers that box. Widen the corners, or resolve a named area with q instead.',
+        withClamp(
+          'No place covers that box. Widen the corners, or resolve a named area with q instead.',
+        ),
       );
     } else if (filled.length > 0) {
       const which =
         filled.length === 2
-          ? `The standard and community lists each reached per_page ${input.per_page}`
-          : `The ${filled[0]} list reached per_page ${input.per_page}`;
+          ? `The standard and community lists each reached per_page ${perPage}`
+          : `The ${filled[0]} list reached per_page ${perPage}`;
       ctx.enrich.truncated({
         shown,
         cap,
-        guidance:
-          input.per_page < PER_PAGE_MAX
+        guidance: withClamp(
+          perPage < PER_PAGE_MAX
             ? `${which}, so more places may cover this area. Raise per_page (max ${PER_PAGE_MAX}) to list more.`
             : `${which}, so more places may cover this area. Shrink the box to list the rest.`,
+        ),
       });
-    }
+    } else if (clampNotice) ctx.enrich.notice(clampNotice);
     return { standard, community };
   },
 

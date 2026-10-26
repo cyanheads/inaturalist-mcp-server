@@ -46,6 +46,72 @@ beforeEach(() => {
 });
 
 describe('batch resolution', () => {
+  it('accepts eleven copies of one id without deferred work and records the oversubmission', async () => {
+    fake.getObservations.mockResolvedValue({
+      observations: [projectedObservation({ id: 1 })],
+      unresolved: [],
+    });
+    const ctx = createMockContext({ errors: inaturalistGetObservation.errors });
+    const log = vi.spyOn(ctx.log, 'info');
+    const result = await inaturalistGetObservation.handler(
+      inaturalistGetObservation.input.parse({ observation_id: Array(11).fill(1) }),
+      ctx,
+    );
+    expect(result.deferred).toEqual([]);
+    expect(fake.getObservations).toHaveBeenCalledWith([1], new Set(['identifications']), ctx);
+    expect(log.mock.calls.filter(([message]) => message === 'Read limit clamped')).toHaveLength(1);
+  });
+  it('retains deferred work when every attempted id is missing', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => i + 1);
+    fake.getObservations.mockResolvedValue({ observations: [], unresolved: ids.slice(0, 10) });
+    const result = await runToolContract(inaturalistGetObservation, { observation_id: ids });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observations: [],
+      unresolved: ids.slice(0, 10).map((observation_id) => ({ observation_id })),
+      deferred: [{ observation_id: 11 }, { observation_id: 12 }],
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('**Deferred ids:** 11, 12');
+    expect(text).toContain('10 of 10 ids returned no observation');
+    expect(text).toContain('same include (identifications)');
+  });
+  it('rejects 101 submitted ids and empty batches before requesting', async () => {
+    for (const observation_id of [[], Array(101).fill(1)]) {
+      const result = await runToolContract(inaturalistGetObservation, { observation_id });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_arguments' } },
+      });
+    }
+    expect(fake.getObservations).not.toHaveBeenCalled();
+  });
+  it('defers distinct ids after ten while accepting repeated submitted ids', async () => {
+    fake.getObservations.mockResolvedValue({
+      observations: [projectedObservation({ id: 1 })],
+      unresolved: [2, 3, 4, 5, 6, 7, 8, 9, 10],
+    });
+    const result = await runToolContract(inaturalistGetObservation, {
+      observation_id: [1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 11],
+      include: ['comments'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getObservations).toHaveBeenCalledWith(
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      new Set(['comments']),
+      expect.anything(),
+    );
+    expect(result.structuredContent).toMatchObject({
+      deferred: [{ observation_id: 11 }, { observation_id: 12 }],
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('**Deferred ids:** 11, 12');
+    expect(text).toContain('same include');
+  });
   it('resolves a batch in one call and applies the default include', async () => {
     fake.getObservations.mockResolvedValue({
       observations: [projectedObservation()],
@@ -61,7 +127,11 @@ describe('batch resolution', () => {
       new Set(['identifications']),
       ctx,
     );
-    expect(result).toEqual({ observations: [projectedObservation()], unresolved: [] });
+    expect(result).toEqual({
+      observations: [projectedObservation()],
+      unresolved: [],
+      deferred: [],
+    });
   });
 
   it('passes a custom include set through as a Set', async () => {
@@ -104,6 +174,20 @@ describe('batch resolution', () => {
 });
 
 describe('not_found', () => {
+  it('returns not_found recovery on both surfaces when no deferred work remains', async () => {
+    fake.getObservations.mockResolvedValue({ observations: [], unresolved: [1] });
+    const result = await runToolContract(inaturalistGetObservation, { observation_id: [1] });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'not_found',
+          recovery: { hint: expect.stringContaining('inaturalist_search_observations') },
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('inaturalist_search_observations');
+  });
   it('throws not_found when none of the requested ids resolved', async () => {
     fake.getObservations.mockResolvedValue({ observations: [], unresolved: [1, 2] });
     const ctx = createMockContext({ errors: inaturalistGetObservation.errors });
@@ -117,7 +201,7 @@ describe('not_found', () => {
 
 describe('format()', () => {
   it('renders each resolved observation and omits the unresolved line when nothing is unresolved', () => {
-    const result = { observations: [projectedObservation()], unresolved: [] };
+    const result = { observations: [projectedObservation()], unresolved: [], deferred: [] };
     const [block] = inaturalistGetObservation.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
 
@@ -129,6 +213,7 @@ describe('format()', () => {
     const result = {
       observations: [projectedObservation()],
       unresolved: [{ observation_id: 2 }, { observation_id: 3 }],
+      deferred: [],
     };
     const [block] = inaturalistGetObservation.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
@@ -202,6 +287,23 @@ describe('the batch-shared thread cap, on both surfaces', () => {
       http.restore();
     }
   }
+
+  it('composes missing, thread-cut and deferred notices using the resolved record budget', async () => {
+    const result = await call([threaded(1, 41)], {
+      observation_id: Array.from({ length: 12 }, (_, index) => index + 1),
+    });
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).observations[0]).toMatchObject({
+      identifications_total: 41,
+      identifications_shown: 40,
+    });
+    const notice = structured(result).notice ?? '';
+    expect(notice).toContain('9 of 10 ids returned no observation');
+    expect(notice).toContain('first 40 entries each');
+    expect(notice).toContain('2 distinct ids were deferred');
+    expect(textOf(result)).toContain(notice);
+    expect(textOf(result)).toContain('**Deferred ids:** 11, 12');
+  });
 
   it('keeps a single record exactly at the cap whole, with no notice', async () => {
     const result = await call([threaded(1, 40, 40)], {
@@ -470,7 +572,7 @@ describe('the batch-shared thread cap, on both surfaces', () => {
     }
   });
 
-  it('reports zero-field counts without a heading on a record that has none', async () => {
+  it('reports zero-field counts and an empty heading on a record that has none', async () => {
     const result = await call([withFields(1, 0, 3)], { observation_id: [1] });
 
     expect(structured(result).observations[0]).toMatchObject({
@@ -478,7 +580,7 @@ describe('the batch-shared thread cap, on both surfaces', () => {
       observation_fields_total: 0,
       observation_fields_shown: 0,
     });
-    expect(textOf(result)).not.toContain('### Observation fields');
+    expect(textOf(result)).toContain('### Observation fields — 0 of 0 shown');
   });
 
   it('leaves the description whole however long it is', async () => {
@@ -494,6 +596,49 @@ describe('the batch-shared thread cap, on both surfaces', () => {
  * fetch mock replays that order, so these prove the reply follows the request.
  */
 describe('batch order follows the request', () => {
+  it('requests only ten distinct ids once and preserves the deferred tail on both surfaces', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => i + 1);
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/[\d,]+$/,
+        respond: () =>
+          Response.json({
+            total_results: 10,
+            results: ids
+              .slice(0, 10)
+              .reverse()
+              .map((id) => rawObservation({ id })),
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetObservation, {
+        observation_id: [1, ...ids, 12],
+        include: ['comments'],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(http.calls).toHaveLength(1);
+      expect(http.calls[0]?.request.url).toMatch(/\/observations\/1,2,3,4,5,6,7,8,9,10$/);
+      expect(result.structuredContent).toMatchObject({
+        observations: ids.slice(0, 10).map((id) => ({ id })),
+        unresolved: [],
+        deferred: [{ observation_id: 11 }, { observation_id: 12 }],
+      });
+      expect(JSON.stringify(result.content)).toContain('**Deferred ids:** 11, 12');
+      expect(JSON.stringify(result.content)).toContain('same include (comments)');
+    } finally {
+      http.restore();
+    }
+  });
   const requested = [5890862, 106687320, 322939816, 66463326, 3704154];
   const upstreamOrder = [...requested].sort((a, b) => String(a).localeCompare(String(b)));
 

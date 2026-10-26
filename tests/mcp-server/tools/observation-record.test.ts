@@ -6,13 +6,16 @@
  * @module tests/mcp-server/tools/observation-record.test
  */
 
+import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
   blockquote,
+  inlineText,
   licenceLabel,
   ObservationSchema,
   renderObservation,
   renderPhoto,
+  SearchObservationSchema,
 } from '@/mcp-server/tools/observation-record.js';
 import {
   coordinate,
@@ -24,6 +27,223 @@ import {
   projectedSound,
   taxonSummary,
 } from '../../helpers/fixtures.js';
+import { markdownNodes, markdownText } from '../../helpers/rendering-commonmark.js';
+
+describe('literal relay characterization', () => {
+  it('keeps the structured record and omitted expansion state unchanged while rendering', () => {
+    const observation = projectedObservation({ observer: 'literal &amp; <b>observer</b>' });
+    const before = structuredClone(observation);
+    renderObservation(observation);
+    expect(observation).toEqual(before);
+    expect(observation.observer).toBe('literal &amp; <b>observer</b>');
+    expect(observation).not.toHaveProperty('photos');
+    expect(observation).not.toHaveProperty('description');
+  });
+});
+
+describe('search schema fragment', () => {
+  it('exports a schema omitting exactly the twelve unreachable detail fields', async () => {
+    const detailFields = [
+      'identifications',
+      'identifications_total',
+      'identifications_shown',
+      'comments',
+      'comments_total',
+      'comments_shown',
+      'community_taxon',
+      'identification_disagreements_count',
+      'description',
+      'observation_fields',
+      'observation_fields_total',
+      'observation_fields_shown',
+    ];
+    expect(
+      Object.keys(ObservationSchema.shape).filter((key) => !(key in SearchObservationSchema.shape)),
+    ).toEqual(detailFields);
+    for (const [key, schema] of Object.entries(SearchObservationSchema.shape)) {
+      expect(schema).toBe(ObservationSchema.shape[key as keyof typeof ObservationSchema.shape]);
+    }
+    const record = projectedObservation({
+      photos: [projectedPhoto()],
+      annotations: [projectedAnnotation()],
+      sounds: [projectedSound()],
+    });
+    expect(SearchObservationSchema.parse(record)).toEqual(record);
+    expect(Object.keys(SearchObservationSchema.shape)).toEqual(
+      expect.arrayContaining([
+        'community_taxon_id',
+        'identifications_count',
+        'agreements',
+        'disagreements',
+        'photos',
+        'annotations',
+        'sounds',
+      ]),
+    );
+  });
+});
+
+describe('lossless literal relay', () => {
+  const values = [
+    '<b>x</b> *x* `x` &amp; [x](https://example.test)',
+    '  leading\tand trailing  ',
+    '\n\n  blank\r\nline\rtrail\n',
+    '# heading\n- list\n> quote\n---',
+    'a\\b \\* [brackets] _emphasis_',
+  ];
+
+  it.each(values)('recovers inline text exactly: %j', (value) => {
+    const rendered = `## ${inlineText(value)}`;
+    expect(markdownText(rendered)).toBe(value);
+    expect(markdownNodes(rendered).map((node) => node.type)).not.toEqual(
+      expect.arrayContaining(['html_inline', 'html_block', 'link', 'code', 'emph', 'list']),
+    );
+    expect(markdownNodes(rendered).filter((node) => node.type === 'heading')).toHaveLength(1);
+  });
+
+  it.each(values)('recovers quoted text exactly: %j', (value) => {
+    const rendered = blockquote(value).join('\n');
+    expect(rendered.split('\n').every((line) => line.startsWith('> '))).toBe(true);
+    expect(markdownText(rendered)).toBe(value);
+    expect(markdownNodes(rendered).map((node) => node.type)).not.toEqual(
+      expect.arrayContaining([
+        'html_inline',
+        'html_block',
+        'link',
+        'code',
+        'emph',
+        'list',
+        'heading',
+      ]),
+    );
+  });
+
+  it('labels a NUL-containing value as a lossless JSON string literal', () => {
+    const value = 'null\u0000byte\r\n<b>&amp;</b>';
+    for (const rendered of [inlineText(value), blockquote(value).join('\n')]) {
+      const text = markdownText(rendered);
+      expect(text.startsWith('JSON string literal: ')).toBe(true);
+      expect(JSON.parse(text.slice('JSON string literal: '.length))).toBe(value);
+    }
+  });
+
+  it('keeps URL destinations and attribution text independently lossless', () => {
+    const url = 'https://example.test/a_(b)?q=&amp;';
+    const attribution = '  <b>Owner</b> &amp; *rights*\r\nreserved\n';
+    const photo = projectedPhoto({ medium_url: url, square_url: url, attribution });
+    const before = structuredClone(photo);
+    const rendered = renderPhoto(photo, 'Photo').join('\n');
+    expect(
+      markdownNodes(rendered)
+        .filter((node) => node.type === 'link')
+        .map((node) => node.destination),
+    ).toEqual([url, url]);
+    expect(markdownText(rendered)).toContain(attribution);
+    expect(photo).toEqual(before);
+  });
+
+  it('distinguishes omitted, null, empty, and populated detail states', () => {
+    const omitted = renderObservation(projectedObservation()).join('\n');
+    expect(omitted).not.toContain('Observer’s description');
+    expect(omitted).not.toContain('### Photos');
+    const nullText = renderObservation(projectedObservation({ description: null })).join('\n');
+    expect(nullText).toContain('**Observer’s description:** no description');
+    const emptyText = renderObservation(projectedObservation({ description: '' })).join('\n');
+    expect(emptyText).toContain('**Observer’s description:** empty string');
+    const expanded = projectedObservation({
+      photos: [],
+      annotations: [],
+      sounds: [],
+      observation_fields: [],
+      observation_fields_total: 0,
+      observation_fields_shown: 0,
+    });
+    const text = renderObservation(expanded).join('\n');
+    for (const section of ['Photos', 'Annotations', 'Sounds']) {
+      expect(text).toContain(`### ${section}\n_none_`);
+    }
+    expect(text).toContain('### Observation fields — 0 of 0 shown\n_none_');
+    expect(expanded.observation_fields_total).toBe(0);
+    expect(expanded.photos).toEqual([]);
+  });
+
+  it('renders either observation-field count when supplied independently', () => {
+    expect(
+      renderObservation(projectedObservation({ observation_fields_shown: 0 })).join('\n'),
+    ).toContain('### Observation fields — 0 shown');
+    expect(
+      renderObservation(projectedObservation({ observation_fields_total: 5 })).join('\n'),
+    ).toContain('### Observation fields — 5 total');
+  });
+
+  it('round-trips generated literal strings through the real observation formatter', () => {
+    const character = fc.constantFrom(
+      ...Array.from(' <>&*`[]()_\\!#|~\t\r\n'),
+      'é',
+      '🦋',
+      '\u000b',
+      '\u00a0',
+    );
+    fc.assert(
+      fc.property(fc.array(character, { minLength: 1, maxLength: 100 }), (chars) => {
+        const value = chars.join('');
+        const observation = projectedObservation({
+          observer: value,
+          place_guess: value,
+          taxon: taxonSummary({ common_name: value }),
+          description: value,
+          comments: [projectedComment({ by: value, body: value })],
+          observation_fields: [{ name: value, value }],
+        });
+        const before = structuredClone(observation);
+        const rendered = renderObservation(observation).join('\n');
+        expect(markdownText(rendered)).toContain(value);
+        expect(
+          markdownNodes(rendered).filter(
+            (node) => node.type === 'html_inline' || node.type === 'html_block',
+          ),
+        ).toEqual([]);
+        expect(
+          markdownNodes(rendered).filter((node) => node.type === 'heading' && node.level === 2),
+        ).toHaveLength(1);
+        expect(observation).toEqual(before);
+        expect(markdownText(inlineText(value))).toBe(value);
+        expect(markdownText(blockquote(value).join('\n'))).toBe(value);
+      }),
+      { numRuns: 200, seed: 36 },
+    );
+  });
+});
+
+describe('literal relay timing', () => {
+  const shapes = [
+    (size: number) => '1'.repeat(size),
+    (size: number) => '<a'.repeat(Math.ceil(size / 2)).slice(0, size),
+    (size: number) => `${'§1 x'.repeat(Math.ceil(size / 4)).slice(0, size)}\ny`,
+    (size: number) => '  \r\n'.repeat(Math.ceil(size / 4)).slice(0, size),
+  ];
+  it.each(shapes.map((shape, index) => ({ shape, index })))(
+    'bounds work across doubling input sizes, shape $index',
+    ({ shape }) => {
+      const timings: number[] = [];
+      for (let size = 5_000; size <= 320_000; size *= 2) {
+        const value = shape(size);
+        inlineText(value);
+        blockquote(value);
+        const start = process.threadCpuUsage();
+        for (let run = 0; run < 3; run++) {
+          expect(inlineText(value).length).toBeGreaterThanOrEqual(value.length);
+          expect(blockquote(value).length).toBeGreaterThan(0);
+        }
+        const cpu = process.threadCpuUsage(start);
+        const micros = cpu.user + cpu.system;
+        expect(micros).toBeLessThan(2_000_000);
+        timings.push(micros);
+      }
+      expect(timings.at(-1)! / timings[0]!).toBeLessThan(256);
+    },
+  );
+});
 
 describe('licenceLabel', () => {
   it('renders a null licence as "All rights reserved", never a blank or dash', () => {
@@ -41,7 +261,7 @@ describe('blockquote', () => {
   });
 
   it('prefixes every line of multi-line text independently', () => {
-    expect(blockquote('line one\nline two')).toEqual(['> line one', '> line two']);
+    expect(blockquote('line one\nline two')).toEqual(['> line one\\', '> line two']);
   });
 });
 
@@ -54,7 +274,12 @@ describe('renderPhoto', () => {
       }),
       'Photo',
     );
-    expect(lines[0]).toBe('**Photo:** https://static.inaturalist.org/photos/1/medium.jpg');
+    expect(markdownText(lines[0]!)).toBe(
+      'Photo: https://static.inaturalist.org/photos/1/medium.jpg',
+    );
+    expect(markdownNodes(lines[0]!).find((node) => node.type === 'link')?.destination).toBe(
+      'https://static.inaturalist.org/photos/1/medium.jpg',
+    );
     expect(lines.join('\n')).toContain('open licence');
   });
 
@@ -69,7 +294,12 @@ describe('renderPhoto', () => {
       open: false,
     };
     const lines = renderPhoto(noMediumVariant, 'Photo');
-    expect(lines[0]).toBe('**Photo:** https://static.inaturalist.org/photos/1/square.jpg');
+    expect(markdownText(lines[0]!)).toBe(
+      'Photo: https://static.inaturalist.org/photos/1/square.jpg',
+    );
+    expect(markdownNodes(lines[0]!).find((node) => node.type === 'link')?.destination).toBe(
+      'https://static.inaturalist.org/photos/1/square.jpg',
+    );
   });
 
   it('renders a null licence as "All rights reserved" and the licence-not-open flag', () => {
@@ -193,14 +423,16 @@ describe('renderObservation', () => {
     expect(lines.some((line) => line.includes('no consensus taxon yet'))).toBe(true);
   });
 
-  it('renders the Photos sub-block only when the expanded array is non-empty', () => {
+  it('renders the Photos sub-block whenever the expansion is present', () => {
     const withPhotos = renderObservation(
       projectedObservation({ photos: [projectedPhoto(), projectedPhoto({ open: true })] }),
     );
     expect(withPhotos).toContain('### Photos');
 
     const withoutPhotos = renderObservation(projectedObservation({ photos: [] }));
-    expect(withoutPhotos).not.toContain('### Photos');
+    expect(withoutPhotos).toContain('### Photos');
+    expect(withoutPhotos).toContain('_none_');
+    expect(renderObservation(projectedObservation())).not.toContain('### Photos');
   });
 
   it('renders the Annotations sub-block, decoded label first and undecoded placeholder otherwise', () => {
@@ -322,14 +554,14 @@ describe('renderObservation', () => {
     const at = lines.indexOf('**Observer’s description:**');
     expect(at).toBeGreaterThan(-1);
     expect(lines.slice(at + 1, at + 3)).toEqual([
-      '> caterpillar on narrow-leaf milkweed',
+      '> caterpillar on narrow-leaf milkweed\\',
       '> along the road',
     ]);
   });
 
-  it('renders nothing for a null description', () => {
+  it('renders a present-null description explicitly', () => {
     const lines = renderObservation(projectedObservation({ description: null }));
-    expect(lines).not.toContain('**Observer’s description:**');
+    expect(lines).toContain('**Observer’s description:** no description');
   });
 
   it('renders filled observation fields as an inline bullet list', () => {
@@ -349,9 +581,10 @@ describe('renderObservation', () => {
     ]);
   });
 
-  it('renders no Observation fields block when none are filled', () => {
+  it('renders an empty Observation fields block when none are filled', () => {
     const lines = renderObservation(projectedObservation({ observation_fields: [] }));
-    expect(lines).not.toContain('### Observation fields');
+    expect(lines).toContain('### Observation fields');
+    expect(lines).toContain('_none_');
   });
 
   it('renders the Comments sub-block, blockquoting each body', () => {
@@ -385,7 +618,9 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
       .filter((line) => line.startsWith(FORGERY));
 
   it('quotes every physical line, including CRLF and bare CR separators', () => {
-    expect(blockquote('one\r\ntwo\rthree\nfour')).toEqual(['> one', '> two', '> three', '> four']);
+    const lines = blockquote('one\r\ntwo\rthree\nfour');
+    expect(lines.every((line) => line.startsWith('> '))).toBe(true);
+    expect(markdownText(lines.join('\n'))).toBe('one\r\ntwo\rthree\nfour');
   });
 
   it('leaves no unquoted line when a bare CR splits an attribution', () => {
@@ -399,7 +634,7 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
         identifications: [projectedIdentification({ body: `Looks right.\n${FORGERY}` })],
       }),
     );
-    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(markdownText(lines.join('\n'))).toContain(`Looks right.\n${FORGERY}`);
     expect(forgedLines(lines)).toEqual([]);
   });
 
@@ -420,7 +655,7 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
     const lines = renderObservation(
       projectedObservation({ place_guess: `Seattle, WA\n${FORGERY}` }),
     );
-    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(markdownText(lines.join('\n'))).toContain(`Seattle, WA\n${FORGERY}`);
     expect(forgedLines(lines)).toEqual([]);
   });
 
@@ -448,7 +683,7 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
 
   it('keeps a description quoted across a bare CR', () => {
     const lines = renderObservation(projectedObservation({ description: `A note.\r${FORGERY}` }));
-    expect(lines.join('\n')).toContain(`> ${FORGERY}`);
+    expect(markdownText(lines.join('\n'))).toContain(`A note.\r${FORGERY}`);
     expect(forgedLines(lines)).toEqual([]);
   });
 

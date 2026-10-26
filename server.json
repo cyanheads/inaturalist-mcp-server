@@ -29,6 +29,13 @@
           "default": "info"
         },
         {
+          "name": "INATURALIST_CLAMP_LIMITS",
+          "description": "Clamp oversized read limits and defer oversized by-id batches. Set false to restore strict rejection.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "INATURALIST_USER_AGENT",
           "description": "User-Agent sent on every request to api.inaturalist.org. Defaults to the package name, its version, and the repository URL. Keep a contact URL in any override — the published terms ask for identifiable clients.",
           "format": "string",
@@ -107,6 +114,13 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "INATURALIST_CLAMP_LIMITS",
+          "description": "Clamp oversized read limits and defer oversized by-id batches. Set false to restore strict rejection.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "INATURALIST_USER_AGENT",

@@ -13,6 +13,13 @@ import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/ina
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import { inaturalistResolveName } from '@/mcp-server/tools/definitions/inaturalist-resolve-name.tool.js';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
+import {
+  projectedAnnotation,
+  projectedObservation,
+  projectedPhoto,
+  projectedSound,
+} from '../helpers/fixtures.js';
+import { markdownText } from '../helpers/rendering-commonmark.js';
 
 describe('definition smoke test', () => {
   it('serves a static vocabulary and renders every entry', async () => {
@@ -26,7 +33,7 @@ describe('definition smoke test', () => {
 
     const [block] = inaturalistListReference.format?.(result) ?? [];
     expect(block).toMatchObject({ type: 'text' });
-    expect(block && 'text' in block ? block.text : '').toContain('`Aves`');
+    expect(markdownText(block && 'text' in block ? block.text : '')).toContain('code Aves');
   });
 
   it('rejects taxon_id on a topic that does not take it', async () => {
@@ -63,6 +70,7 @@ describe('definition smoke test', () => {
 
   it('declares the upstream rank floor on inaturalist_get_similar_species as a typed reason', () => {
     expect(inaturalistGetSimilarSpecies.errors?.map((entry) => entry.reason)).toEqual([
+      'unknown_place_id',
       'invalid_geography',
       'inverted_date_range',
       'unknown_taxon_id',
@@ -101,5 +109,34 @@ describe('definition smoke test', () => {
       observation_fields: [],
     });
     expect(record).toMatchObject({ identifications_total: 0, description: null });
+  });
+
+  it('advertises only reachable search record fields while retaining all media expansions', () => {
+    const search = inaturalistSearchObservations.output.shape.observations.element;
+    const detail = inaturalistGetObservation.output.shape.observations.element;
+    expect(Object.keys(detail.shape).filter((key) => !(key in search.shape))).toEqual([
+      'identifications',
+      'identifications_total',
+      'identifications_shown',
+      'comments',
+      'comments_total',
+      'comments_shown',
+      'community_taxon',
+      'identification_disagreements_count',
+      'description',
+      'observation_fields',
+      'observation_fields_total',
+      'observation_fields_shown',
+    ]);
+    for (const record of [
+      projectedObservation(),
+      projectedObservation({
+        photos: [projectedPhoto()],
+        annotations: [projectedAnnotation()],
+        sounds: [projectedSound()],
+      }),
+    ]) {
+      expect(search.parse(record)).toEqual(record);
+    }
   });
 });

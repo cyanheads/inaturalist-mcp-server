@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { clampLimits, LIMIT_CAPS, recordClamp } from '@/mcp-server/tools/limit-policy.js';
 import { ObservationSchema, renderObservation } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { THREAD_ENTRY_BUDGET, threadCap } from '@/services/inaturalist/projections.js';
@@ -42,17 +43,16 @@ function describeCuts(observations: readonly ProjectedObservation[]): string | u
 }
 
 export const inaturalistGetObservation = tool('inaturalist_get_observation', {
-  description:
-    'Fetch up to 10 observations by id with their community identification thread — who identified what, whether each identification agrees, and the consensus taxon the community landed on. The whole batch costs one upstream request, so resolving ten ids here is far cheaper than ten separate lookups. Records come back in the requested order. A missing id is reported per id in unresolved rather than failing the batch; the call fails only when nothing resolved. Long threads and long observation-field lists are cut to fit one response budget shared across the batch — up to 40 identifications, 40 comments, and 40 filled fields for a single id, 4 of each per record for ten — and every record reports the size of each array beside what it kept.',
+  description: `Fetch up to ${LIMIT_CAPS.observationBatch} distinct observations by id with their community identification thread — who identified what, whether each identification agrees, and the consensus taxon the community landed on. The whole attempted batch costs one upstream request. Records come back in requested order; remaining distinct ids are deferred for another call with the same include. Missing attempted ids appear in unresolved; the call fails only when nothing resolved and no deferred work remains. Long threads and observation-field lists share a response budget across resolved records — up to ${THREAD_ENTRY_BUDGET} entries per array for one record, ${threadCap(LIMIT_CAPS.observationBatch)} for a full batch — and every record reports the size of each array beside what it kept.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     observation_id: z
       .array(z.number().int().min(1))
       .min(1)
-      .max(10)
+      .max(clampLimits ? LIMIT_CAPS.submittedObservationIds : LIMIT_CAPS.observationBatch)
       .describe(
-        'Observation ids to fetch, 1 to 10. Find current ids for an area with inaturalist_search_observations.',
+        `Observation ids to fetch, 1 to ${clampLimits ? LIMIT_CAPS.submittedObservationIds : LIMIT_CAPS.observationBatch} submitted ids. The first ${LIMIT_CAPS.observationBatch} distinct ids are attempted; any remaining distinct ids are deferred to another call. Find current ids for an area with inaturalist_search_observations.`,
       ),
     include: z
       .array(z.enum(['identifications', 'comments', 'photos', 'annotations', 'sounds']))
@@ -79,6 +79,15 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
       .describe(
         'Requested ids upstream returned nothing for. They may have been deleted, or never existed.',
       ),
+    deferred: z
+      .array(
+        z
+          .object({ observation_id: z.number().describe('An id not attempted in this call.') })
+          .describe('One id to request in a subsequent call.'),
+      )
+      .describe(
+        'Distinct ids beyond the attempted batch, in requested order. Empty when no work remains.',
+      ),
   }),
 
   enrichment: {
@@ -94,7 +103,7 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
     {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'None of the requested ids resolved to an observation.',
+      when: 'None of the attempted ids resolved to an observation and no deferred ids remain.',
       recovery:
         'Check the observation ids, or find current ones for this area with inaturalist_search_observations.',
     },
@@ -103,15 +112,28 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
   async handler(input, ctx) {
     ctx.log.info('Fetching observations by id', { count: input.observation_id.length });
 
-    const requested = new Set(input.observation_id).size;
+    const distinct = [...new Set(input.observation_id)];
+    const attempted = distinct.slice(0, LIMIT_CAPS.observationBatch);
+    const deferred = distinct
+      .slice(LIMIT_CAPS.observationBatch)
+      .map((observation_id) => ({ observation_id }));
+    const requested = attempted.length;
+    if (input.observation_id.length > LIMIT_CAPS.observationBatch)
+      recordClamp(
+        input.observation_id.length,
+        LIMIT_CAPS.observationBatch,
+        ctx,
+        'inaturalist_get_observation',
+        'observation_id',
+      );
     const include = new Set<ObservationExpansion>(input.include);
     const { observations, unresolved } = await getINaturalistService().getObservations(
-      input.observation_id,
+      attempted,
       include,
       ctx,
     );
 
-    if (observations.length === 0) {
+    if (observations.length === 0 && deferred.length === 0) {
       throw ctx.fail('not_found', `None of the ${requested} requested observation ids resolved.`);
     }
 
@@ -121,12 +143,16 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
         ? `${unresolved.length} of ${requested} ids returned no observation; they may have been deleted or never existed.`
         : undefined,
       describeCuts(observations),
+      deferred.length > 0
+        ? `${deferred.length} distinct ids were deferred. Call inaturalist_get_observation with the deferred ids and the same include (${input.include.join(', ') || 'empty array'}).`
+        : undefined,
     ].filter((segment) => segment !== undefined);
     if (notice.length > 0) ctx.enrich.notice(notice.join(' '));
 
     return {
       observations,
       unresolved: unresolved.map((observation_id) => ({ observation_id })),
+      deferred,
     };
   },
 
@@ -141,6 +167,10 @@ export const inaturalistGetObservation = tool('inaturalist_get_observation', {
         `**Unresolved ids:** ${result.unresolved.map((entry) => entry.observation_id).join(', ')}`,
       );
     }
+    if (result.deferred.length > 0)
+      lines.push(
+        `**Deferred ids:** ${result.deferred.map((entry) => entry.observation_id).join(', ')}`,
+      );
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

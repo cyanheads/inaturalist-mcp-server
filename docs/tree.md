@@ -1,6 +1,6 @@
 # inaturalist-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 12:15:35
+Generated on: 2026-10-26 07:12:30
 
 ```text
 inaturalist-mcp-server/
@@ -37,6 +37,8 @@ inaturalist-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ inaturalist-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── inaturalist-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -154,6 +159,7 @@ inaturalist-mcp-server/
 │   │       │   ├── inaturalist-list-reference.tool.ts
 │   │       │   ├── inaturalist-resolve-name.tool.ts
 │   │       │   └── inaturalist-search-observations.tool.ts
+│   │       ├── limit-policy.ts
 │   │       ├── observation-filters.ts
 │   │       ├── observation-record.ts
 │   │       └── taxon-document.ts
@@ -166,11 +172,14 @@ inaturalist-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── config/
+│   │   ├── limit-characterization.test.ts
+│   │   ├── limit-policy.test.ts
 │   │   └── server-config.test.ts
 │   ├── helpers/
 │   │   ├── failing-upstream.ts
 │   │   ├── fake-inaturalist-service.ts
-│   │   └── fixtures.ts
+│   │   ├── fixtures.ts
+│   │   └── rendering-commonmark.ts
 │   ├── mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
@@ -190,7 +199,12 @@ inaturalist-mcp-server/
 │   │       │   └── inaturalist-search-observations.tool.test.ts
 │   │       ├── observation-filters.test.ts
 │   │       ├── observation-record.test.ts
+│   │       ├── quality-grade-compatibility.test.ts
+│   │       ├── query-contracts.test.ts
+│   │       ├── ranking-limits.test.ts
 │   │       └── taxon-document.test.ts
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   └── inaturalist/
 │   │       ├── inaturalist-service-aggregates.test.ts
@@ -215,7 +229,9 @@ inaturalist-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

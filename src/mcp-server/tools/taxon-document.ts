@@ -17,6 +17,7 @@ import {
   inlineText,
   PhotoSchema,
   renderPhoto,
+  urlText,
 } from '@/mcp-server/tools/observation-record.js';
 
 /** Heading stand-in for a taxon whose name and common name are both absent. */
@@ -26,9 +27,7 @@ export const TaxonPhotoSchema = PhotoSchema.extend({
   large_url: z
     .string()
     .optional()
-    .describe(
-      'Large variant, as the taxon endpoint publishes it. Absent when upstream carried none; never derived here.',
-    ),
+    .describe('Upstream large image URL; absent when unpublished, never derived.'),
 }).describe('A taxon gallery photo with the attribution and licence that must travel with it.');
 
 export const TaxonLineageSchema = z
@@ -53,7 +52,7 @@ export const ConservationStatusSchema = z
       .string()
       .nullable()
       .describe(
-        'The authority’s own status text — "Special Concern", "G4", "Sujeta a protección especial" are all real values. Not the normalised csi filter vocabulary.',
+        'Authority-specific status, e.g. "Special Concern" or "G4"; distinct from the normalised csi filter.',
       ),
     authority: z.string().nullable().describe('The body that published this listing.'),
     iucn: z
@@ -73,9 +72,7 @@ export const EncyclopediaSchema = z
     wikipedia_summary: z
       .string()
       .nullable()
-      .describe(
-        'Encyclopedia summary, verbatim and containing inline HTML tags. Third-party free text.',
-      ),
+      .describe('Verbatim encyclopedia text, including literal HTML tags.'),
     wikipedia_url: z.string().nullable().describe('Wikipedia page for the taxon.'),
   })
   .describe('The encyclopedia text and link upstream carries for the taxon.');
@@ -86,7 +83,7 @@ export const ConservationSchema = z
       .array(ConservationStatusSchema)
       .describe('Every listing upstream records, one per authority and place.'),
     global_status: ConservationStatusSchema.nullable().describe(
-      'The listing upstream marks as the taxon’s global status. Null when it records none.',
+      'Upstream global listing; null when none is recorded.',
     ),
   })
   .describe('Conservation listings for the taxon.');
@@ -120,9 +117,7 @@ export const TaxonDocumentSchema = z.object({
   listed_taxa_count: z
     .number()
     .nullable()
-    .describe(
-      'How many place checklists include this taxon. The checklist entries themselves are not relayed.',
-    ),
+    .describe('Number of place checklists containing this taxon.'),
   vision: z.boolean().describe('True when the taxon is covered by the upstream image classifier.'),
   taxonomy: z
     .array(TaxonLineageSchema)
@@ -180,7 +175,7 @@ function conservationLine(status: z.infer<typeof ConservationStatusSchema>): str
     `authority ${inlineText(status.authority ?? 'not published')}`,
     `iucn ${status.iucn ?? 'not published'}`,
     `place ${inlineText(status.place ?? 'global')}`,
-    `url ${inlineText(status.url ?? 'none published')}`,
+    `url ${status.url === null ? 'none published' : urlText(status.url)}`,
   ].join(' · ');
 }
 
@@ -278,7 +273,9 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
     if (doc.photos.length === 0) lines.push('_No gallery photos published._');
     for (const [index, photo] of doc.photos.entries()) {
       lines.push(...renderPhoto(photo, `Photo ${index + 1}`));
-      lines.push(`large_url ${inlineText(photo.large_url ?? 'not published')}`);
+      lines.push(
+        `large_url ${photo.large_url === undefined ? 'not published' : urlText(photo.large_url)}`,
+      );
     }
   }
 
@@ -290,7 +287,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
       lines.push('_No encyclopedia summary published._');
     }
     lines.push(
-      `**wikipedia_url:** ${inlineText(doc.encyclopedia.wikipedia_url ?? 'none published')}`,
+      `**wikipedia_url:** ${doc.encyclopedia.wikipedia_url === null ? 'none published' : urlText(doc.encyclopedia.wikipedia_url)}`,
     );
   }
 

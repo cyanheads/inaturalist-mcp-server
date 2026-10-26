@@ -51,6 +51,34 @@ afterEach(() => {
 });
 
 describe('parameter allowlist', () => {
+  it('forwards creation bounds only for histograms and sounds only for search', () => {
+    const service = internals(newService());
+    expect(
+      service.buildUrl({
+        endpoint: 'observations/histogram',
+        params: { created_d1: '2020-05-01', created_d2: '2020-05-02' },
+      }),
+    ).toContain('created_d1=2020-05-01&created_d2=2020-05-02');
+    for (const sounds of [true, false]) {
+      expect(service.buildUrl({ endpoint: 'observations', params: { sounds } })).toContain(
+        `sounds=${sounds}`,
+      );
+    }
+    expect(
+      service.buildUrl({ endpoint: 'observations', params: { sounds: undefined } }),
+    ).not.toContain('sounds');
+    for (const endpoint of [
+      'observations/species_counts',
+      'observations/observers',
+      'observations/identifiers',
+      'identifications/similar_species',
+    ] as const) {
+      expect(() => service.buildUrl({ endpoint, params: { sounds: true } })).toThrow(McpError);
+      expect(() => service.buildUrl({ endpoint, params: { created_d1: '2020-05-01' } })).toThrow(
+        McpError,
+      );
+    }
+  });
   it('rejects a parameter name not on the endpoint allowlist', () => {
     const service = newService();
     // controlled_terms publishes no query parameters at all; any key is unlisted.
@@ -310,6 +338,27 @@ describe('outbound request headers', () => {
 });
 
 describe('upstream error mapping', () => {
+  it('maps an unknown place without exposing the upstream body or URL', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/observations/,
+        respond: () =>
+          Response.json({ error: 'Unknown place_id 99999999', status: 422 }, { status: 422 }),
+      },
+    ]);
+    http.install();
+    try {
+      await expect(
+        newService().searchObservations({ place_id: 99999999 }, new Set(), createMockContext()),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'unknown_place_id', retryable: false },
+      });
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
   it('maps a 422 "Unknown taxon_id" body to a typed unknown_taxon_id error', async () => {
     const http = createFetchMock([
       {
