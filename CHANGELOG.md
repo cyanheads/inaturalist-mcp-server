@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-26
+
+Bounded observation discovery, complete rendered evidence, and caller guidance across iNaturalist workflows.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-10-08
 
 Framework ^0.13.6 → ^0.13.14: tool errors carry a request id, argument repair accepts numeric strings, lone strings for lists, and null optionals, and the Docker image installs its dependencies without emulation.
