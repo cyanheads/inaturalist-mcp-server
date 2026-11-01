@@ -209,6 +209,22 @@ describe('upstream 422 mapping on the wire', () => {
 });
 
 describe('zero-hit and limit-truncation enrichment', () => {
+  it('discloses the upstream ceiling and renders co-identifications rather than corrections', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 24, similar: candidates(24) });
+    const result = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      limit: 50,
+    });
+    expect(result.structuredContent).toMatchObject({
+      shown: 24,
+      cap: 24,
+      truncated: true,
+      notice: expect.stringContaining('limit 50 was clamped to 24.'),
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('observations identified as both');
+    expect(text).not.toContain('corrected');
+  });
   it('returns an empty list with the zero-hit notice', async () => {
     fake.getSimilarSpecies.mockResolvedValue({ total: 0, similar: [] });
     const ctx = createMockContext({ errors: inaturalistGetSimilarSpecies.errors });
@@ -217,9 +233,7 @@ describe('zero-hit and limit-truncation enrichment', () => {
     const result = await inaturalistGetSimilarSpecies.handler(input, ctx);
 
     expect(result).toEqual({ taxon_id: 48662, similar_species: [] });
-    expect(getEnrichment(ctx).notice).toBe(
-      'No look-alikes are recorded for this taxon — it is rarely misidentified.',
-    );
+    expect(getEnrichment(ctx).notice).toBe('No related taxa were returned for these filters.');
   });
 
   it('names the area filter as a cause only when an area was given', async () => {
@@ -230,7 +244,7 @@ describe('zero-hit and limit-truncation enrichment', () => {
     await inaturalistGetSimilarSpecies.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.',
+      'No related taxa were returned for these filters. Re-run without the area filter to broaden the result.',
     );
   });
 
@@ -246,7 +260,7 @@ describe('zero-hit and limit-truncation enrichment', () => {
     await inaturalistGetSimilarSpecies.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter and the d1/d2 range are too narrow. Re-run without them to see the global confusion set.',
+      'No related taxa were returned for these filters. Re-run without the area filter and the d1/d2 range to broaden the result.',
     );
   });
 
@@ -296,12 +310,12 @@ describe('zero-hit and limit-truncation enrichment', () => {
       truncated: false,
       shown: 0,
       cap: 20,
-      notice: 'No look-alikes are recorded for this taxon — it is rarely misidentified.',
+      notice: 'No related taxa were returned for these filters.',
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
-    expect(text).toContain('No look-alikes are recorded for this taxon');
+    expect(text).toContain('No related taxa were returned for these filters');
   });
 });
 
@@ -313,7 +327,7 @@ describe('format()', () => {
 
     expect(text).toContain('**taxon_id:** 48662 · **look-alikes returned:** 1');
     expect(text).toContain(
-      '1. **Viceroy** (*Limenitis archippus*) — corrected 12 times · species · 50000 observations · taxon_id 48663',
+      '1. **Viceroy** (*Limenitis archippus*) — 12 observations identified as both · species · 50000 observations · taxon_id 48663',
     );
     expect(text).toContain('**Photo:**');
   });

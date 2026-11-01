@@ -77,11 +77,11 @@ describe('ranking limits', () => {
     });
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({
-      shown: Math.min(count, 50),
-      cap: 50,
-      truncated: count > 50,
-      notice: expect.stringContaining('limit 51 was clamped to 50'),
+      shown: Math.min(count, 24),
+      cap: 24,
+      truncated: count >= 24,
+      notice: expect.stringContaining('limit 51 was clamped to 24'),
     });
-    expect(JSON.stringify(result.content)).toContain('limit 51 was clamped to 50');
+    expect(JSON.stringify(result.content)).toContain('limit 51 was clamped to 24');
   });
 });

@@ -51,6 +51,62 @@ afterEach(() => {
 });
 
 describe('parameter allowlist', () => {
+  it('browses taxon names in ID order with rank and preserves sparse projection', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: () => Response.json({ total_results: 1, results: [{ id: 7, name: 'Example' }] }),
+      },
+    ]);
+    http.install();
+    try {
+      const result = await newService().autocompleteTaxa(
+        { q: 'example', rank: 'species', limit: 2, page: 2 },
+        createMockContext(),
+      );
+      const url = new URL(http.calls[0]!.request.url);
+      expect(url.pathname).toBe('/v1/taxa');
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        q: 'example',
+        rank: 'species',
+        per_page: '2',
+        page: '2',
+        order_by: 'id',
+        order: 'asc',
+      });
+      expect(result.candidates).toMatchObject([{ id: 7, name: 'Example', kind: 'taxon' }]);
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+  it('keeps numeric taxon lookup on autocomplete and forwards page only on cross-kind search', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: () => Response.json({ total_results: 0, results: [] }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      await service.autocompleteTaxa({ q: '48662', limit: 10, page: 2 }, createMockContext());
+      await service.searchRecords(
+        { q: 'monarch', sources: 'users', limit: 2, page: 2 },
+        createMockContext(),
+      );
+      await service.autocompletePlaces('Seattle', 20, createMockContext());
+      const urls = http.calls.map((call) => new URL(call.request.url));
+      expect(urls[0]?.pathname).toBe('/v1/taxa/autocomplete');
+      expect(urls[0]?.searchParams.has('page')).toBe(false);
+      expect(urls[1]?.searchParams.get('page')).toBe('2');
+      expect(urls[2]?.searchParams.get('per_page')).toBe('20');
+      expect(urls[2]?.searchParams.has('page')).toBe(false);
+      expect(http.calls).toHaveLength(3);
+    } finally {
+      http.restore();
+    }
+  });
   it('forwards creation bounds for histograms/search and sounds only for search', () => {
     const service = internals(newService());
     expect(

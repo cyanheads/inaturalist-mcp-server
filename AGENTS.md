@@ -61,7 +61,11 @@ Search returns a prefix of whole records within 50,000 UTF-8 bytes of the serial
 
 Species counts rank leaf taxa, including hybrids and coarser identifications, with subspecies rolled up to species; retain the `species` field name. Search and species counts share establishment/conservation/rank-level and observed-month filters, while exact `rank` is species-count-only. Search adds accuracy, obscuration, independent upload-date bounds, updated-since date/datetime, and identification-agreement filters. Observation records retain nullable full `created_at`/`updated_at` strings on both surfaces.
 
-`INATURALIST_CLAMP_LIMITS` defaults on and clamps list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, with notice, log, and counter. Off restores prior advertised schema caps. Empty optional filter arrays are ignored with a composed notice; nonempty annotation values still require nonempty attributes. `include: []` is unchanged. `captive: true` selects captive/cultivated records only, and false selects wild records only. Histogram upload bounds `created_d1`/`created_d2` are independent of observation bounds `d1`/`d2`; `date_field` selects bucketing only. Search's optional boolean `sounds` filters records separately from expansion. Unknown places map to `unknown_place_id` with `inaturalist_find_places` recovery on all five area-filter tools.
+`INATURALIST_CLAMP_LIMITS` defaults on and clamps list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, with notice, log, and counter. Off restores strict input maxima, including 30 places and 50 similar species; their served ceilings remain 20 and 24 in both modes. Empty optional filter arrays are ignored with a composed notice; nonempty annotation values still require nonempty attributes. `include: []` is unchanged. `captive: true` selects captive/cultivated records only, and false selects wild records only. Histogram upload bounds `created_d1`/`created_d2` are independent of observation bounds `d1`/`d2`; `date_field` selects bucketing only. Search's optional boolean `sounds` filters records separately from expansion. Unknown places map to `unknown_place_id` with `inaturalist_find_places` recovery on all five area-filter tools.
+
+Name resolution without `page` retains relevance ordering. Explicit taxon-name pages use `/taxa` with ascending ID order from page 1 and may match a different multilingual population from autocomplete; numeric taxon IDs remain singleton autocomplete lookups. Reject explicit `page × applied limit > 10,000`. Place-name autocomplete forwards the applied `per_page` up to 20 and offers no offsets. Similar-species counts are symmetric observations carrying current, non-hidden identifications of both taxa, including ancestors; the retained `misidentification_count` name does not imply directional corrections or an exhaustive list.
+
+Absolute histograms derive only the selected date family's missing lower bound from its upper bound or today UTC (year/month: 100 calendar years; week: ten years; day: one year; hour: seven days), disclose `applied_filters.window_start`, and add no upper bound. Seasonal curves have no generated start. The 25,000-bucket cap bounds rows, not bytes; `total` sums the complete upstream window. Continuation follows the first omitted key, retaining other filters and upper bounds, with conservative date overlap and earlier counts preserved on repeated keys; partial boundary counts cannot reconstruct complete buckets.
 
 Render upstream strings as literal CommonMark text, preserving CR/LF, HTML, entities, and whitespace. NUL-containing strings use labeled JSON string literals; URLs use Markdown links. Present empty expansions, zero counts, and null/empty descriptions remain distinguishable. Search derives its schema from the shared observation schema, omitting only twelve unreachable detail fields; detail and resource schemas stay full.
 
@@ -72,20 +76,21 @@ Abridged from `src/mcp-server/tools/definitions/inaturalist-get-similar-species.
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { applyLimit, LIMIT_CAPS, limitSchema, SERVED_CAPS } from '@/mcp-server/tools/limit-policy.js';
 import { areaInputShape, resolveArea } from '@/mcp-server/tools/observation-filters.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
 export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_species', {
-  description: 'List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction.',
+  description: 'Rank related taxa by observations carrying current, non-hidden identifications of both taxa, including ancestors. Counts are symmetric co-identification evidence, not directional corrections.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     taxon_id: z.number().int().min(1).describe('Numeric taxon id to find look-alikes for.'),
     ...areaInputShape,
-    limit: z.number().int().min(1).max(50).default(20).describe('Maximum look-alikes to return.'),
+    limit: limitSchema(LIMIT_CAPS.similarSpecies, 20, 'Maximum related taxa to return.', SERVED_CAPS.similarSpecies),
   }),
   output: z.object({
     taxon_id: z.number().describe('The taxon the look-alikes were found for.'),
-    similar_species: z.array(SimilarSpeciesSchema).describe('Ranked most-confused first.'),
+    similar_species: z.array(SimilarSpeciesSchema).describe('Ranked by co-identification count.'),
   }),
   enrichment: {
     truncated: z.boolean().describe('True when the limit cut the confusion set.'),
@@ -99,6 +104,8 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
   ],
 
   async handler(input, ctx) {
+    const { applied: limit, notice } = applyLimit(input.limit, SERVED_CAPS.similarSpecies, ctx, 'inaturalist_get_similar_species', 'limit');
+    if (notice) ctx.enrich.notice(notice);
     const area = resolveArea(input);
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
@@ -108,12 +115,12 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       { ...area.value, taxon_id: input.taxon_id },
       ctx,
     );
-    const shown = similar.slice(0, input.limit);
+    const shown = similar.slice(0, limit);
     ctx.log.info('Fetched a confusion set', { taxonId: input.taxon_id, shown: shown.length });
 
     // Declared required, so written on every path — `ctx.enrich.truncated()`
     // overwrites these only where the limit actually cut the set.
-    ctx.enrich({ truncated: false, shown: shown.length, cap: input.limit });
+    ctx.enrich({ truncated: false, shown: shown.length, cap: limit });
     return { taxon_id: input.taxon_id, similar_species: shown };
   },
 
@@ -124,7 +131,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
   format: (result) => [{
     type: 'text',
     text: result.similar_species
-      .map((s, i) => `${i + 1}. **${s.common_name ?? 'no common name'}** (*${s.name}*) — corrected ${s.misidentification_count} times · taxon_id ${s.taxon_id}`)
+      .map((s, i) => `${i + 1}. **${s.common_name ?? 'no common name'}** (*${s.name}*) — ${s.misidentification_count} observations identified as both · taxon_id ${s.taxon_id}`)
       .join('\n'),
   }],
 });

@@ -32,6 +32,36 @@ beforeEach(() => {
 });
 
 describe('name-prefix arm', () => {
+  it.each([20, 45])(
+    'reports a full served slice against total %s without inventing pagination',
+    async (total) => {
+      fake.autocompletePlaces.mockResolvedValue({
+        total,
+        places: Array.from({ length: 20 }, (_, id) => projectedPlace({ id })),
+      });
+      const result = await runToolContract(inaturalistFindPlaces, { q: 'Seattle', per_page: 20 });
+      expect(fake.autocompletePlaces).toHaveBeenCalledWith('Seattle', 20, expect.anything());
+      expect(result.structuredContent).toMatchObject({ cap: 20, shown: 20, truncated: total > 20 });
+      const text = JSON.stringify(result.content);
+      expect(text).toContain('id 19');
+      if (total > 20) {
+        expect(text).toContain('no paging');
+        expect(text).not.toContain('Raise per_page');
+      }
+    },
+  );
+  it('forwards the applied name size and reports its capacity on an empty result', async () => {
+    fake.autocompletePlaces.mockResolvedValue({ total: 0, places: [] });
+    const result = await runToolContract(inaturalistFindPlaces, { q: 'missing', per_page: 25 });
+    expect(fake.autocompletePlaces).toHaveBeenCalledWith('missing', 20, expect.anything());
+    expect(result.structuredContent).toMatchObject({
+      cap: 20,
+      shown: 0,
+      truncated: false,
+      notice: expect.stringContaining('per_page 25 was clamped to 20.'),
+    });
+    expect(JSON.stringify(result.content)).toContain('per_page 25 was clamped to 20.');
+  });
   it('resolves a place name via autocompletePlaces', async () => {
     fake.autocompletePlaces.mockResolvedValue({ total: 1, places: [projectedPlace()] });
     const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
@@ -39,7 +69,7 @@ describe('name-prefix arm', () => {
 
     const result = await inaturalistFindPlaces.handler(input, ctx);
 
-    expect(fake.autocompletePlaces).toHaveBeenCalledWith('Seattle', ctx);
+    expect(fake.autocompletePlaces).toHaveBeenCalledWith('Seattle', 10, ctx);
     expect(result).toEqual({ places: [projectedPlace()] });
     expect(getEnrichment(ctx).totalCount).toBe(1);
   });
@@ -51,7 +81,7 @@ describe('name-prefix arm', () => {
 
     await inaturalistFindPlaces.handler(input, ctx);
 
-    expect(getEnrichment(ctx).notice).toContain('No place name starts with that text');
+    expect(getEnrichment(ctx).notice).toContain('No place matched that text');
   });
 
   it('carries the zero-result disclosure through the effective-output parse, on both surfaces', async () => {
@@ -68,12 +98,12 @@ describe('name-prefix arm', () => {
       totalCount: 0,
       truncated: false,
       shown: 0,
-      cap: 0,
+      cap: 10,
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
-    expect(text).toContain('No place name starts with that text');
+    expect(text).toContain('No place matched that text');
   });
 
   it('reports the fixed upstream page as the cap when it did not truncate', async () => {
@@ -86,7 +116,7 @@ describe('name-prefix arm', () => {
 
     await inaturalistFindPlaces.handler(input, ctx);
 
-    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 2, cap: 2 });
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 2, cap: 10 });
   });
 
   it('discloses truncation when the fixed page of 10 is smaller than the total matched', async () => {
@@ -100,13 +130,13 @@ describe('name-prefix arm', () => {
     await inaturalistFindPlaces.handler(input, ctx);
 
     expect(getEnrichment(ctx).truncated).toBe(true);
-    expect(getEnrichment(ctx).notice).toContain('fixed page of 10');
+    expect(getEnrichment(ctx).notice).toContain('Raise per_page (max 20)');
   });
 });
 
 describe('bounding-box arm', () => {
   const bbox = { nelat: 47.7, nelng: -122.2, swlat: 47.5, swlng: -122.4 };
-  it.each([0, 30])(
+  it.each([0, 20])(
     'uses the applied ceiling with %s places, composing the notice on both surfaces',
     async (count) => {
       fake.nearbyPlaces.mockResolvedValue({
@@ -115,17 +145,17 @@ describe('bounding-box arm', () => {
         community: [],
       });
       const result = await runToolContract(inaturalistFindPlaces, { ...bbox, per_page: 31 });
-      expect(fake.nearbyPlaces).toHaveBeenCalledWith(bbox, 30, expect.anything());
+      expect(fake.nearbyPlaces).toHaveBeenCalledWith(bbox, 20, expect.anything());
       expect(result.structuredContent).toMatchObject({
-        cap: 60,
+        cap: 40,
         shown: count,
-        notice: expect.stringContaining('per_page 31 was clamped to 30'),
+        notice: expect.stringContaining('per_page 31 was clamped to 20'),
       });
       const text = (result.content ?? [])
         .map((block) => ('text' in block ? block.text : ''))
         .join('\n');
-      expect(text).toContain('per_page 31 was clamped to 30');
-      expect(text).toContain(count === 0 ? 'No place covers that box' : 'Shrink the box');
+      expect(text).toContain('per_page 31 was clamped to 20');
+      expect(text).toContain(count === 0 ? 'No place covers that box' : 'narrower box');
     },
   );
 
@@ -244,15 +274,15 @@ describe('bounding-box arm', () => {
   });
 
   it('points at shrinking the box rather than raising per_page once per_page is at its maximum', async () => {
-    fake.nearbyPlaces.mockResolvedValue({ total: 30, standard: places(30), community: [] });
+    fake.nearbyPlaces.mockResolvedValue({ total: 20, standard: places(20), community: [] });
     const ctx = createMockContext({ errors: inaturalistFindPlaces.errors });
     const input = inaturalistFindPlaces.input.parse({ ...bbox, per_page: 30 });
 
     await inaturalistFindPlaces.handler(input, ctx);
 
-    expect(getEnrichment(ctx)).toMatchObject({ truncated: true, shown: 30, cap: 60 });
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: true, shown: 20, cap: 40 });
     expect(getEnrichment(ctx).notice).not.toContain('Raise per_page');
-    expect(getEnrichment(ctx).notice).toContain('Shrink the box');
+    expect(getEnrichment(ctx).notice).toContain('narrower box');
   });
 
   it('treats a blank q from a form client as unset and serves the bounding-box arm', async () => {

@@ -29,7 +29,7 @@
 
 ## Overview
 
-iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the taxa of an area; and check what a look-alike is most often confused with. No API key required.
+iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the taxa of an area; and explore related taxa through shared identification evidence. No API key required.
 
 ### Tools
 
@@ -43,7 +43,7 @@ iNaturalist's index of 387M+ georeferenced citizen-science observations of plant
 | `inaturalist_get_species_counts` | Rank the leaf taxa recorded in an area and period, most-observed first, optionally for one observer or project |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area: which months, weeks, or years it is recorded in |
 | `inaturalist_get_leaderboard` | Rank the most active observers or identifiers for an area, period, and taxon |
-| `inaturalist_get_similar_species` | List the taxa a genus-or-finer taxon is most often misidentified as, ranked by correction count |
+| `inaturalist_get_similar_species` | Rank related taxa by observations carrying identifications of both taxa, for a genus-or-finer taxon |
 | `inaturalist_get_taxon` | Fetch a taxon profile: taxonomic path, conservation listings by authority, encyclopedia summary, photos, and children |
 
 ### Resources
@@ -68,15 +68,17 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_resolve_name` <sub>tool</sub>
 
-- `q` plus `type`: `taxon` (default; name-prefix autocomplete, so "monarch" hits where "monarch butterfly" misses, with an optional `rank`) or `place` / `project` / `user` / `any` (scored cross-kind search); applied `limit` up to 30, default 10
-- Each candidate carries `kind` and `id`, plus `login` on users; a miss returns `found: false` with `guidance` instead of an error
+- `q` plus `type`: `taxon` (default; word-start name matching or exact numeric ID, with optional `rank`) or `place` / `project` / `user` / `any` (scored cross-kind search with limited spelling tolerance); applied `limit` up to 30, default 10
+- Omit `page` for relevance-ranked suggestions. Explicit taxon name pages browse ascending taxon IDs from page 1; their multilingual match population can differ from autocomplete. Keep the limit fixed; `page × applied limit` must stay within 10,000. Numeric taxon IDs have one page
+- Each candidate carries `kind` and `id`, plus `login` on users. A true miss returns `found: false` with `guidance`; an empty page beyond matching records retains `found: true`. Every reply discloses `totalCount`, `truncated`, `shown`, and `cap`
 
 ---
 
 ### `inaturalist_find_places` <sub>tool</sub>
 
-- Exactly one of `q` (place-name prefix) or all four of `nelat`, `nelng`, `swlat`, `swlng`, otherwise `invalid_geography`; applied `per_page` up to 30 (default 10) applies to the box arm only, per list
+- Exactly one of `q` (display-name prefix or analyzed words) or all four of `nelat`, `nelng`, `swlat`, `swlng`, otherwise `invalid_geography`; `per_page` is forwarded on both arms, default 10, served maximum 20 per list. Strict mode accepts up to 30, then applies the same served ceiling
 - `q` returns `places[]`, a box returns `standard[]` and `community[]`; each place carries `id`, `bbox`, `ancestor_place_ids`, `place_type`, `admin_level`, and `location`, with boundary polygons stripped
+- Name autocomplete has no pagination; narrow the text or use a smaller map area to explore further matches. `cap` is the applied size for names and twice that size for a box's two lists, including empty replies
 
 ---
 
@@ -111,8 +113,10 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 ### `inaturalist_get_histogram` <sub>tool</sub>
 
 - `interval`: `month_of_year` (default) or `week_of_year` for a seasonal curve, or `year` / `month` / `week` / `day` / `hour` for absolute dates; `date_field` `observed` (default) or `created`; `taxon_id` optional, and an annotation pair (Life Stage `1` = Larva `6`) or `iconic_taxa` narrows the curve
-- Returns every bucket in order, zeros included, plus a `total` across all of them; capped at 800 buckets from the start of the range, with `truncated` / `shown` / `cap`
+- Returns up to 25,000 buckets in order, zeros included, with `truncated` / `shown` / `cap`. `total` sums every upstream bucket in the histogram window, including omitted rows; it is not an all-time taxon count. The row cap is no byte guarantee
 - `d1`/`d2` bound observation dates; `created_d1`/`created_d2` separately bound upload dates. `date_field` selects which date is bucketed without changing either filter pair
+- Absolute intervals supply only the selected family's missing lower bound, anchored to its upper bound or today UTC: year/month subtract 100 calendar years, week 10 years, day one year, hour seven days. `applied_filters.window_start` discloses that effective start; no upper bound is added. Seasonal intervals have no generated start
+- On truncation, follow the first-omitted-bucket guidance with other filters and upper bounds retained. Date-only continuation can overlap earlier or partial boundary buckets: deduplicate keys, preserve earlier counts, and never add or replace repeated counts. This cannot reconstruct complete boundary-bucket totals
 - `user_id` or `user_login` selects an observer's sightings; `project_id` selects a project. Resolve either with `inaturalist_resolve_name`; an observer ID and login are mutually exclusive
 
 ---
@@ -128,8 +132,8 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_get_similar_species` <sub>tool</sub>
 
-- `taxon_id` at genus or finer, otherwise `taxon_rank_too_coarse`; an optional area, `d1`/`d2`, `quality_grade`, and `captive` scope the set to a region; applied `limit` up to 50, default 20
-- Ranked by `misidentification_count`, with `truncationCeiling` when the limit cuts the set
+- `taxon_id` at genus or finer, otherwise `taxon_rank_too_coarse`; an optional area, `d1`/`d2`, `quality_grade`, and `captive` scope the evidence; default `limit` 20, served maximum 24. Strict mode accepts up to 50, then applies the same served ceiling
+- The retained `misidentification_count` counts observations carrying current, non-hidden identifications of both taxa, including ancestor taxa. This is symmetric co-identification evidence, not directional corrections or visual similarity. `truncationCeiling` describes a locally cut ranking; upstream may omit further taxa and offers no pagination
 
 ---
 
@@ -289,7 +293,7 @@ cp .env.example .env
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | Minimum gap between outbound request starts, in ms. The default holds the rate near 54 per minute. | `1100` |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | Maximum outbound requests in flight. | `4` |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | Outbound requests allowed per UTC day, counted in-process and reset on restart. | `9000` |
-| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp oversized list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, and radius to 20,040 km, with a notice, log, and counter. `false` restores the prior advertised schema caps, including radius at 500 km, and rejects oversized input. | `true` |
+| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, and radius to 20,040 km, with a notice, log, and counter. `false` restores strict input maxima (places 30, similar species 50, radius 500 km); places and similar species still serve at most 20/24 in either mode. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |

@@ -1,6 +1,5 @@
 /**
- * @fileoverview Lists the taxa a taxon is most often misidentified as, ranked by
- * how many times identifiers made the correction.
+ * @fileoverview Lists related taxa ranked by observations identified as both taxa.
  * @module mcp-server/tools/definitions/inaturalist-get-similar-species.tool
  */
 
@@ -11,6 +10,7 @@ import {
   LIMIT_CAPS,
   limitSchema,
   radiusClampNotice,
+  SERVED_CAPS,
 } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
@@ -44,7 +44,7 @@ const SimilarSpeciesSchema = z
     misidentification_count: z
       .number()
       .describe(
-        'How many times identifiers corrected this taxon to the queried one. The ranking key.',
+        'Observations identified as both taxa under the call’s filters: a symmetric count of current, non-hidden identifications, including finer taxa through their ancestors. Withdrawn identifications are excluded. The ranking key.',
       ),
     photo: PhotoSchema.optional().describe('Representative photo, when the taxon carries one.'),
   })
@@ -52,7 +52,7 @@ const SimilarSpeciesSchema = z
 
 export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_species', {
   description:
-    'List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction — the field-identification check before committing to a look-alike. Scope it to an area in exactly one form (place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box) to see the confusion set a specific region actually produces, or leave the area off for the global set. The taxon must be a genus or finer (genus, species, or below) — upstream keeps no confusion set for a family, order, or anything coarser. Resolve the organism name to a taxon id with inaturalist_resolve_name first.',
+    'List related taxa ranked by observations carrying current identifications of both taxa. This is co-identification evidence, not a directional correction count or an exhaustive list of visually similar organisms. Scope it to an area in exactly one form (place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box), or leave the area off for global results. The taxon must be a genus or finer (genus, species, or below). Resolve the organism name to a taxon id with inaturalist_resolve_name first.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -70,7 +70,8 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     limit: limitSchema(
       LIMIT_CAPS.similarSpecies,
       20,
-      'Maximum look-alikes to return. Applied in-process to the whole upstream confusion set.',
+      'Maximum related taxa to return.',
+      SERVED_CAPS.similarSpecies,
     ),
   }),
 
@@ -85,7 +86,11 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     totalCount: z
       .number()
       .describe('How many look-alikes upstream returned, before the limit was applied.'),
-    truncated: z.boolean().describe('True when the limit cut the confusion set.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when the local limit cut the list or upstream reached its ceiling, so more related taxa may exist.',
+      ),
     shown: z.number().describe('How many look-alikes this response carries.'),
     cap: z.number().describe('The limit that was applied.'),
     truncationCeiling: z
@@ -147,7 +152,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     };
     const { applied, notice: limitNotice } = applyLimit(
       requestedInput.limit,
-      LIMIT_CAPS.similarSpecies,
+      SERVED_CAPS.similarSpecies,
       ctx,
       'inaturalist_get_similar_species',
       'limit',
@@ -200,13 +205,13 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         [
           clampNotice,
           scope.length === 0
-            ? 'No look-alikes are recorded for this taxon — it is rarely misidentified.'
-            : `No look-alikes are recorded for this taxon — either it is rarely misidentified, or ${scope.join(' and ')} ${scope.length > 1 ? 'are' : 'is'} too narrow. Re-run without ${scope.length > 1 ? 'them' : scope[0]} to see the global confusion set.`,
+            ? 'No related taxa were returned for these filters.'
+            : `No related taxa were returned for these filters. Re-run without ${scope.join(' and ')} to broaden the result.`,
         ]
           .filter(Boolean)
           .join(' '),
       );
-    } else if (similar.length > shown.length) {
+    } else if (similar.length > shown.length || similar.length >= SERVED_CAPS.similarSpecies) {
       // The ranking is descending, so the last count shown bounds every
       // look-alike the limit cut.
       const ceiling = shown.at(-1)?.misidentification_count;
@@ -216,7 +221,9 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         ...(ceiling === undefined ? {} : { ceiling }),
         guidance: [
           clampNotice,
-          `${similar.length} look-alikes are recorded. Raise limit (max ${LIMIT_CAPS.similarSpecies}) to see the rest of the confusion set.`,
+          input.limit < SERVED_CAPS.similarSpecies
+            ? `Raise limit (max ${SERVED_CAPS.similarSpecies}) to see more returned taxa. Upstream serves at most 24 and publishes no paging, so further taxa may be omitted.`
+            : 'Upstream serves at most 24 related taxa and publishes no paging, so this list may be cut. Narrow the area or date filters to explore a smaller set.',
         ]
           .filter(Boolean)
           .join(' '),
@@ -233,7 +240,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     for (const [index, species] of result.similar_species.entries()) {
       lines.push(
         '',
-        `${index + 1}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — corrected ${species.misidentification_count} times · ${inlineText(species.rank ?? 'rank not recorded')} · ${species.observations_count ?? 'observation count not published'} observations · taxon_id ${species.taxon_id}`,
+        `${index + 1}. **${inlineText(species.common_name ?? 'no common name')}** (*${inlineText(species.name ?? 'name not recorded')}*) — ${species.misidentification_count} observations identified as both · ${inlineText(species.rank ?? 'rank not recorded')} · ${species.observations_count ?? 'observation count not published'} observations · taxon_id ${species.taxon_id}`,
       );
       if (species.photo) lines.push(...renderPhoto(species.photo, 'Photo'));
     }

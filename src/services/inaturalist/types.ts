@@ -445,9 +445,8 @@ export type SpeciesCount = {
 };
 
 /**
- * One look-alike. `misidentification_count` is named for what it counts — how
- * many times identifiers corrected this taxon to the queried one — rather than
- * the bare upstream `count`.
+ * One related taxon. The retained public `misidentification_count` counts
+ * observations carrying current, non-hidden identifications of both taxa.
  */
 export type SimilarSpecies = {
   taxon_id: number;

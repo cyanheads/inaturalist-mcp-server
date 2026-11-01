@@ -12,7 +12,7 @@ import {
   getEnrichment,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetHistogram } from '@/mcp-server/tools/definitions/inaturalist-get-histogram.tool.js';
 import {
   getINaturalistService,
@@ -33,8 +33,257 @@ vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) 
 const fake = createFakeService();
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-11-01T01:00:00Z'));
   resetFakeService(fake);
   vi.mocked(getINaturalistService).mockReturnValue(asService(fake));
+});
+
+afterEach(() => vi.useRealTimers());
+
+describe('absolute date windows', () => {
+  it.each([
+    ['year', '1926-11-01'],
+    ['month', '1926-11-01'],
+    ['week', '2016-11-01'],
+    ['day', '2025-11-01'],
+    ['hour', '2026-10-25'],
+  ] as const)(
+    'defaults %s to a disclosed UTC calendar start without adding an upper bound',
+    async (interval, start) => {
+      fake.getHistogram.mockResolvedValue([]);
+      const result = await runToolContract(inaturalistGetHistogram, { interval });
+      expect(result.isError).toBeFalsy();
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({ d1: start, d2: undefined });
+      expect(result.structuredContent).toMatchObject({
+        applied_filters: { window_start: start },
+        total: 0,
+        notice: expect.stringContaining(`generated d1=${start}`),
+      });
+      const text = JSON.stringify(result.content);
+      expect(text).toContain(`window_start ${start}`);
+      expect(text).toContain(`generated d1=${start}`);
+      expect(text).toContain('match the histogram window and other filters');
+      expect(text).not.toContain('The supplied observation-date');
+    },
+  );
+
+  it.each([
+    ['day', '2024-02-29', '2023-02-28'],
+    ['week', '2024-02-29', '2014-02-28'],
+    ['year', '2000-02-29', '1900-02-28'],
+    ['month', '2400-02-29', '2300-02-28'],
+    ['hour', '2024-03-01', '2024-02-23'],
+    ['hour', '2024-01-03', '2023-12-27'],
+    ['day', '0099-05-06', '0098-05-06'],
+    ['day', '0001-02-28', '0000-02-28'],
+    ['day', '0000-06-01', '0000-01-01'],
+    ['year', '0099-12-31', '0000-01-01'],
+    ['hour', '0000-01-03', '0000-01-01'],
+  ] as const)(
+    'subtracts %s calendar units from %s without overflow or rejection',
+    async (interval, end, start) => {
+      fake.getHistogram.mockResolvedValue([]);
+      const result = await runToolContract(inaturalistGetHistogram, { interval, d2: end });
+      expect(result.isError).toBeFalsy();
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({ d1: start, d2: end });
+      expect(result.structuredContent).toMatchObject({ applied_filters: { window_start: start } });
+      expect(JSON.stringify(result.content)).toContain(`window_start ${start}`);
+    },
+  );
+
+  it.each(['observed', 'created'] as const)(
+    'uses only the %s family as the anchor and preserves other filters',
+    async (date_field) => {
+      fake.getHistogram.mockResolvedValue([{ key: '2020-01-03', count: 4 }]);
+      const bounds =
+        date_field === 'created'
+          ? { d1: '2010-01-01', d2: '2010-12-31', created_d2: '2020-01-02' }
+          : { d2: '2020-01-02', created_d1: '2010-01-01', created_d2: '2010-12-31' };
+      const result = await runToolContract(inaturalistGetHistogram, {
+        interval: 'day',
+        date_field,
+        ...bounds,
+        user_id: 1,
+        project_id: 185897,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+        ...bounds,
+        [date_field === 'created' ? 'created_d1' : 'd1']: '2019-01-02',
+        user_id: 1,
+        project_id: 185897,
+      });
+      expect(result.structuredContent).toMatchObject({
+        applied_filters: { window_start: '2019-01-02' },
+        buckets: [{ key: '2020-01-03', count: 4 }],
+      });
+      expect(JSON.stringify(result.content)).toContain('2020-01-03');
+    },
+  );
+
+  it.each(['observed', 'created'] as const)(
+    'echoes an explicit %s start without a generated-start notice',
+    async (date_field) => {
+      fake.getHistogram.mockResolvedValue([{ key: '0000-01-01', count: 1 }]);
+      const field = date_field === 'created' ? 'created_d1' : 'd1';
+      const result = await runToolContract(inaturalistGetHistogram, {
+        interval: 'year',
+        date_field,
+        [field]: '0000-01-01',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({ [field]: '0000-01-01' });
+      expect(result.structuredContent).toMatchObject({
+        applied_filters: { window_start: '0000-01-01' },
+      });
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(JSON.stringify(result.content)).toContain('window_start 0000-01-01');
+      expect(JSON.stringify(result.content)).not.toContain('generated');
+    },
+  );
+
+  it.each(['month_of_year', 'week_of_year'] as const)(
+    'leaves %s seasonal bounds and enrichment unchanged',
+    async (interval) => {
+      fake.getHistogram.mockResolvedValue([{ key: '1', count: 2 }]);
+      const result = await runToolContract(inaturalistGetHistogram, {
+        interval,
+        created_d2: '2020-01-02',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+        d1: undefined,
+        created_d2: '2020-01-02',
+      });
+      expect(fake.getHistogram.mock.calls[0]?.[0]).not.toHaveProperty('created_d1');
+      expect(result.structuredContent).not.toHaveProperty('applied_filters.window_start');
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(JSON.stringify(result.content)).not.toContain('window_start');
+    },
+  );
+
+  it('treats a blank selected lower bound as unset and preserves supplied-bound zero guidance', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      interval: 'day',
+      date_field: 'created',
+      created_d1: '',
+      created_d2: '2020-12-31',
+      d1: '2010-01-01',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      created_d1: '2019-12-31',
+      d1: '2010-01-01',
+    });
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain('generated created_d1=2019-12-31');
+    expect(notice).toContain('supplied observation-date d1/d2 2010-01-01…any end');
+    expect(notice).toContain('upload-date created_d1/created_d2 any start…2020-12-31');
+    expect(JSON.stringify(result.content)).toContain(notice);
+  });
+
+  it.each([
+    { interval: 'day', d1: '2020-02-30' },
+    { interval: 'hour', date_field: 'created', created_d1: '2020-01-01T01:00:00Z' },
+  ])('rejects malformed dates on both surfaces before requesting: %j', async (args) => {
+    const result = await Reflect.apply(runToolContract, undefined, [inaturalistGetHistogram, args]);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_arguments' } },
+    });
+    expect(JSON.stringify(result.content)).toContain('invalid_arguments');
+    expect(fake.getHistogram).not.toHaveBeenCalled();
+  });
+
+  it('anchors the generated observation start to a historical upper bound on both surfaces', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '2019-12-31', count: 2 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      interval: 'day',
+      d2: '2020-12-31',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      d1: '2019-12-31',
+      d2: '2020-12-31',
+    });
+    expect(result.structuredContent).toMatchObject({
+      total: 2,
+      applied_filters: { window_start: '2019-12-31' },
+      notice: expect.stringContaining('d1=2019-12-31'),
+    });
+    expect(JSON.stringify(result.content)).toContain('window_start');
+    expect(JSON.stringify(result.content)).toContain('d1=2019-12-31');
+  });
+
+  it('sends the generated upload start through the real service allowlist beside observation bounds', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\/histogram\?/,
+        respond: () => Response.json({ results: { day: { '2020-01-03': 2 } } }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetHistogram, {
+        interval: 'day',
+        date_field: 'created',
+        d1: '2010-01-01',
+        d2: '2021-12-31',
+        created_d2: '2020-01-02',
+        user_id: 1,
+        project_id: 185897,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(http.calls).toHaveLength(1);
+      const query = new URL(http.calls[0]!.request.url).searchParams;
+      expect(Object.fromEntries(query)).toMatchObject({
+        d1: '2010-01-01',
+        d2: '2021-12-31',
+        created_d1: '2019-01-02',
+        created_d2: '2020-01-02',
+        user_id: '1',
+        project_id: '185897',
+      });
+      expect(result.structuredContent).toMatchObject({
+        applied_filters: { window_start: '2019-01-02' },
+        buckets: [{ key: '2020-01-03', count: 2 }],
+        total: 2,
+      });
+      expect(JSON.stringify(result.content)).toContain('| 2020-01-03 | 2 |');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('returns a full 25,000-bucket range without truncation', async () => {
+    fake.getHistogram.mockResolvedValue(
+      Array.from({ length: 25_000 }, (_, i) => ({
+        key: new Date(Date.UTC(1950, 0, i + 1)).toISOString().slice(0, 10),
+        count: 1,
+      })),
+    );
+    const result = await runToolContract(inaturalistGetHistogram, {
+      interval: 'day',
+      d1: '1950-01-01',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total: 25_000,
+      shown: 25_000,
+      truncated: false,
+    });
+    expect(JSON.stringify(result.content)).toContain('| 2018-06-12 | 1 |');
+  });
 });
 
 describe('area validation', () => {
@@ -74,6 +323,30 @@ describe('area validation', () => {
 });
 
 describe('ordered date range', () => {
+  it('preserves independent date families and complete UTC buckets for absolute intervals', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '2020-05-02T00:00:00Z', count: 3 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      interval: 'hour',
+      date_field: 'created',
+      d1: '2019-01-01',
+      d2: '2021-01-01',
+      created_d1: '2020-05-01',
+      created_d2: '2020-05-01',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      d1: '2019-01-01',
+      d2: '2021-01-01',
+      created_d1: '2020-05-01',
+      created_d2: '2020-05-01',
+    });
+    expect(result.structuredContent).toMatchObject({
+      buckets: [{ key: '2020-05-02T00:00:00Z', count: 3 }],
+      total: 3,
+    });
+    expect(JSON.stringify(result.content)).toContain('| 2020-05-02T00:00:00Z | 3 |');
+  });
+
   it('validates and forwards upload bounds without clipping upstream keys', async () => {
     fake.getHistogram.mockResolvedValue([{ key: '2020-05-02', count: 3 }]);
     const result = await runToolContract(inaturalistGetHistogram, {
@@ -293,8 +566,120 @@ describe('zero-hit notice', () => {
 
 describe('bucket cap', () => {
   function buckets(n: number) {
-    return Array.from({ length: n }, (_, i) => ({ key: `bucket-${i}`, count: 1 }));
+    return Array.from({ length: n }, (_, i) => ({
+      key: new Date(Date.UTC(1950, 0, i + 1)).toISOString().slice(0, 10),
+      count: 1,
+    }));
   }
+
+  it.each([
+    ['day', 'observed', '2018-06-13', '2018-06-13'],
+    ['day', 'created', '2018-06-13', '2018-06-12'],
+    ['hour', 'observed', '2022-11-07T16:00:00Z', '2022-11-06'],
+    ['hour', 'created', '2022-11-07T16:00:00Z', '2022-11-06'],
+    ['week', 'observed', '1979-02-19', '1979-02-19'],
+    ['week', 'created', '1979-02-19', '1979-02-18'],
+    ['month', 'observed', '2083-05', '2083-05-01'],
+    ['month', 'created', '2083-05-01', '2083-04-30'],
+  ] as const)(
+    'continues %s/%s at the first omitted key %s without replacing boundary counts',
+    async (interval, date_field, omitted, start) => {
+      const all = Array.from({ length: 25_001 }, (_, i) => {
+        let key: string;
+        if (interval === 'month') {
+          key = `${String(Math.floor(i / 12)).padStart(4, '0')}-${String((i % 12) + 1).padStart(2, '0')}${omitted.length === 10 ? '-01' : ''}`;
+        } else {
+          const base =
+            interval === 'week' ? '1500-01-01' : interval === 'hour' ? '2020-01-01' : '1950-01-01';
+          const stepMs =
+            interval === 'week' ? 604_800_000 : interval === 'hour' ? 3_600_000 : 86_400_000;
+          const iso = new Date(Date.parse(`${base}T00:00:00Z`) + i * stepMs).toISOString();
+          key = interval === 'hour' ? iso.replace('.000Z', 'Z') : iso.slice(0, 10);
+        }
+        return { key, count: i === 25_000 ? 7 : 1 };
+      });
+      fake.getHistogram.mockResolvedValue(all);
+      const lower = date_field === 'created' ? 'created_d1' : 'd1';
+      const upper = date_field === 'created' ? 'created_d2' : 'd2';
+      const result = await runToolContract(inaturalistGetHistogram, {
+        interval,
+        date_field,
+        [lower]: '0000-01-01',
+        [upper]: '2090-12-31',
+        user_id: 1,
+        project_id: 185897,
+        term_id: [1],
+        term_value_id: [6],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        total: 25_007,
+        shown: 25_000,
+        cap: 25_000,
+        truncated: true,
+      });
+      const text = JSON.stringify(result.content);
+      const notice = String((result.structuredContent as { notice?: string }).notice);
+      for (const value of [
+        `first omitted bucket (${omitted})`,
+        `${lower}=${start}`,
+        'retain all other filters and upper bounds',
+        'deduplicate keys',
+        'preserving counts',
+        'partial',
+      ]) {
+        expect(notice).toContain(value);
+        expect(text).toContain(value);
+      }
+      expect(notice).not.toContain(`${lower}=${omitted}T`);
+      expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+        [lower]: '0000-01-01',
+        [upper]: '2090-12-31',
+        user_id: 1,
+        project_id: 185897,
+      });
+
+      // A second and final slice can repeat a boundary bucket with a partial count.
+      const previous = all[24_999]!;
+      fake.getHistogram.mockResolvedValue([
+        { key: previous.key, count: 0 },
+        { key: omitted, count: 7 },
+      ]);
+      const next = await runToolContract(inaturalistGetHistogram, {
+        interval,
+        date_field,
+        [lower]: start,
+        [upper]: '2090-12-31',
+        user_id: 1,
+        project_id: 185897,
+        term_id: [1],
+        term_value_id: [6],
+      });
+      expect(next.structuredContent).toMatchObject({
+        truncated: false,
+        shown: 2,
+        total: 7,
+        buckets: [
+          { key: previous.key, count: 0 },
+          { key: omitted, count: 7 },
+        ],
+      });
+      expect(JSON.stringify(next.content)).toContain(`| ${omitted} | 7 |`);
+    },
+  );
+
+  it('returns an empty final slice without truncation or another continuation', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      interval: 'hour',
+      date_field: 'created',
+      created_d1: '2020-01-03',
+      created_d2: '2020-01-03',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ total: 0, shown: 0, truncated: false });
+    expect(JSON.stringify(result.content)).not.toContain('first omitted');
+  });
 
   it('declares truncated: false with shown/cap when there are zero buckets', async () => {
     fake.getHistogram.mockResolvedValue([]);
@@ -305,58 +690,58 @@ describe('bucket cap', () => {
 
     expect(result.buckets).toEqual([]);
     expect(result.total).toBe(0);
-    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 0, cap: 800 });
+    expect(getEnrichment(ctx)).toMatchObject({ truncated: false, shown: 0, cap: 25_000 });
   });
 
   it('does not truncate when the bucket count sits exactly at the cap', async () => {
-    fake.getHistogram.mockResolvedValue(buckets(800));
+    fake.getHistogram.mockResolvedValue(buckets(25_000));
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
-    const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
+    const input = inaturalistGetHistogram.input.parse({ interval: 'day', d1: '1950-01-01' });
 
     const result = await inaturalistGetHistogram.handler(input, ctx);
 
-    expect(result.buckets).toHaveLength(800);
+    expect(result.buckets).toHaveLength(25_000);
     const enrichment = getEnrichment(ctx);
     expect(enrichment.truncated).toBe(false);
-    expect(enrichment.shown).toBe(800);
-    expect(enrichment.cap).toBe(800);
+    expect(enrichment.shown).toBe(25_000);
+    expect(enrichment.cap).toBe(25_000);
     expect(enrichment.notice).toBeUndefined();
   });
 
-  it('truncates to the first 800 buckets, in upstream order, one past the cap', async () => {
-    fake.getHistogram.mockResolvedValue(buckets(801));
+  it('truncates to the first 25,000 buckets, in upstream order, one past the cap', async () => {
+    fake.getHistogram.mockResolvedValue(buckets(25_001));
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
     const input = inaturalistGetHistogram.input.parse({ interval: 'day' });
 
     const result = await inaturalistGetHistogram.handler(input, ctx);
 
-    expect(result.buckets).toHaveLength(800);
-    expect(result.buckets[0]).toEqual({ key: 'bucket-0', count: 1 });
-    expect(result.buckets.at(-1)).toEqual({ key: 'bucket-799', count: 1 });
+    expect(result.buckets).toHaveLength(25_000);
+    expect(result.buckets[0]).toEqual({ key: '1950-01-01', count: 1 });
+    expect(result.buckets.at(-1)).toEqual({ key: '2018-06-12', count: 1 });
     // total sums every bucket upstream returned, including the one past the cap.
-    expect(result.total).toBe(801);
+    expect(result.total).toBe(25_001);
     const enrichment = getEnrichment(ctx);
     expect(enrichment.truncated).toBe(true);
-    expect(enrichment.shown).toBe(800);
-    expect(enrichment.cap).toBe(800);
-    expect(enrichment.notice).toContain('Narrow d1/d2');
+    expect(enrichment.shown).toBe(25_000);
+    expect(enrichment.cap).toBe(25_000);
+    expect(enrichment.notice).toContain('d1=2025-11-01');
   });
 
   it('carries the cap through structuredContent and content[] together', async () => {
-    fake.getHistogram.mockResolvedValue(buckets(801));
+    fake.getHistogram.mockResolvedValue(buckets(25_001));
 
     const result = await runToolContract(inaturalistGetHistogram, { interval: 'day' });
 
     expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 800, cap: 800 });
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 25_000, cap: 25_000 });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
-    expect(text).toContain('across 800 buckets');
+    expect(text).toContain('25000 buckets shown');
   });
 
   it('lets the zero-hit notice win over the truncation guidance when the full set sums to zero', async () => {
-    fake.getHistogram.mockResolvedValue(buckets(801).map((bucket) => ({ ...bucket, count: 0 })));
+    fake.getHistogram.mockResolvedValue(buckets(25_001).map((bucket) => ({ ...bucket, count: 0 })));
     const ctx = createMockContext({ errors: inaturalistGetHistogram.errors });
     const input = inaturalistGetHistogram.input.parse({
       interval: 'day',
@@ -369,10 +754,11 @@ describe('bucket cap', () => {
     expect(result.total).toBe(0);
     expect(getEnrichment(ctx)).toMatchObject({
       truncated: true,
-      shown: 800,
-      cap: 800,
-      notice:
-        'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
+      shown: 25_000,
+      cap: 25_000,
+      notice: expect.stringContaining(
+        'Every bucket is zero — no records of this taxon in that area match the histogram window and other filters.',
+      ),
     });
   });
 });
@@ -659,7 +1045,7 @@ describe('format()', () => {
     const text = block && 'text' in block ? block.text : '';
 
     expect(text).toContain(
-      '**interval:** month_of_year · **total:** 5 observations across 2 buckets',
+      '**interval:** month_of_year · **total:** 5 observations in the upstream window · 2 buckets shown',
     );
     expect(text).toContain('| key | count |');
     expect(text).toContain('| 1 | 0 |');
@@ -671,7 +1057,9 @@ describe('format()', () => {
     const [block] = inaturalistGetHistogram.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
 
-    expect(text).toContain('**interval:** year · **total:** 0 observations across 0 buckets');
+    expect(text).toContain(
+      '**interval:** year · **total:** 0 observations in the upstream window · 0 buckets shown',
+    );
     expect(text).toContain('|:--|--:|');
   });
 });

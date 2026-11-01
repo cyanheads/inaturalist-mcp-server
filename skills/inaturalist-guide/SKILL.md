@@ -4,7 +4,7 @@ description: Use inaturalist_* tools to compare local wildlife records, chart an
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -32,6 +32,8 @@ Use public iNaturalist sightings and community identifications for local species
 
 Resolve the organism and location, choose aggregate or individual evidence for the question, then retrieve the specific records needed to substantiate the answer. Carry the selected identifiers forward; do not substitute names or unrelated candidate IDs between calls.
 
+For more name candidates, start explicit browsing at page 1 with a fixed limit. Taxon name browsing uses ascending ID order and can match a different multilingual population from relevance autocomplete; do not append browse pages to an autocomplete list as if they continued it. Numeric taxon IDs are singleton lookups. Place autocomplete has no offsets: narrow the name or explore a smaller area rather than claiming exhaustive recovery.
+
 ## Workflows
 
 ### Local wildlife and seasonality
@@ -46,9 +48,11 @@ Annotation arrays are membership sets, not positional pairs: multiple attributes
 
 On histograms, `d1`/`d2` filter observation dates and `created_d1`/`created_d2` independently filter upload dates. `date_field` chooses the bucket date without changing either filter family; retain both families when comparing cohorts.
 
+For absolute curves, compare the disclosed effective window starts before comparing totals; a generated start can differ from the intended historical cohort. When continuing a truncated curve, retain other filters and upper bounds, deduplicate bucket keys, and preserve counts from earlier responses. Date-only continuation can produce partial boundary buckets and cannot reconstruct complete bucket totals; never sum overlapping replies' totals.
+
 ### Identification evidence
 
-Find candidate sightings with `inaturalist_search_observations`, then inspect selected records with `inaturalist_get_observation`. Use `inaturalist_get_similar_species` for the resolved genus or finer taxon and follow returned taxon IDs into `inaturalist_get_taxon` profiles. The confusion ranking reflects identification corrections; it is not an image classifier or an exhaustive list of visually similar organisms. If the local confusion set is empty, compare the global set before concluding there are no recorded alternatives.
+Find candidate sightings with `inaturalist_search_observations`, then inspect selected records with `inaturalist_get_observation`. Use `inaturalist_get_similar_species` for the resolved genus or finer taxon and follow returned taxon IDs into `inaturalist_get_taxon` profiles. Its ranking counts observations carrying current, non-hidden identifications of both taxa, including ancestor taxa. Treat this symmetric evidence as a lead to inspect in identification threads, never as correction direction, an image classification, or an exhaustive neighbor list. If the local set is empty, compare the global evidence before concluding there are no recorded alternatives; an empty set does not establish rarity of misidentification.
 
 ### Local contributors and source context
 

@@ -6,7 +6,7 @@ import { type Context, z } from '@cyanheads/mcp-ts-core';
 import { createCounter } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 
-/** Ceilings shared by advertised schemas, handlers and descriptions. */
+/** Historical input maxima, retained by strict-mode schemas. */
 export const LIMIT_CAPS = {
   resolveName: 30,
   findPlaces: 30,
@@ -18,6 +18,9 @@ export const LIMIT_CAPS = {
   submittedObservationIds: 100,
   radius: 20_040,
 } as const;
+
+/** Upstream served ceilings, independent of accepted input maxima. */
+export const SERVED_CAPS = { findPlaces: 20, similarSpecies: 24 } as const;
 
 /** Startup snapshot used by validation and execution alike. */
 export const clampLimits = getServerConfig().clampLimits;
@@ -39,12 +42,19 @@ const clampCounter = createCounter(
 );
 
 /** Positive safe integer schema; strict mode advertises and enforces its ceiling. */
-export function limitSchema(cap: number, defaultValue: number, description: string) {
+export function limitSchema(
+  cap: number,
+  defaultValue: number,
+  description: string,
+  servedCap = cap,
+) {
   const positive = z.number().int().positive();
   return (clampLimits ? positive : positive.max(cap))
     .default(defaultValue)
     .describe(
-      `${description} Ceiling: ${cap}; oversized values are ${clampLimits ? 'clamped' : 'rejected'}.`,
+      servedCap === cap
+        ? `${description} Ceiling: ${cap}; oversized values are ${clampLimits ? 'clamped' : 'rejected'}.`
+        : `${description} Served ceiling: ${servedCap}; requests above it are reduced to ${servedCap}. ${clampLimits ? 'Positive safe integer requests are accepted.' : `Strict mode accepts requests up to ${cap} and rejects larger values.`}`,
     );
 }
 

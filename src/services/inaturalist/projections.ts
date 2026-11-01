@@ -574,9 +574,8 @@ export function projectSpeciesCount(raw: RawTaxonCount, position: number): Speci
 }
 
 /**
- * One look-alike. The same `{ count, taxon }` envelope as a species count, but
- * `count` here is how many times identifiers corrected this taxon to the
- * queried one — so it is named for that rather than relayed as `count`.
+ * One related taxon. Preserve the public `misidentification_count` field for
+ * upstream's count of observations carrying identifications of both taxa.
  */
 export function projectSimilarSpecies(raw: RawTaxonCount): SimilarSpecies | null {
   const record = projectTaxonRecord(raw.taxon);

@@ -13,7 +13,7 @@
 | `inaturalist_get_species_counts` | Rank the leaf taxa recorded in an area and period, most-observed first. Answers "what lives here" without paging through individual sightings. | `place_id` \| `lat`+`lng`+`radius` \| bbox, `d1`/`d2`, `taxon_id`, `quality_grade`, `user_id` \| `user_login`, `project_id`, `per_page` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in. | `taxon_id`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `interval`, `date_field`, `term_id`/`term_value_id`, `iconic_taxa` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_taxon` | Fetch a taxon profile: taxonomic path, per-authority conservation statuses, encyclopedia summary, photo gallery, immediate children, and observation counts. | `taxon_id`, `sections` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
-| `inaturalist_get_similar_species` | List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction. The field-identification check for a look-alike. | `taxon_id`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `limit` | `readOnlyHint: true`, `openWorldHint: true` |
+| `inaturalist_get_similar_species` | Rank related taxa by observations carrying identifications of both taxa, for follow-up identification research. | `taxon_id`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `limit` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_find_places` | Resolve a place name to a place id, or list the places containing a map area. Returns each place's bounding box for follow-up area searches. | `q` \| bbox (`nelat`,`nelng`,`swlat`,`swlng`), `per_page` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_leaderboard` | Rank the most active observers or identifiers for an area, period, and taxon. | `kind`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `taxon_id`, `d1`/`d2`, `per_page` | `readOnlyHint: true`, `openWorldHint: true` |
 
@@ -40,7 +40,7 @@ None. The server is lookup- and discovery-oriented; the workflow chain lives in 
 
 ## Overview
 
-Read-only access to iNaturalist — 387M+ georeferenced citizen-science observations of plants, animals, and fungi, with photos, the community identification thread behind each record, per-taxon phenology, annotations, places, and the similar-species graph that answers "what is this commonly mistaken for."
+Read-only access to iNaturalist — 387M+ georeferenced citizen-science observations of plants, animals, and fungi, with photos, the community identification thread behind each record, per-taxon phenology, annotations, places, and related taxa ranked by shared identification evidence.
 
 The audience is naturalists, hikers, conservation biologists, park rangers, wildlife photographers, foragers, educators, and agents doing spatial reasoning about local flora and fauna. The server wraps the keyless read subset of `https://api.inaturalist.org/v1/` — one upstream, one service, no API key, no account, no writes.
 
@@ -193,9 +193,9 @@ Measured live on 2026-09-19 against `place_id: 97394` (North America):
 | `inaturalist_search_observations` | ~1,973 | 200 | 25 | 49,319 B | 10 | ~19,700 B |
 | `inaturalist_get_species_counts` | ~856 | 500 | 50 | 42,780 B | 25 | ~21,400 B |
 | `inaturalist_get_leaderboard` | ~137 | 500 | 250 | 34,182 B | 25 | ~3,400 B |
-| `inaturalist_get_histogram` | ~58 (10-char day key + up to a 5-digit count, JSON entry plus one markdown row) | unbounded — `interval=day&d1=1900-01-01&taxon_id=48662` measured 25,531 buckets / 388,530 B | 800 (a bucket cap, not a `per_page`) | ~46,800 B | — (one uncapped response; no smaller default page) | — |
+| `inaturalist_get_histogram` | Variable by key and count width | Unbounded for explicit ranges | 25,000 buckets, not bytes | No universal byte ceiling | Interval-dependent window | — |
 
-The table records historical whole-reply measurements, not worst-case guarantees. Search keeps a prefix of complete projected records within its 50,000-byte serialized reply ceiling, preserving every string and expansion on each retained record. A conservative overhead reserve can leave unused space. The ordered suffix is returned as `deferred: [{ observation_id }]`; retrieve it with `inaturalist_get_observation` and the same `include`. `has_more` and `next_cursor` describe continuation after the full upstream page, including deferred records, so consume `deferred` before continuing. A record too large to fit alone is deferred rather than clipped. The other list tools retain their record-count caps; histograms retain the first 800 buckets and sum all upstream buckets in `total`.
+The table records historical whole-reply measurements, not worst-case guarantees. Search keeps a prefix of complete projected records within its 50,000-byte serialized reply ceiling, preserving every string and expansion on each retained record. A conservative overhead reserve can leave unused space. The ordered suffix is returned as `deferred: [{ observation_id }]`; retrieve it with `inaturalist_get_observation` and the same `include`. `has_more` and `next_cursor` describe continuation after the full upstream page, including deferred records, so consume `deferred` before continuing. A record too large to fit alone is deferred rather than clipped. The other list tools retain their record-count caps; histograms retain the first 25,000 buckets and sum all upstream buckets in `total`. Synthetic 25,000-row fixtures with five-digit counts measured 1,475,604 bytes for daily replies and 1,975,606 for hourly replies; eight-digit hourly counts reached 2,125,610 bytes. These full serialized caller replies measure fixtures, not live results or universal ceilings.
 
 ### Response size budget: the by-id array cap
 
@@ -273,7 +273,7 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `radius=0` — verified 2026-09-22 | **500** `Elasticsearch error`, retried four times (~14 s) before surfacing as an upstream fault; a negative radius answers the same 500. Any positive radius answers 200, down to `radius=1e-12` | `invalid_geography` before any request: `radius` must be greater than 0. The bound lives in the handler rather than the schema so the failure carries the area recovery hint. |
 | Bounding box with `nelat` south of `swlat` — verified 2026-09-22 | **500** `Elasticsearch error` on `/observations/species_counts` and `/places/nearby` alike, retried as above | `invalid_geography` before any request, on every area-scoped tool and on `inaturalist_find_places`' own box. `nelng` west of `swlng` is an antimeridian-crossing box and stays valid — `nelat=66&nelng=-170&swlat=52&swlng=170` answers 200 on every area endpoint and `/places/nearby` (1,623 species on `/observations/species_counts`). Equal latitudes are served too, so `nelat == swlat` passes. |
 | `term_value_id` without `term_id` | 200, `total_results: 4,660,477` — the filter was ignored | `term_value_id` requires `term_id`; the pair is validated together. |
-| `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | With `INATURALIST_CLAMP_LIMITS=true` (default), oversized positive integer limits are clamped to the documented applied cap, with notice, log, and counter. `false` restores strict schema maxima. Caps are 30 for resolve-name and nearby places, 25 for search, 50 for species counts and similar species, and 250 for leaderboards. |
+| `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | With `INATURALIST_CLAMP_LIMITS=true` (default), oversized positive integer limits are clamped with notice, log, and counter. Served caps are 30/20/25/50/24/250 for resolve-name, places, search, species counts, similar species, and leaderboards. `false` restores strict input maxima, including 30 places and 50 similar species; those two still serve at most 20/24. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the one way past it: re-run ordered by `id` descending and follow `next_cursor`, or narrow the filters. |
 | `place_id=abc` | **500** `{"error":"Error","status":500}` | `place_id` is a positive integer in the schema. |
 | `id_below=notanumber` or `id_below > 2147483647` (`cursor`); `project_id > 2147483647` | **500** upstream | `cursor` keeps its `^[1-9]\d*$` pattern and adds an int32 ceiling refinement; the shared `project_id` schema advertises maximum 2147483647. Values at the ceiling reach upstream: cursor is accepted and an unknown project maps to `unknown_project_id`. |
@@ -370,18 +370,19 @@ The name-to-id front door. A miss is a result, not a failure.
 
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
-| `q` | string, 1–100, required | `q` | For `type: "taxon"` this is a **prefix** match or an exact id, per the spec. |
-| `type` | enum, default `taxon` | `sources` | `taxon` \| `place` \| `project` \| `user` \| `any`. `taxon` routes to `/taxa/autocomplete`; everything else routes to `/search` with `sources` set to `places` / `projects` / `users`, or omitted for `any`. |
+| `q` | string, 1–100, required | `q` | Taxa match word starts within a name or an exact numeric ID; other types use analyzed record text with limited spelling tolerance. |
+| `type` | enum, default `taxon` | `sources` | `taxon` \| `place` \| `project` \| `user` \| `any`. Taxon name browsing uses `/taxa`; other taxon calls use `/taxa/autocomplete`. Other types route to `/search` with `sources` set to `places` / `projects` / `users`, or omitted for `any`. |
 | `rank` | enum, optional | `rank` | One of the 35 usable ranks, including `complex` and `section`. Only honoured on `type: "taxon"` — `/search` has no rank filter. |
 | `limit` | positive int, applied max 30, default 10 | `per_page` | Also applied in-process on every route: `/taxa/autocomplete` returns related taxa past its `per_page` (`q=monarch&per_page=1` returned 4, `per_page=3` returned 5, verified 2026-09-22), so the candidate list is sliced to `limit`. `totalCount` still reports upstream's `total_results`. |
+| `page` | positive int, optional | `page` | Explicit taxon name pages use `/taxa` with `order_by=id&order=asc` from page 1. Keep `limit` fixed; `page × applied limit` must not exceed 10,000. Numeric taxon IDs stay singleton autocomplete lookups, with later pages empty. |
 
-**Routing:** `type: "taxon"` → `GET /taxa/autocomplete?q=&rank=&per_page=` (returns `matched_term`, verified). Everything else → `GET /search?q=&sources=&per_page=` (returns `{ type, score, matches[], record }`; `type` values observed: `Taxon`, `Place`, `Project`, `User`).
+**Routing:** without `page`, taxon calls retain relevance-ranked `/taxa/autocomplete?q=&rank=&per_page=` suggestions. Explicit nonnumeric taxon pages browse `/taxa?q=&rank=&per_page=&page=&order_by=id&order=asc`; multilingual name matching can yield a different population from autocomplete, so browse pages do not continue its relevance list. Everything else uses `GET /search?q=&sources=&per_page=&page=` with limited spelling tolerance (returns `{ type, score, matches[], record }`; observed types: `Taxon`, `Place`, `Project`, `User`).
 
-**Output:** `found` (boolean), `candidates[]`, `guidance` (optional).
+**Output:** `found` (boolean), `candidates[]`, `guidance` (optional). Existing candidate field types remain unchanged. Every response includes `totalCount`, `truncated`, `shown`, and applied `cap`; `notice` composes clamp, continuation, and empty-page guidance. An empty explicit page with matching records retains `found: true`, rather than reporting a true miss.
 
 Each candidate: `kind` (`taxon` \| `place` \| `project` \| `user`), `id`, `name` (scientific name, place name, project title, or an observer's display name — falling back to the login when the observer set none), `login` (optional, users only — the record's `login`, the same value `inaturalist_get_leaderboard`'s `entries[].login` and an observation's `observer` carry, so a user candidate joins to both), `common_name` (optional), `rank` (optional), `display_name` (optional, places), `slug` (optional, places and projects), `matched_term` (optional — `matched_term` on the autocomplete route, the first entry of `matches[]` on the search route), `score` (optional, search route only), `observations_count` (optional), `photo` (optional, projected). No `url`: none of these record kinds returns one, and the identifier is what the other tools consume.
 
-**format():** `found` first as `{n} candidates` or `No match`, then one `## ` heading per candidate — `{common_name} ({name})` for taxa, `{display_name}` for places, `{name}` otherwise — carrying `kind`, `id`, `rank`, `slug`, `matched_term`, `score`, and `observations_count` on a single pipe-separated line, plus the photo block. On a miss, `guidance` renders as its own paragraph rather than the enrichment trailer, because it is the primary result.
+**format():** `found` first as `{n} candidates`, `No match`, or `No candidates on this page`, then one `## ` heading per candidate — `{common_name} ({name})` for taxa, `{display_name}` for places, `{name}` otherwise — carrying `kind`, `id`, `rank`, `slug`, `matched_term`, `score`, and `observations_count` on a single pipe-separated line, plus the photo block. On a miss, `guidance` renders as its own paragraph rather than the enrichment trailer, because it is the primary result.
 
 Search-route records are 11.8 KB (Taxon) to 15.5 KB (Project) each and are projected to the fields above before anything is returned.
 
@@ -390,15 +391,16 @@ Search-route records are 11.8 KB (Taxon) to 15.5 KB (Project) each and are proje
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
 | `rank_not_applicable` | `ValidationError` | `rank` was supplied with a `type` other than `taxon`. | `Drop rank, or set type to taxon where the rank filter applies; list valid ranks with inaturalist_list_reference topic ranks.` |
+| `result_window_exceeded` | `ValidationError` | Explicit `page × applied limit` exceeds 10,000. | Use an earlier page, narrow the query, or add a taxon rank filter. |
 
 **Miss (`found: false`) guidance, per condition:**
 
 | Condition | `guidance` |
 |:--|:--|
-| Taxon route, zero candidates | `No taxon name starts with that text — the taxon search matches a name prefix, not words inside a name. Try the scientific name, a shorter prefix, or drop the rank filter.` |
-| Taxon route, zero candidates, `rank` was set | `No taxon of that rank starts with that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.` |
+| Taxon route, zero matches | `No taxon matched that text. Try fewer words, check the spelling, or try the scientific name; taxon matching uses word starts within a name.` |
+| Taxon route, zero matches, `rank` was set | `No taxon of that rank matched that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.` |
 | Search route (`place` / `project` / `user`), zero candidates | `No place, project, or observer matched that text. Try fewer words, or set type to any to search every record kind at once.` |
-| `type: "any"`, zero candidates | `Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling; for an organism, type taxon matches a name prefix.` |
+| `type: "any"`, zero matches | `Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling.` |
 
 ### `inaturalist_search_observations`
 
@@ -553,7 +555,7 @@ On the observers leaderboard, an observer selector selects that observer's own r
 |:--|:--|:--|:--|
 | `taxon_id` | int ≥ 1, optional | `taxon_id` | Omit for all taxa in the area. |
 | area params | as above | same | |
-| `interval` | enum, default `month_of_year` | `interval` | `year` \| `month` \| `week` \| `day` \| `hour` \| `month_of_year` \| `week_of_year`. The spec notes the absolute intervals set a default `d1`. `day` and `hour` over a wide range can generate thousands of buckets, so the `.describe()` names the 800-bucket cap. |
+| `interval` | enum, default `month_of_year` | `interval` | `year` \| `month` \| `week` \| `day` \| `hour` \| `month_of_year` \| `week_of_year`. Absolute intervals generate the selected family's missing lower bound: year/month subtract 100 calendar years, week ten years, day one year, hour seven days, anchored to that family's upper bound or today UTC. Seasonal curves generate no bound. |
 | `date_field` | enum, default `observed` | `date_field` | `observed` or `created` selects the bucket date only; it does not reinterpret either date-filter pair. |
 | `created_d1` / `created_d2` | `YYYY-MM-DD`, optional | same | Inclusive upload-date bounds; same blank-as-unset, calendar validity, and `inverted_date_range` rules as observation bounds. Equal bounds select one upload calendar day; UTC bucket keys are not clipped to the input strings. |
 | `d1` / `d2` | `YYYY-MM-DD`, optional | same | Observation-date bounds, independent of `date_field`. Blank values are unset; invalid calendar dates and inverted bounds are rejected. |
@@ -562,17 +564,17 @@ On the observers leaderboard, an observer selector selects that observer's own r
 | `term_id` / `term_value_id` | int arrays, optional | same | One life stage or reproductive state — the curve per annotation pair. Same pairing rule as search. For taxon 48662 in place 14, research grade and wild: unfiltered Jan / Jul 3,161 / 8,190, Larva (`1`/`6`) 721 / 1,985, Adult (`1`/`2`) 2,129 / 5,062. |
 | `iconic_taxa` | enum array, optional | `iconic_taxa` | The 14 spec values, comma-joined as OR. Place 14 unfiltered sums 16,274,309; `Aves` 3,912,205, `Insecta` 2,106,479. |
 
-**Output:** `interval`, `buckets[]` — `{ key, count }` in upstream key order, capped at 800 buckets (see below) — and `total` (the summed counts across *every* bucket upstream returned, including any past the cap). Upstream returns `results: { month_of_year: { "1": 0, …, "12": 2 } }` in 153 bytes; the array form keeps ordering explicit for a reading model.
+**Output:** `interval`, `buckets[]` — `{ key, count }` in upstream key order, capped at 25,000 buckets — and `total` (the histogram-window sum across *every* upstream bucket, including any past the cap, not an all-time taxon count). The array form keeps ordering explicit; full UTC keys are retained without clipping to date-only filter strings.
 
-**format():** a header line naming `interval` and `total`, then a two-column markdown table of `key` and `count` — small enough at every interval other than `day`/`hour` over a wide range (12 rows for `month_of_year`, 53 for `week_of_year`) to render whole.
+**format():** a header naming `interval`, the upstream-window `total`, and buckets shown, then a two-column markdown table of `key` and `count`. The applied-filter trailer includes the effective absolute `window_start` on the text surface as well as structured output.
 
 **Errors:** `invalid_geography`, `inverted_date_range`, `unpaired_annotation_value`, `unknown_taxon_id`, `unknown_place_id`, `conflicting_observer`, `unknown_user`, `unknown_project_id` — same strings; inverted-date validation also covers `created_d1` after `created_d2`.
 
-**Enrichment:** `applied_filters`, `truncated`/`shown`/`cap` (required, written on every path — the same unconditional-disclosure pattern as the other list tools), `notice`.
+**Enrichment:** `applied_filters` with optional absolute-only `window_start`, `truncated`/`shown`/`cap` (required on every path), and `notice`. Caller-supplied lower bounds remain intact. Generated bounds use UTC calendar subtraction, clamp leap days, and floor at `0000-01-01`; no upper bound is generated and the other date family remains independent.
 
-**Bucket cap:** retain the first 800 buckets in upstream key order, with `total` summing every upstream bucket. Historical measurement of a 25,531-bucket daily curve was 388,530 bytes; the chosen count cap was estimated near 46,800 bytes for the sampled key/count widths, not a universal serialization bound. A cut names both observation-date `d1`/`d2` and upload-date `created_d1`/`created_d2` as narrowing options, or suggests a coarser interval.
+**Bucket cap:** retain the first 25,000 buckets in upstream key order, with `total` summing every upstream bucket. This is a row cap with no byte guarantee; explicit wide ranges are still fully fetched before slicing. Continuation derives a date-only lower bound from the first omitted key in the selected family (`d1` or `created_d1`), retaining other filters and upper bounds. Created-date or observed-hour continuation overlaps by one calendar day, never preceding the effective start. Deduplicate keys while preserving earlier response counts, without adding or replacing repeats; partial boundary buckets cannot reconstruct complete totals. A coarser interval is the alternative.
 
-**Zero-hit notice** is computed over every upstream bucket, before clipping. It names only supplied observation-date and upload-date bound families as possible narrowing filters without attributing an empty intersection to one family. It also names supplied taxon, area, annotation, and iconic-taxon filters as appropriate. Annotation guidance checks parent/value pairs with `inaturalist_list_reference`; quality-grade guidance may broaden quality selection. It never presents changing `captive` as widening a cohort.
+**Zero-hit notice** is computed over every upstream bucket before clipping. It distinguishes a histogram window from all-time absence, and names only caller-supplied date families as possible narrowing filters; a generated start is separately disclosed. It also names supplied taxon, area, annotation, and iconic-taxon filters as appropriate. Annotation guidance checks parent/value pairs with `inaturalist_list_reference`; quality-grade guidance may broaden quality selection. It never presents changing `captive` as widening a cohort.
 
 ### `inaturalist_get_taxon`
 
@@ -616,13 +618,13 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 | `taxon_id` | int ≥ 1, required | `taxon_id` | Genus or finer. Verified 2026-09-23 across the full lineage kingdom → subtribe (`rank_level` 70 down to 24): every rank coarser than genus answers HTTP 422 `{"error":"Taxon 3 is not genus or finer","status":422}`; genus (20) and species (10) succeed. The tool description and the `.describe()` state the floor. |
 | area params | as above | same | Verified to work: unscoped returned 24 look-alikes in 228,989 bytes; `place_id=46` returned 3 in 24,642 bytes. |
 | `d1` / `d2`, `quality_grade`, `captive` | as above | same | These filters narrow the confusion set. |
-| `limit` | positive int, applied max 50, default 20 | — | Applied in-process — the endpoint publishes no `page` or `per_page` parameter. |
+| `limit` | positive int, served max 24, default 20 | — | Applied in-process. Strict mode retains the accepted maximum 50, then clamps to 24 just as default mode does. Upstream serves at most 24 and publishes no pagination; the list may omit further taxa. |
 
 **Output:** `taxon_id`, `similar_species[]` — `{ taxon_id, name, common_name, rank, observations_count, misidentification_count, photo }` from `results[].taxon` and `results[].count`. Each upstream result is a full 5.7–11.7 KB taxon record and is projected to roughly 250 bytes.
 
-`misidentification_count` is named for what it counts — how many times identifiers corrected this taxon to the queried one — rather than the upstream key `count`.
+The retained `misidentification_count` field counts observations carrying current, non-hidden identifications of both taxa, including ancestor taxa. This is symmetric co-identification evidence, not directional corrections. The output field name and type remain unchanged.
 
-**format():** a header line naming the queried `taxon_id` and how many look-alikes were found, then a numbered list ranked by `misidentification_count` — `{n}. **{common_name}** (*{name}*) — corrected {misidentification_count} times · {rank} · {observations_count} observations · taxon_id {taxon_id}` — with the photo block under each entry, since a look-alike without a picture is not much use in the field.
+**format():** a header naming the queried `taxon_id` and returned related taxa, then a numbered list ranked by `misidentification_count` — `{n}. **{common_name}** (*{name}*) — {misidentification_count} observations identified as both · {rank} · {observations_count} observations · taxon_id {taxon_id}` — with each photo block underneath.
 
 **Errors:** `unknown_taxon_id`, `unknown_place_id`, `invalid_geography`, `inverted_date_range` — same strings — plus:
 
@@ -632,7 +634,7 @@ Outline arm: `sections[]` (`{ name, bytes }`, largest first) and `notice`.
 
 **Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when `limit` cut the list.
 
-**Zero-hit notice:** with an area given, `No look-alikes are recorded for this taxon — either it is rarely misidentified, or the area filter is too narrow. Re-run without the area filter to see the global confusion set.` A `d1`/`d2` range is named the same way (`the d1/d2 range`, or both as `the area filter and the d1/d2 range are too narrow. Re-run without them…`); with neither, the notice is `No look-alikes are recorded for this taxon — it is rarely misidentified.`
+**Zero-hit notice:** no taxa were returned by the co-identification endpoint, which does not establish rarity of misidentification. With area/date filters supplied, guidance offers their removal to inspect global evidence. A nonempty result may also be incomplete at upstream's 24-taxon ceiling; raising the requested limit cannot recover an exhaustive set.
 
 ### `inaturalist_find_places`
 
@@ -640,9 +642,9 @@ Two arms, one of which must be supplied.
 
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
-| `q` | string 1–100, optional | `q` | Routes to `/places/autocomplete`. Name-prefix match. A blank string reads as unset, so a form client submitting an untouched `q` alongside a box reaches the nearby arm. |
+| `q` | string 1–100, optional | `q` | Routes to `/places/autocomplete`. Display-name prefix or analyzed-word matching, not a universal whole-name-prefix rule. A blank string reads as unset, so a form client submitting an untouched `q` alongside a box reaches the nearby arm. |
 | `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four together. Routes to `/places/nearby`, where the spec marks all four required. `nelat` south of `swlat` answers HTTP 500 there, so it fails as `invalid_geography` first; `nelng` west of `swlng` (antimeridian) is accepted. |
-| `per_page` | positive int, applied max 30, default 10 | `per_page` | Honoured on the nearby arm only, where it bounds `standard` and `community` independently — verified 2026-09-22, `per_page=5` over central Seattle returned 4 + 5, `per_page=3` 3 + 3. `/places/autocomplete` publishes no `per_page` and returned a fixed page of 10 out of 45 matches. |
+| `per_page` | positive int, served max 20, default 10 | `per_page` | Forwarded on both arms; bounds `standard` and `community` independently on nearby. Strict mode accepts up to 30, then applies the same served ceiling 20. Autocomplete has no page or offset support. |
 
 **Output:** `places[]` for the autocomplete arm; `standard[]` and `community[]` for the nearby arm, which returns `results` as an object with those two keys. Each place: `id`, `name`, `display_name`, `place_type` (int \| null), `admin_level` (int \| null), `bbox` (`{ swlat, swlng, nelat, nelng }`), `ancestor_place_ids`, `location` (`{ lat, lng }`), `slug`. No `url` — the place record carries a `slug` but no URL of its own, and none is constructed.
 
@@ -656,9 +658,9 @@ Two arms, one of which must be supplied.
 |:--|:--|:--|:--|
 | `invalid_geography` | `ValidationError` | Neither `q` nor a complete bbox was given, both were, or the box has `nelat` south of `swlat`. | `Pass q to search place names, or all four of nelat, nelng, swlat and swlng, with nelat at or north of swlat, to list the places covering a map area.` |
 
-**Enrichment:** `totalCount`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response — the autocomplete arm's fixed page of 10 against 45 matches is disclosed every time it caps. `cap` means different things per arm: `per_page × 2` on the nearby arm, since `per_page` bounds each list separately, and the fixed page upstream served on the autocomplete arm, which publishes no page size to report. On the nearby arm `truncated` fires only when the standard or community list reached `per_page` — the list that may have been cut — and the guidance names which; at `per_page` 30 it points at shrinking the box instead. `totalCount` there is upstream's `total_results`, which always equals the places returned, so it is bounded by the page size rather than a full count; on the autocomplete arm it is the full match count.
+**Enrichment:** `totalCount`, `notice`, and `truncated`/`shown`/`cap` on every response. `cap` is the applied `per_page` for names and twice that for nearby's two lists, including misses. Nearby truncation fires if either list reaches its applied size and names that list; at the served ceiling it suggests shrinking the box. Its `totalCount` counts returned places rather than the full population; autocomplete's count covers all name matches. For more name matches, raise the size up to 20 or narrow the text; a smaller map area explores a different set, not an exhaustive continuation.
 
-**Zero-hit notice:** `No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.`
+**Zero-hit notice:** no place matched; try fewer words, check spelling, use the official name, or pass a map bounding box. It does not claim every match must start at the beginning of a name.
 
 ### `inaturalist_get_leaderboard`
 
@@ -766,7 +768,7 @@ No rate-limit headers are returned (no `X-RateLimit-*`, no `Retry-After` on the 
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | No | Minimum spacing between outbound request starts. Default `1100`. |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | No | Maximum requests in flight. Default `4`. |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | No | Outbound requests allowed per UTC day. Default `9000`. |
-| `INATURALIST_CLAMP_LIMITS` | No | Strict boolean, default `true`. Clamp six list limits to 30/30/25/50/50/250 and radius to 20,040 km; allow up to 100 submitted by-id IDs while attempting ten distinct IDs. Each clamp emits a notice, log, and counter. `false` restores the previous advertised schema maxima, including radius at 500 km, and ten-submitted-ID validation. |
+| `INATURALIST_CLAMP_LIMITS` | No | Strict boolean, default `true`. Clamp six list limits to 30/20/25/50/24/250 and radius to 20,040 km; allow up to 100 submitted by-id IDs while attempting ten distinct IDs. Each clamp emits a notice, log, and counter. `false` restores strict input maxima, including 30 places, 50 similar species, radius 500 km, and ten submitted IDs; served place/similar-species ceilings remain 20/24 in both modes. |
 
 No API key. All five server-specific environment variables are optional and declared on both `server.json` package entries. The clamping flag uses strict boolean parsing; invalid boolean text fails startup.
 
@@ -810,7 +812,8 @@ Base URL `https://api.inaturalist.org/v1/`. The published spec lists 86 paths, 4
 
 | Endpoint | Purpose | Auth in spec |
 |:--|:--|:--|
-| `GET /taxa/autocomplete` | Name prefix → taxon. `q` is required and matches a name prefix or an exact id. | keyless |
+| `GET /taxa/autocomplete` | Word-start name matching or exact numeric taxon ID, with relevance-ranked suggestions. | keyless |
+| `GET /taxa` | Explicit taxon name browsing with `q`, `rank`, `page`, `per_page`, `order_by=id`, `order=asc`; multilingual matches may differ from autocomplete. | keyless |
 | `GET /search` | Name → Taxon / Place / Project / User, scored. `sources` filters by kind. | keyless |
 | `GET /taxa/{id}` | Taxon profile. Accepts a comma-separated id list. | keyless |
 | `GET /identifications/similar_species` | Confusion graph. Accepts the full observation filter set; no pagination parameters. | keyless |
@@ -821,7 +824,7 @@ Base URL `https://api.inaturalist.org/v1/`. The published spec lists 86 paths, 4
 | `GET /observations/observers` · `/identifiers` | Leaderboards; different result shapes. | keyless |
 | `GET /observations/popular_field_values` | Annotation usage counts for a taxon. | keyless |
 | `GET /controlled_terms` | Annotation vocabulary, 7 attributes. | keyless |
-| `GET /places/autocomplete` | Place name prefix → place. No `per_page`; returns 10. | keyless |
+| `GET /places/autocomplete` | Display-name prefix or analyzed-word matching. `per_page` is forwarded, default 10, served maximum 20; no offsets. | keyless |
 | `GET /places/nearby` | Places covering a bbox. All four corners required; `results` is `{ standard, community }`. | keyless |
 
 The optional api-token on the two observation paths only unlocks coordinates hidden from the public. Every probe succeeded without it and the server never sends one.
@@ -885,7 +888,10 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **`inaturalist_get_observation` takes a batch of up to 10 ids.** | The path accepts a comma-separated list and resolves the whole batch in one request — verified. Against a 10,000-request daily budget shared by every tenant on one egress IP, ten lookups for the price of one is the difference between a usable and an unusable hosted deployment. |
 | **A missed id in a batch is reported per-id, not thrown.** | `/observations/401617560,401644181,999999999999` returned `total_results: 2`, silently omitting the bogus id. Resolved ids land in `observations`, the rest in `unresolved`, and the call fails only when nothing resolved — one bad id must not cost the other nine. |
 | **`inaturalist_get_taxon` takes one id, though the path accepts a list.** | The outline-and-`sections` contract is per-document: `outlineOnOverflow` measures one payload and `selectSections` projects one document. A batch arm would need a per-document outline, which the technique does not define. |
-| **`inaturalist_resolve_name` returns `{ found: false, guidance }` rather than throwing.** | Its whole job is resolving one name to an id, so a miss is an expected outcome the agent must reason about. The guidance names the specific reason — prefix matching, an over-narrow rank — because "no results" alone tells the agent nothing it can act on. |
+| **`inaturalist_resolve_name` returns `{ found: false, guidance }` for true misses rather than throwing.** | A miss is an expected outcome with spelling, word-start, or rank recovery. An empty explicit page with matches retains `found: true` and pagination guidance so it cannot be mistaken for absence. |
+| **Explicit taxon name pages browse ascending IDs; unpaged calls retain relevance suggestions.** | Autocomplete lacks reliable offsets. `/taxa` supplies stable ID ordering from page 1 without extra requests, but multilingual match populations can differ. Numeric IDs stay singleton lookups; explicit windows above 10,000 are refused using the applied limit. |
+| **Place and similar-species input maxima stay 30/50 while served sizes are 20/24.** | Accepted calls remain valid in strict mode, while every route reports the size upstream actually serves. Place names forward `per_page` but have no offsets; related taxa have no paging, so neither ceiling promises exhaustiveness. |
+| **`misidentification_count` keeps its public name and type but describes symmetric co-identification.** | Upstream counts observations with current, non-hidden identifications of both taxa, including ancestors. Calling these directional corrections would infer an identification history the count does not encode. |
 | **`inaturalist_get_leaderboard` has no `species` arm.** | It would return exactly what `inaturalist_get_species_counts` already returns. A duplicate arm is cognitive load at tool-selection time; a cross-reference in the description costs nothing. |
 | **`inaturalist_find_places` and `inaturalist_resolve_name` both reach places, and both stay.** | They answer different questions: `resolve_name` scores a name across every record kind and returns an id; `find_places` returns the bounding box, place type, and ancestry an area search needs, and carries the bbox arm that answers "what places cover this map view." |
 | **Both `page` and `cursor` are exposed, and supplying both is an error.** | `page` is what an agent reaches for and is correct inside the 10,000-record window under any ordering; `cursor` is the only thing that works past it, and only on an id-descending walk. A silent precedence rule between them would make a deep page quietly return the wrong records. |
@@ -914,7 +920,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **`inaturalist_get_leaderboard` rejects `page × per_page` above 500 in-process.** | Both `/observations/observers` and `/observations/identifiers` return an empty result set once the combined window passes 500 — verified live up to `page=6, per_page=100` — a far smaller ceiling than the 10,000-result window on `/observations`. Left unchecked, an agent paging past it reads a pagination limit as a genuine zero-hit. |
 | **Only the static-ish surfaces are cached.** | Controlled terms, taxa, places, histograms, and the similar-species graph change on the order of hours to months and account for the largest raw payloads. Observation search is never cached — freshness is the product. |
 | **The cache rides `ctx.state`, best-effort, with base64url keys.** | `ctx.state` is independent of session mode and needs no stateful sessions. Its key charset excludes `?`, `&`, and `=`, so a URL cannot be a key; base64url's alphabet is legal as-is. Every read and write is wrapped so a storage failure falls through to a live fetch. |
-| **No DataCanvas, and no dataframe tools.** | `species_counts`, `histogram`, and `popular_field_values` arrive pre-aggregated and small — a five-species page measured 5,898 bytes and a histogram 153. Observation search is discovery over categorical metadata, which is the shape the canvas gate explicitly excludes. Nothing on this surface should emit a `canvas_id`, and no `dataframe_query` / `dataframe_describe` pair should be added. |
+| **No DataCanvas, and no dataframe tools.** | `species_counts`, `histogram`, and `popular_field_values` arrive pre-aggregated for direct domain workflows. Absolute histograms can still be large and use disclosed windows and bucket continuation. Observation search is discovery over categorical metadata. Nothing on this surface emits a `canvas_id` or registers a `dataframe_query` / `dataframe_describe` pair. |
 | **No prompts.** | The server is lookup- and discovery-oriented. The workflow chain belongs in the `instructions` string and the tool descriptions, where every client sees it, rather than in a template most clients never surface. |
 | **Two domain resources, mirroring two tools, plus one published caller skill.** | Stable taxon and observation URIs supply source context. `skills/inaturalist-guide/SKILL.md`, registered through `createApp({ skills: 'skills' })`, supplies cross-tool evidence gates; the SDK adds skill discovery and skill resource surfaces. |
 | **`sessionMode: 'stateless'`.** | No handler calls `ctx.requestInput`, so nothing needs a live session. Declaring it in source beats leaving it to the `auto` default, which resolves to stateful. |
@@ -926,7 +932,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **A caller-facing error carries no upstream path.** | `unknown_taxon_id` reaches the agent on `structuredContent.error.data`, and the REST path it came from names nothing the caller can act on that the declared recovery does not already say. The endpoint stays on the request's own log line, which is where triage wants it. The server- and upstream-fault errors keep theirs — an allowlist violation, an HTML error page, an unparseable body — because there the path *is* the diagnostic and the caller is not its audience. |
 | **Rendered upstream strings preserve literal text after CommonMark parsing.** | Inline encoders preserve CR/LF with character references instead of creating physical heading breaks; quoted text preserves its separators, HTML, entities, and whitespace. NUL-containing values use a labeled JSON string literal for lossless recovery. URLs use a separate link encoder; vocabulary codes render as prose rather than escaped text inside code spans. |
 | **The unknown-section rejection names a bounded sample of what it rejected.** | `sections` is an unbounded array of unbounded strings, and naming every unknown entry let one call inflate its own failure message to 106 KB — mirrored into `content[]` and `structuredContent.error` alike, straight into the agent's context. Three names, 40 characters each, plus a count of the rest is all a caller needs to find the typo, and the valid section list follows it regardless. The bound sits in the handler rather than on the schema so the typed `unknown_section` contract and its recovery hint still fire; a `maxItems` on the input would pre-empt them with a framework `invalid_arguments` rejection instead. |
-| **`inaturalist_get_histogram` caps `buckets[]` at 800, in upstream key order.** | Wide daily/hourly ranges produce large arrays. The cap bounds bucket count while `total` sums all upstream buckets; truncation guidance names both date-bound families and a coarser interval. Historical size measurements informed the count cap without guaranteeing arbitrary serialization sizes. |
+| **Absolute histograms disclose a selected-family lower bound and retain up to 25,000 buckets.** | Explicit UTC starts prevent upstream's hidden defaults from changing historical cohorts. The larger row cap retains useful long monthly curves as well as dense daily/hourly ranges, accepting higher caller cost without a byte guarantee. All buckets are already fetched; `total` retains their window sum. First-omitted-key continuation conservatively overlaps date-only boundaries and preserves earlier counts on repeats, without claiming complete boundary reconstruction. |
 | **`cursor` validates positive decimal syntax and shares the 2147483647 ceiling with `project_id`.** | Malformed or overflowing `id_below` and overflowing `project_id` answer 500 and consume retries; schema validation prevents those requests. The cursor pattern remains advertised alongside its runtime ceiling refinement, and shared project inputs advertise `maximum`. `blankAsUnset` still runs first, so a blank cursor is unset. |
 | **The by-id arrays — identifications, comments, and filled observation fields — share one 40-entry budget across the batch: `max(4, floor(40 / records returned))` per array per record, first entries in upstream order.** | One heavily discussed id measured 624,791 bytes uncapped, and a per-record cap alone would let ten such records multiply it. Sharing the budget brings 5890862 alone to 28,050 B with the default `include` and 40,102 B with comments; ten ids measured 53,155 and 66,853 B, the extra being the ten records' own fields. Totals and shown counts ride every record, so an under-cap array reads as whole rather than as unknown, and one composed notice names each cut id and array with the two recoveries — a single-id re-call or the record's `url` — since no tool pages them. Upstream order is kept rather than re-sorted; it is stable but not chronological, and the surfaces say "in upstream order", never "earliest". |
 | **`identifications_count` is described as upstream's agree-plus-disagree tally, and no thread-size field was added beside it.** | It equalled `agreements + disagreements` on all 270 sampled records and leaves out the observer's own and any non-committal identification, so describing it as the thread size misled by up to 8 of 14 entries. The thread size already rides `identifications_total` wherever the thread is included. |

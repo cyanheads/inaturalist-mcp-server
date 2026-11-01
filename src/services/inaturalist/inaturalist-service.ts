@@ -158,8 +158,8 @@ const LEADERBOARD_PARAMS = [
 const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
   controlled_terms: new Set(),
   'taxa/autocomplete': new Set(['q', 'rank', 'per_page']),
-  taxa: new Set(),
-  search: new Set(['q', 'sources', 'per_page']),
+  taxa: new Set(['q', 'rank', 'page', 'per_page', 'order_by', 'order']),
+  search: new Set(['q', 'sources', 'per_page', 'page']),
   observations: new Set([
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
@@ -215,7 +215,7 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     'quality_grade',
     'captive',
   ]),
-  'places/autocomplete': new Set(['q']),
+  'places/autocomplete': new Set(['q', 'per_page']),
   'places/nearby': new Set(['nelat', 'nelng', 'swlat', 'swlng', 'per_page']),
 };
 
@@ -521,15 +521,21 @@ export class INaturalistService {
 
   // ─── Name resolution ────────────────────────────────────────────────────────
 
-  /** Taxon name prefix match. `q` matches a name prefix or an exact id. */
+  /** Word-start name matching or exact ID lookup; explicit pages browse names in ID order. */
   async autocompleteTaxa(
-    params: { q: string; rank?: string | undefined; limit: number },
+    params: { q: string; rank?: string | undefined; limit: number; page?: number },
     ctx: Context,
   ): Promise<{ total: number; candidates: ResolvedCandidate[] }> {
+    const browse = params.page !== undefined && !Number.isInteger(Number(params.q));
     const payload = await this.request<INaturalistEnvelope<RawTaxon>>(
       {
-        endpoint: 'taxa/autocomplete',
-        params: { q: params.q, rank: params.rank, per_page: params.limit },
+        endpoint: browse ? 'taxa' : 'taxa/autocomplete',
+        params: {
+          q: params.q,
+          rank: params.rank,
+          per_page: params.limit,
+          ...(browse ? { page: params.page, order_by: 'id', order: 'asc' } : {}),
+        },
       },
       ctx,
     );
@@ -558,13 +564,13 @@ export class INaturalistService {
    * projected to the candidate fields before anything is returned.
    */
   async searchRecords(
-    params: { q: string; sources?: string | undefined; limit: number },
+    params: { q: string; sources?: string | undefined; limit: number; page?: number },
     ctx: Context,
   ): Promise<{ total: number; candidates: ResolvedCandidate[] }> {
     const payload = await this.request<INaturalistEnvelope<RawSearchResult>>(
       {
         endpoint: 'search',
-        params: { q: params.q, sources: params.sources, per_page: params.limit },
+        params: { q: params.q, sources: params.sources, per_page: params.limit, page: params.page },
       },
       ctx,
     );
@@ -599,13 +605,14 @@ export class INaturalistService {
 
   // ─── Places ─────────────────────────────────────────────────────────────────
 
-  /** Place name prefix match. The endpoint publishes no `per_page` and returns 10. */
+  /** Display-name prefix or analyzed-word matching; upstream caps size at 20 with no offset. */
   async autocompletePlaces(
     q: string,
+    perPage: number,
     ctx: Context,
   ): Promise<{ total: number; places: ProjectedPlace[] }> {
     const payload = await this.request<INaturalistEnvelope<RawPlace>>(
-      { endpoint: 'places/autocomplete', params: { q } },
+      { endpoint: 'places/autocomplete', params: { q, per_page: perPage } },
       ctx,
     );
     const places = (payload.results ?? []).map(projectPlace);

@@ -23,6 +23,49 @@ afterEach(() => {
 });
 
 describe('limit policy', () => {
+  it.each(['true', 'false'])(
+    'preserves accepted input maxima while reducing to served caps once in %s mode',
+    async (mode) => {
+      vi.stubEnv('INATURALIST_CLAMP_LIMITS', mode);
+      vi.resetModules();
+      const { LIMIT_CAPS, SERVED_CAPS, limitSchema, applyLimit } = await import(
+        '@/mcp-server/tools/limit-policy.js'
+      );
+      for (const [tool, field, maximum, served] of [
+        [
+          'inaturalist_get_similar_species',
+          'limit',
+          LIMIT_CAPS.similarSpecies,
+          SERVED_CAPS.similarSpecies,
+        ],
+        ['inaturalist_find_places', 'per_page', LIMIT_CAPS.findPlaces, SERVED_CAPS.findPlaces],
+      ] as const) {
+        const schema = limitSchema(maximum, 10, 'Size', served);
+        expect(schema.description).toContain(`Served ceiling: ${served}`);
+        expect(schema.description).toContain(
+          mode === 'true'
+            ? 'Positive safe integer requests are accepted.'
+            : `Strict mode accepts requests up to ${maximum}`,
+        );
+        expect(schema.parse(maximum)).toBe(maximum);
+        expect(schema.safeParse(maximum + 1).success).toBe(mode === 'true');
+        const ctx = createMockContext();
+        const log = vi.spyOn(ctx.log, 'info');
+        add.mockClear();
+        expect(applyLimit(maximum, served, ctx, tool, field)).toEqual({
+          applied: served,
+          notice: `${field} ${maximum} was clamped to ${served}.`,
+        });
+        expect(add).toHaveBeenCalledExactlyOnceWith(1, { tool, field });
+        expect(log).toHaveBeenCalledExactlyOnceWith('Read limit clamped', {
+          tool,
+          field,
+          requested: maximum,
+          applied: served,
+        });
+      }
+    },
+  );
   it.each(['true', 'false'])('advertises and validates radius under %s policy', async (mode) => {
     vi.stubEnv('INATURALIST_CLAMP_LIMITS', mode);
     vi.resetModules();

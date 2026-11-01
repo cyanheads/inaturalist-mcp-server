@@ -6,12 +6,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
+import {
+  applyLimit,
+  LIMIT_CAPS,
+  limitSchema,
+  SERVED_CAPS,
+} from '@/mcp-server/tools/limit-policy.js';
 import { blankAsUnset, checkBoundingBox } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
-const PER_PAGE_MAX = LIMIT_CAPS.findPlaces;
+const PER_PAGE_MAX = SERVED_CAPS.findPlaces;
 
 const PlaceSchema = z
   .object({
@@ -60,12 +65,12 @@ type PlaceOutput = z.infer<typeof PlaceSchema>;
 
 export const inaturalistFindPlaces = tool('inaturalist_find_places', {
   description:
-    'Resolve a place name to a place id, or list the places containing a map area. Pass q to match a place-name PREFIX, or all four of nelat, nelng, swlat and swlng to list every place covering that box — exactly one of the two, never both. Each result carries the bounding box, place type, and containment chain an area search needs. Place geometry is stripped: a single nearby response carries 247 KB of boundary polygons upstream, none of which reaches the caller.',
+    'Resolve a place name to a place id, or list places covering a map area. Pass q to match a display-name prefix or all analyzed query terms within it, or all four of nelat, nelng, swlat and swlng for a map area — exactly one of the two, never both. Each result carries its bounding box, place type, and containment chain. Upstream serves at most 20 places per list and may omit more.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     q: blankAsUnset(z.string().min(1).max(100).optional()).describe(
-      'Place-name prefix to search. Matches the start of a name, not words inside it. Mutually exclusive with the bounding box.',
+      'Place text to search. Matches the beginning of the display name or all analyzed query terms within it. Try whole words or the beginning of the official name. Mutually exclusive with the bounding box.',
     ),
     nelat: z
       .number()
@@ -96,14 +101,15 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       .optional()
       .describe('South-west corner longitude of the map area. All four corners or none.'),
     per_page: limitSchema(
-      PER_PAGE_MAX,
+      LIMIT_CAPS.findPlaces,
       10,
-      'Maximum places per list. Honoured on the bounding-box arm only, where it bounds the standard and community lists separately, so up to twice this many places come back. The name-prefix endpoint publishes no page size and returns a fixed page.',
+      'Maximum places per list, applied to name queries and to standard and community lists separately on map queries.',
+      PER_PAGE_MAX,
     ),
   }),
 
   output: z.object({
-    places: z.array(PlaceSchema).optional().describe('Name-prefix matches. Present on the q arm.'),
+    places: z.array(PlaceSchema).optional().describe('Place-name matches. Present on the q arm.'),
     standard: z
       .array(PlaceSchema)
       .optional()
@@ -120,7 +126,7 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     totalCount: z
       .number()
       .describe(
-        'Places upstream reports. On the name-prefix arm, every match before the fixed page; on the bounding-box arm, only the places returned (standard plus community), so it is bounded by the page size rather than a full count.',
+        'Places upstream reports. On name queries, every match before the applied size; on map queries, only returned standard plus community places, not an exhaustive match count.',
       ),
     truncated: z
       .boolean()
@@ -131,7 +137,7 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
     cap: z
       .number()
       .describe(
-        'The most places this response could carry — per_page × 2 on the bounding-box arm, where per_page bounds each list separately; the fixed page upstream served on the name-prefix arm.',
+        'The applied per_page on name queries, or twice the applied per_page on map queries where it bounds each list separately.',
       ),
     notice: z
       .string()
@@ -170,24 +176,26 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
         );
       }
       ctx.log.info('Resolving a place name');
-      const { total, places } = await service.autocompletePlaces(q, ctx);
+      const { total, places } = await service.autocompletePlaces(q, perPage, ctx);
       ctx.enrich.total(total);
       // The baseline disclosure rides every path — the enrichment block declares
       // these three as required, and `ctx.enrich.truncated` below overwrites them
-      // when the fixed upstream page left matches unreachable.
-      ctx.enrich({ truncated: false, shown: places.length, cap: places.length });
+      // when the upstream slice left further matches.
+      ctx.enrich({ truncated: false, shown: places.length, cap: perPage });
       if (places.length === 0) {
         ctx.enrich.notice(
           withClamp(
-            'No place name starts with that text — place search matches a name prefix. Try a shorter prefix or the official name, or pass a bounding box to list the places covering a map area.',
+            'No place matched that text. Try whole words or the beginning of the official display name, or pass a bounding box to list places covering a map area.',
           ),
         );
       } else if (total > places.length) {
         ctx.enrich.truncated({
           shown: places.length,
-          cap: places.length,
+          cap: perPage,
           guidance: withClamp(
-            `The place-name endpoint returns a fixed page of ${places.length} and publishes no pagination, so ${total - places.length} further matches are unreachable. Narrow the prefix, or pass a bounding box to list the places covering a map area.`,
+            perPage < PER_PAGE_MAX
+              ? `More places match. Raise per_page (max ${PER_PAGE_MAX}), or add a word to narrow the query. Upstream publishes no paging.`
+              : 'More places match, but upstream serves at most 20 and publishes no paging. Add a word to narrow the query, or pass a bounding box to explore a map area.',
           ),
         });
       } else if (clampNotice) ctx.enrich.notice(clampNotice);
@@ -239,7 +247,7 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
         guidance: withClamp(
           perPage < PER_PAGE_MAX
             ? `${which}, so more places may cover this area. Raise per_page (max ${PER_PAGE_MAX}) to list more.`
-            : `${which}, so more places may cover this area. Shrink the box to list the rest.`,
+            : `${which}, so more places may cover this area. Use a narrower box to explore a smaller area.`,
         ),
       });
     } else if (clampNotice) ctx.enrich.notice(clampNotice);

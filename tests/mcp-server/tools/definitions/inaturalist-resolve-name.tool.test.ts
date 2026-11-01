@@ -30,6 +30,33 @@ beforeEach(() => {
 });
 
 describe('routing', () => {
+  it('describes matching inside names and discloses an unpaged partial result', async () => {
+    expect(inaturalistResolveName.description).not.toContain('not words inside a name');
+    fake.autocompleteTaxa.mockResolvedValue({ total: 3, candidates: [resolvedCandidate()] });
+    const result = await runToolContract(inaturalistResolveName, { q: 'monarch' });
+    expect(result.structuredContent).toMatchObject({ shown: 1, cap: 10, truncated: true });
+    expect(JSON.stringify(result.content)).toContain('page: 1');
+  });
+  it('forwards explicit browsing pages and discloses past-end results', async () => {
+    fake.autocompleteTaxa.mockResolvedValue({ total: 3, candidates: [] });
+    const result = await runToolContract(inaturalistResolveName, {
+      q: 'monarch',
+      page: 3,
+      limit: 2,
+    });
+    expect(fake.autocompleteTaxa).toHaveBeenCalledWith(
+      { q: 'monarch', rank: undefined, limit: 2, page: 3 },
+      expect.anything(),
+    );
+    expect(result.structuredContent).toMatchObject({
+      found: true,
+      shown: 0,
+      cap: 2,
+      truncated: false,
+      notice: expect.stringContaining('last page'),
+    });
+    expect(JSON.stringify(result.content)).toContain('last page');
+  });
   it('routes type: taxon to autocompleteTaxa and reports the enrichment total', async () => {
     fake.autocompleteTaxa.mockResolvedValue({ total: 42, candidates: [resolvedCandidate()] });
     const ctx = createMockContext({ errors: inaturalistResolveName.errors });
@@ -107,7 +134,8 @@ describe('limit', () => {
           .map((block) => ('text' in block ? block.text : ''))
           .join('\n');
         expect(text).toContain('limit 31 was clamped to 30.');
-        if (!found) expect(text).toContain(type === 'taxon' ? 'No taxon name' : 'Nothing matched');
+        if (!found)
+          expect(text).toContain(type === 'taxon' ? 'No taxon matched' : 'Nothing matched');
       }
       expect(fake.autocompleteTaxa).toHaveBeenCalledWith(
         { q: 'x', rank: undefined, limit: 30 },
@@ -220,7 +248,7 @@ describe('miss guidance', () => {
       found: false,
       candidates: [],
       guidance:
-        'No taxon name starts with that text — the taxon search matches a name prefix, not words inside a name. Try the scientific name, a shorter prefix, or drop the rank filter.',
+        'No taxon matched that text. Try fewer words, check the spelling, or try the scientific name; taxon matching uses word starts within a name.',
     });
   });
 
@@ -232,7 +260,7 @@ describe('miss guidance', () => {
     const result = await inaturalistResolveName.handler(input, ctx);
 
     expect(result.guidance).toBe(
-      'No taxon of that rank starts with that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.',
+      'No taxon of that rank matched that text. Re-run without rank, or list valid ranks with inaturalist_list_reference topic ranks.',
     );
   });
 
@@ -257,7 +285,7 @@ describe('type any miss guidance', () => {
 
     const guidance = (result.structuredContent as { guidance?: string }).guidance;
     expect(guidance).toBe(
-      'Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling; for an organism, type taxon matches a name prefix.',
+      'Nothing matched that text across taxa, places, projects, or observers. Try fewer words or a different spelling.',
     );
     expect(guidance).not.toContain('set type to any');
     const text = (result.content ?? [])
@@ -268,6 +296,32 @@ describe('type any miss guidance', () => {
 });
 
 describe('errors', () => {
+  it.each(['taxon', 'user'] as const)(
+    'rejects an explicit %s result window before service I/O on both surfaces',
+    async (type) => {
+      const result = await runToolContract(inaturalistResolveName, {
+        q: 'monarch',
+        type,
+        page: 334,
+        limit: 30,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'result_window_exceeded',
+            recovery: { hint: expect.stringContaining('10,000') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('10,000');
+      expect(fake.autocompleteTaxa).not.toHaveBeenCalled();
+      expect(fake.searchRecords).not.toHaveBeenCalled();
+    },
+  );
+  it.each([0, -1, 1.5])('rejects invalid page %s', (page) => {
+    expect(inaturalistResolveName.input.safeParse({ q: 'monarch', page }).success).toBe(false);
+  });
   it('throws rank_not_applicable when rank is given with a non-taxon type', async () => {
     const ctx = createMockContext({ errors: inaturalistResolveName.errors });
     const input = inaturalistResolveName.input.parse({
@@ -280,6 +334,112 @@ describe('errors', () => {
       data: { reason: 'rank_not_applicable' },
     });
     expect(fake.searchRecords).not.toHaveBeenCalled();
+  });
+});
+
+describe('explicit continuation', () => {
+  it('does not recommend a next page outside the bounded window', async () => {
+    fake.autocompleteTaxa.mockResolvedValue({ total: 10001, candidates: [resolvedCandidate()] });
+    const result = await runToolContract(inaturalistResolveName, {
+      q: 'example',
+      page: 10000,
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      found: true,
+      truncated: true,
+      shown: 1,
+      cap: 1,
+    });
+    expect(JSON.stringify(result.content)).toContain('paging window is exhausted');
+    expect(JSON.stringify(result.content)).not.toContain('Request page 10001');
+  });
+  it('walks first, second, last and past-end pages with complete output enrichment', async () => {
+    const ids: number[] = [];
+    for (const [page, pageIds, truncated] of [
+      [1, [1, 2], true],
+      [2, [3, 4], true],
+      [3, [5], false],
+      [4, [], false],
+    ] as const) {
+      fake.autocompleteTaxa.mockResolvedValue({
+        total: 5,
+        candidates: pageIds.map((id) => resolvedCandidate({ id, name: null })),
+      });
+      const result = await runToolContract(inaturalistResolveName, {
+        q: 'example',
+        page,
+        limit: 2,
+        rank: 'species',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        found: true,
+        shown: pageIds.length,
+        cap: 2,
+        totalCount: 5,
+        truncated,
+      });
+      const text = JSON.stringify(result.content);
+      const output = inaturalistResolveName.output.parse(result.structuredContent);
+      ids.push(...output.candidates.map((candidate) => candidate.id));
+      for (const id of pageIds) {
+        expect(text).toContain(`id ${id}`);
+      }
+      expect(text).toContain('**shown:**');
+      if (page === 4) expect(text).toContain('last page');
+    }
+    expect(ids).toEqual([1, 2, 3, 4, 5]);
+  });
+  it('treats numeric taxon results as one page and preserves a real miss', async () => {
+    fake.autocompleteTaxa.mockResolvedValue({
+      total: 1,
+      candidates: [resolvedCandidate({ id: 48662 })],
+    });
+    for (const page of [1, 2]) {
+      const result = await runToolContract(inaturalistResolveName, { q: '48662', page });
+      expect(result.structuredContent).toMatchObject({
+        found: true,
+        shown: page === 1 ? 1 : 0,
+        cap: 10,
+        truncated: false,
+      });
+      expect(JSON.stringify(result.content)).toContain(page === 1 ? 'id 48662' : 'last page');
+    }
+    fake.autocompleteTaxa.mockResolvedValue({ total: 0, candidates: [] });
+    const miss = await runToolContract(inaturalistResolveName, { q: 'missing', page: 1 });
+    expect(miss.structuredContent).toMatchObject({
+      found: false,
+      shown: 0,
+      cap: 10,
+      truncated: false,
+    });
+    expect(JSON.stringify(miss.content)).toContain('No taxon matched');
+  });
+  it('forwards explicit cross-kind page and accepts the boundary with applied limits', async () => {
+    fake.searchRecords.mockResolvedValue({ total: 1, candidates: [] });
+    const result = await runToolContract(inaturalistResolveName, {
+      q: 'example',
+      type: 'user',
+      page: 2,
+      limit: 2,
+    });
+    expect(fake.searchRecords).toHaveBeenCalledWith(
+      { q: 'example', sources: 'users', page: 2, limit: 2 },
+      expect.anything(),
+    );
+    expect(result.structuredContent).toMatchObject({ found: true, shown: 0, truncated: false });
+    fake.autocompleteTaxa.mockResolvedValue({ total: 0, candidates: [] });
+    const boundary = await runToolContract(inaturalistResolveName, {
+      q: 'example',
+      page: 333,
+      limit: 31,
+    });
+    expect(boundary.isError).toBeFalsy();
+    expect(fake.autocompleteTaxa).toHaveBeenCalledWith(
+      { q: 'example', rank: undefined, page: 333, limit: 30 },
+      expect.anything(),
+    );
   });
 });
 
