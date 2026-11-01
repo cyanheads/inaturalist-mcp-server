@@ -22,7 +22,7 @@ Use public iNaturalist sightings and community identifications for local species
 ## Gates
 
 1. Before comparing counts, curves, and individual sightings, keep the area, date range, taxon, and quality selection consistent across tools that support them. Read the applied defaults. Tools have different filter surfaces; do not describe unmatched cohorts as the same population.
-2. Treat species rankings and histograms as records of sightings, not an exhaustive inventory or a measurement of organism abundance. A zero result establishes no matching records under the chosen filters, not biological absence. Check the selected place and taxon, defaults, and pagination notice before widening the search.
+2. Treat taxon rankings and histograms as records of sightings, not an exhaustive inventory or a measurement of organism abundance. A zero result establishes no matching records under the chosen filters, not biological absence. Check the selected place and taxon, defaults, and pagination notice before widening the search.
 3. Choose an annotation value from its returned parent attribute. Labels can repeat across attributes: an Egg value under Life Stage is distinct from an Egg value under Evidence of Presence. Empty taxon-scoped usage does not make the full controlled vocabulary invalid.
 4. Distinguish wild and captive cohorts. Where the tool accepts `captive`, false selects wild records and true selects captive or cultivated records only; true does not combine both groups.
 5. Before describing identification agreement, inspect the community taxon, disagreement fields, and identification thread together. Compare total and shown counts before making claims about the whole thread; use the observation's source URL when the returned thread is incomplete.
@@ -38,7 +38,11 @@ Resolve the organism and location, choose aggregate or individual evidence for t
 
 For what has been recorded in an area, start with `inaturalist_get_species_counts` rather than enumerating sightings. Use its taxon IDs with `inaturalist_get_histogram` for recorded seasonality and `inaturalist_search_observations` for examples from the same cohort. A monthly curve describes when observations were recorded; it does not establish that an organism cannot occur in another month.
 
+Species counts rank leaf taxa, including hybrids and coarser identifications; subspecies roll up to their species. Read `total_results` as a taxon count, not species richness; the returned array is still named `species`.
+
 For a particular life stage or reproductive state, resolve the organism, inspect `inaturalist_list_reference` controlled terms with taxon-scoped usage, and select the matching attribute/value pair before requesting the histogram or sightings. Use observation-date bucketing for phenology; upload-date bucketing answers a different question.
+
+Annotation arrays are membership sets, not positional pairs: multiple attributes or values match any one annotation, rather than requiring both annotations. For adult males, filter on the rarer annotation and request `include: ["annotations"]`, then retain records carrying the other annotation too. To estimate an intersection count, query A, B, and their union with otherwise identical filters, then calculate A + B minus the union. Counts come from a live index and may drift between calls; this is an estimate, not a stable census.
 
 On histograms, `d1`/`d2` filter observation dates and `created_d1`/`created_d2` independently filter upload dates. `date_field` chooses the bucket date without changing either filter family; retain both families when comparing cohorts.
 
@@ -49,5 +53,7 @@ Find candidate sightings with `inaturalist_search_observations`, then inspect se
 ### Local contributors and source context
 
 Use `inaturalist_get_leaderboard` to distinguish observation activity from identification activity. Follow a returned login into observer-filtered searches or species counts when the question concerns that person's sightings; identifier activity does not mean that person observed the records.
+
+Histogram and both leaderboard kinds accept an observer (`user_id` or `user_login`) and `project_id`. Carry those selectors into supported tools when comparing cohorts. On observers, the observer selector returns that person's own row; on identifiers it ranks people who identified that observer's sightings, rather than identifications authored by that observer.
 
 For injectable source context, read `inaturalist://observations/{observation_id}` for a record with its identification thread, or `inaturalist://taxa/{taxon_id}` for a whole projected taxon profile. Use `inaturalist_get_taxon` instead when an outline or selected sections are needed. Preserve each record's licensing, attribution, and coordinate uncertainty when presenting evidence.

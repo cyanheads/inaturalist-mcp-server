@@ -10,7 +10,7 @@
 | `inaturalist_resolve_name` | Resolve a common or scientific name to a taxon id, or a place, project, or observer name to its id. Returns ranked candidates with the identifiers the other tools take. | `q`, `type`, `rank`, `limit` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_search_observations` | Search georeferenced wildlife sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence. Returns a projected record per sighting with coordinates, licence, photo, and identification counts. | `place_id` \| `lat`+`lng`+`radius` \| bbox, `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`/`term_value_id`, `iconic_taxa`, `user_id` \| `user_login`, `project_id`, `license`/`photo_license`, `page` \| `cursor`, `per_page`, `include` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_observation` | Fetch up to 10 observations by id with their community identification thread — who identified what, whether each identification agrees, and the community consensus taxon. | `observation_id[]`, `include` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
-| `inaturalist_get_species_counts` | Rank the distinct species recorded in an area and period, most-observed first. Answers "what lives here" without paging through individual sightings. | `place_id` \| `lat`+`lng`+`radius` \| bbox, `d1`/`d2`, `taxon_id`, `quality_grade`, `user_id` \| `user_login`, `project_id`, `per_page` | `readOnlyHint: true`, `openWorldHint: true` |
+| `inaturalist_get_species_counts` | Rank the leaf taxa recorded in an area and period, most-observed first. Answers "what lives here" without paging through individual sightings. | `place_id` \| `lat`+`lng`+`radius` \| bbox, `d1`/`d2`, `taxon_id`, `quality_grade`, `user_id` \| `user_login`, `project_id`, `per_page` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area — which months, weeks, or years it is recorded in. | `taxon_id`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `interval`, `date_field`, `term_id`/`term_value_id`, `iconic_taxa` | `readOnlyHint: true`, `openWorldHint: true` |
 | `inaturalist_get_taxon` | Fetch a taxon profile: taxonomic path, per-authority conservation statuses, encyclopedia summary, photo gallery, immediate children, and observation counts. | `taxon_id`, `sections` | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
 | `inaturalist_get_similar_species` | List the taxa this one is most often misidentified as, ranked by how many times identifiers made the correction. The field-identification check for a look-alike. | `taxon_id`, `place_id` \| `lat`+`lng`+`radius` \| bbox, `limit` | `readOnlyHint: true`, `openWorldHint: true` |
@@ -57,7 +57,7 @@ Composes with servers covering institutional specimen records, avian checklists,
 - Search observations by point-and-radius, place id, or bounding box; by date range, taxon, quality grade, annotation, conservation status, rank band, iconic taxon, observer, project, licence, and captivity.
 - Resolve a common or scientific name to a taxon id, and a place name or map area to a place id.
 - Read one observation's identification thread and the community consensus taxon.
-- Per-taxon phenology histograms and per-area species rankings.
+- Per-taxon phenology histograms and per-area taxon rankings.
 - The similar-species confusion graph, optionally scoped to an area.
 - Relay licence and attribution on every record and every photo, verbatim.
 - Honour the upstream rate posture from a shared egress IP: the published terms allow a maximum of 100 requests per minute, ask callers to stay at or below 60 per minute, and ask for under 10,000 requests per day; the terms also state the API is intended to support application development, not data scraping, and that blocks may be instituted without notification.
@@ -68,7 +68,7 @@ Composes with servers covering institutional specimen records, avian checklists,
 ## User Goals
 
 1. **"What's been seen near me lately?"** — a point and radius, wild organisms only, recent first. → `inaturalist_search_observations`
-2. **"What lives here?"** — the distinct species of an area, ranked by how often they are recorded. → `inaturalist_get_species_counts`
+2. **"What lives here?"** — the leaf taxa of an area, ranked by how often they are recorded. → `inaturalist_get_species_counts`
 3. **"When does this bloom / appear here?"** — monthly or weekly phenology for a taxon in a place. → `inaturalist_get_histogram`
 4. **"What is this commonly confused with?"** — the look-alike set before committing to a field identification. → `inaturalist_get_similar_species`
 5. **"Tell me about this organism."** — taxonomy, conservation status by authority, photos, encyclopedia summary. → `inaturalist_get_taxon`
@@ -112,6 +112,7 @@ The default record for `inaturalist_search_observations`. Every field name below
 | `url` | string | `uri` | The upstream key is `uri`; the output field is `url`. |
 | `observed_on` | string \| null | `observed_on` | `YYYY-MM-DD`. Null when the observer recorded no date. |
 | `observed_at` | string \| null | `time_observed_at` | ISO 8601 with offset. |
+| `created_at` / `updated_at` | string \| null | same | Full upload/update timestamp strings, preserved on search, by-id and resource records. |
 | `taxon` | object \| null | `taxon` | `{ id, name, rank, common_name, iconic_taxon_name }` from `taxon.{id,name,rank,preferred_common_name,iconic_taxon_name}`. Null for an observation nobody has identified — declare optional and guard rather than assume. |
 | `place_guess` | string \| null | `place_guess` | Free text written by the observer. Untrusted — see below. |
 | `coordinate` | object \| null | `location`, `public_positional_accuracy` | `location` is the string `"lat,lng"`; split to `{ lat, lng, accuracy_m }`. Null when the observation has no public coordinate. |
@@ -252,6 +253,8 @@ Every place response drops `geometry_geojson` and reduces `bounding_box_geojson`
 
 Empty optional filter arrays (`license`, `photo_license`, `csi`, `term_id`, `term_value_id`, `iconic_taxa`) read as omitted, with one composed notice naming each ignored field. Nonempty `term_value_id` with empty `term_id` still fails as `unpaired_annotation_value`. `include: []` retains its existing expansion meaning. Repeated `quality_grade` members normalize in first-seen order, with disclosure before applied-filter echoes and requests.
 
+Exactly empty optional enum strings read as omitted, including defaulted enums: search's `hrank`, `lrank`, `search_on`, `order_by`, and `order`; histogram's `date_field` and `interval`; name resolution's `rank` and `type`. Advertised enum/default schemas are unchanged. Whitespace and unknown values remain invalid, and required `topic` and `kind` enums still reject blanks.
+
 An upstream 422 `Unknown place_id` maps to non-retryable `ValidationError` reason `unknown_place_id` on search, species counts, histogram, leaderboard (both kinds), and similar species. Recovery names `inaturalist_find_places`; caller data contains neither the upstream body nor URL/path.
 
 The API answers almost any malformed query with HTTP 200 and a plausible-looking result set. Everything in this table was reproduced live on 2026-09-19.
@@ -273,7 +276,7 @@ The API answers almost any malformed query with HTTP 200 and a plausible-looking
 | `per_page=999` | 200, clamped to 200 with no signal, 4.3 MB body | With `INATURALIST_CLAMP_LIMITS=true` (default), oversized positive integer limits are clamped to the documented applied cap, with notice, log, and counter. `false` restores strict schema maxima. Caps are 30 for resolve-name and nearby places, 25 for search, 50 for species counts and similar species, and 250 for leaderboards. |
 | `page × per_page > 10,000` | **403** `{"error":"Result window is too large, page x size must be less than or equal to [10000]. Please narrow your search, or use a sliding window approach with id_above or id_below params.","status":403}` | Rejected in-process before the request, as a typed error whose recovery names the one way past it: re-run ordered by `id` descending and follow `next_cursor`, or narrow the filters. |
 | `place_id=abc` | **500** `{"error":"Error","status":500}` | `place_id` is a positive integer in the schema. |
-| `id_below=notanumber` (`cursor`) | **500** `{"error":"Error","status":500}` | `cursor` is validated against `^[1-9]\d*$` in the schema — the server's own `next_cursor` is always a decimal observation id, the same way `place_id` enforces an integer. |
+| `id_below=notanumber` or `id_below > 2147483647` (`cursor`); `project_id > 2147483647` | **500** upstream | `cursor` keeps its `^[1-9]\d*$` pattern and adds an int32 ceiling refinement; the shared `project_id` schema advertises maximum 2147483647. Values at the ceiling reach upstream: cursor is accepted and an unknown project maps to `unknown_project_id`. |
 | `taxon_id=999999999` (as a filter) | **422** `{"error":"Unknown taxon_id 999999999","status":422}` | Mapped to a typed `unknown_taxon_id` routing to `inaturalist_resolve_name`. |
 | `user_id=999999999`, `user_login=zz-no-such-login-xq9` — verified 2026-09-24 | **422** `{"error":"Unknown user_id 999999999","status":422}` — an unknown login is worded the same way, `Unknown user_id zz-no-such-login-xq9`, on `/observations` and `/observations/species_counts` alike | Mapped to a typed `unknown_user` routing to `inaturalist_resolve_name` type `user`. A whitespace-only login answers the same 422, so it needs no rule of its own. |
 | `project_id=999999999` — verified 2026-09-24 | **422** `{"error":"Unknown project_id: [999999999]","status":422}` | Mapped to a typed `unknown_project_id` routing to `inaturalist_resolve_name` type `project`. `project_id` is a positive integer in the schema; upstream also accepts a slug, but `inaturalist_resolve_name` returns the id. |
@@ -340,7 +343,7 @@ Sources per topic:
 | `controlled_terms` | `GET /controlled_terms`, cached 24 h | 7 attributes verified live: Life Stage (1), Sex (9), Flowers and Fruits (12), Alive or Dead (17), Evidence of Presence (22), Established (33), Leaves (36). Each with `{ id, label, multivalued, values: [{ id, label, blocking }] }`. |
 | `quality_grades` | Static, spec-derived | `research`, `needs_id`, `casual`, with the data-quality criteria the spec exposes as filters: accurate, date, evidence, location, needs_id, recent, subject, wild. |
 | `licenses` | Static, spec enum | `cc-by`, `cc-by-nc`, `cc-by-nd`, `cc-by-sa`, `cc-by-nc-nd`, `cc-by-nc-sa`, `cc0`, plus the null case meaning all rights reserved. |
-| `ranks` | Static, spec enum | The 25 ranks `stateofmatter … form`, with the `rank_level` scale the spec documents: 70 kingdom, 60 phylum, 50 class, 40 order, 30 family, 20 genus, 10 species, 5 subspecies. |
+| `ranks` | Static, API spec and `Taxon.ranks` source | The 35 usable ranks, excluding `root` and `subkingdom`. Level notes cover the eight spec-documented rungs plus ten supplemental source-table ranks, including fractional levels. |
 | `iconic_taxa` | Static, spec enum | The 14 values. |
 | `conservation_status_codes` | Static, spec enum | The `csi` codes `LC, NT, VU, EN, CR, EW, EX`, with the note that a taxon's `conservation_statuses[].status` is authority-specific free text (`"Special Concern"`, `"G4"`, `"Sujeta a protección especial"` all observed) while `csi` is the normalised search filter. |
 
@@ -369,7 +372,7 @@ The name-to-id front door. A miss is a result, not a failure.
 |:--|:--|:--|:--|
 | `q` | string, 1–100, required | `q` | For `type: "taxon"` this is a **prefix** match or an exact id, per the spec. |
 | `type` | enum, default `taxon` | `sources` | `taxon` \| `place` \| `project` \| `user` \| `any`. `taxon` routes to `/taxa/autocomplete`; everything else routes to `/search` with `sources` set to `places` / `projects` / `users`, or omitted for `any`. |
-| `rank` | enum, optional | `rank` | One of the 25 ranks. Only honoured on `type: "taxon"` — `/search` has no rank filter. |
+| `rank` | enum, optional | `rank` | One of the 35 usable ranks, including `complex` and `section`. Only honoured on `type: "taxon"` — `/search` has no rank filter. |
 | `limit` | positive int, applied max 30, default 10 | `per_page` | Also applied in-process on every route: `/taxa/autocomplete` returns related taxa past its `per_page` (`q=monarch&per_page=1` returned 4, `per_page=3` returned 5, verified 2026-09-22), so the candidate list is sliced to `limit`. `totalCount` still reports upstream's `total_results`. |
 
 **Routing:** `type: "taxon"` → `GET /taxa/autocomplete?q=&rank=&per_page=` (returns `matched_term`, verified). Everything else → `GET /search?q=&sources=&per_page=` (returns `{ type, score, matches[], record }`; `type` values observed: `Taxon`, `Place`, `Project`, `User`).
@@ -401,26 +404,30 @@ Search-route records are 11.8 KB (Taxon) to 15.5 KB (Project) each and are proje
 
 The spine of the surface.
 
+Search additionally forwards `acc_below` (positive fractional metres through 2,147,483,647, strictly below, excluding missing measured accuracy), `obscuration` (array of `obscured`, `private`, `none`), observed `month` (integer array 1–12), `created_d1`/`created_d2` (inclusive upload calendar bounds independent of `d1`/`d2`), `updated_since` (calendar date or timezone-bearing ISO datetime), and `identifications` (one of `most_agree`, `some_agree`, `most_disagree`). Obscuration matches observer or taxon geoprivacy; `none` requires both to be open/unset. Existing calendar validation handles upload dates; Zod's ISO datetime validator enforces calendar and timezone validity for update timestamps. Empty optional date/enum strings are unset; empty month/obscuration arrays are omitted with composed notice. Inverted upload dates use `inverted_date_range`, with recovery naming both date families.
+
+All observation projections, including search, by-id and JSON resources, carry nullable `created_at` and `updated_at` without shortening strings. Both keys render on the text surface, including nulls. These fields participate in search's existing serialized response budget; whole records are deferred when needed. Zero-hit guidance includes only supplied nonempty optional filters, while past-end pages retain pagination guidance.
+
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
 | `place_id` | int ≥ 1, optional | `place_id` | From `inaturalist_find_places`. Non-numeric values 500 upstream, so the schema enforces the integer. |
 | `lat` | number −90…90, optional | `lat` | Requires `lng` and `radius`. |
 | `lng` | number −180…180, optional | `lng` | Requires `lat` and `radius`. |
-| `radius` | number ≤ 500, optional | `radius` | **Kilometres**, greater than 0 — a zero or negative radius fails as `invalid_geography` before the request (upstream answers `radius=0` with HTTP 500). The spec names no numeric bound; live probes on 2026-09-19 confirmed 500 km and 1,000 km both return correctly scoped, non-global results (only a radius approaching the antipodal maximum, ~20,000 km, degenerates toward a global search — by circle geometry, not upstream clamping). 500 is a generous, verified ceiling, not an upstream-enforced one. Requires `lat` and `lng`. |
+| `radius` | number, optional; applied max 20,040 by default | `radius` | **Kilometres**, greater than 0 — zero and negative values fail as `invalid_geography`. Regional and continental radii are supported; oversized values clamp to 20,040 with a composed notice, log and counter. The lat/lng/radius filter remains present at the ceiling, since an unfiltered search can include records without matching coordinates. Strict mode advertises and enforces the legacy maximum of 500. Requires `lat` and `lng`. |
 | `nelat` / `nelng` / `swlat` / `swlng` | number, optional | same | All four or none. `nelat` must be at or north of `swlat`; `nelng` west of `swlng` is an antimeridian-crossing box and is accepted. |
 | `taxon_id` | int ≥ 1, optional | `taxon_id` | Matches the taxon and its descendants. |
 | `d1` / `d2` | string `YYYY-MM-DD`, optional | `d1` / `d2` | Observed on or after / on or before. A malformed or calendar-invalid value drops the filter upstream, so both the pattern and calendar validity are enforced in the schema; `d1` after `d2` fails as `inverted_date_range`. |
 | `quality_grade` | enum array, default `["research"]` | `quality_grade` | Joined with commas. Widening to `needs_id` roughly doubles the corpus and lowers identification confidence. |
 | `captive` | boolean, default `false` | `captive` | `false` selects wild records only; `true` selects captive or cultivated records only, never both cohorts. |
-| `term_id` | int array, optional | `term_id` | Annotation attribute ids from `inaturalist_list_reference`. |
-| `term_value_id` | int array, optional | `term_value_id` | Requires `term_id`; ignored upstream on its own. |
+| `term_id` | int array, optional | `term_id` | Annotation attribute ids from `inaturalist_list_reference`. Multiple distinct ids match any one annotation, not all annotations. |
+| `term_value_id` | int array, optional | `term_value_id` | Requires `term_id`; ignored upstream on its own. Arrays are membership sets, not positional attribute/value pairs: one annotation must match an attribute and a value from the supplied sets. Multiple distinct members produce a composed notice on search, species counts and histogram. |
 | `iconic_taxa` | enum array, optional | `iconic_taxa` | The 14 spec values. |
 | `hrank` / `lrank` | enum, optional | `hrank` / `lrank` | Highest (coarsest) / lowest (finest) taxonomic rank of the identification. Compared by rank level, as upstream does; an `hrank` below `lrank`'s level fails as `inverted_rank_range`. |
-| `csi` | enum array, optional | `csi` | `LC, NT, VU, EN, CR, EW, EX`. |
+| `csi` | enum array, optional | `csi` | `LC, NT, VU, EN, CR, EW, EX`; global listings plus listings at exactly `place_id`, excluding ancestor-place listings. |
 | `threatened` / `native` / `introduced` / `endemic` | boolean, optional | same | Taxon status relative to the observation's location. |
 | `user_id` | int ≥ 1, optional | `user_id` | One observer, from `inaturalist_resolve_name` type `user` → `id`. Mutually exclusive with `user_login`. |
 | `user_login` | string, optional | `user_login` | One observer, by the `login` on a resolve_name user candidate, a leaderboard entry, or an observation's `observer`. A blank value reads as unset. Mutually exclusive with `user_id`. |
-| `project_id` | int ≥ 1, optional | `project_id` | One project, from `inaturalist_resolve_name` type `project` → `id`. |
+| `project_id` | int 1…2147483647, optional | `project_id` | One project, from `inaturalist_resolve_name` type `project` → `id`. The upstream signed-int ceiling prevents retried 500 failures. |
 | `licensed` | boolean, optional | `licensed` | The observation's own licence is not null — any licence, the NC and ND variants included. |
 | `photo_licensed` | boolean, optional | `photo_licensed` | At least one photo's licence is not null. |
 | `license` | enum array, optional | `license` | The observation's own `license_code` is one of these — the seven `LICENSE_CODES` (`cc-by`, `cc-by-nc`, `cc-by-nd`, `cc-by-sa`, `cc-by-nc-nd`, `cc-by-nc-sa`, `cc0`), comma-joined as OR. Each value is lowercased before the enum, since upstream reads `CC0` as `cc0`. Probed on `place_id=14&quality_grade=research`: `cc0` 668,197, `cc-by` 1,483,169, `cc-by,cc0` 2,151,366 of 16,274,317. |
@@ -430,7 +437,7 @@ The spine of the surface.
 | `order_by` | enum, default `observed_on` | `order_by` | `created_at` \| `geo_score` \| `id` \| `observed_on` \| `random` \| `species_guess` \| `updated_at` \| `votes`. Forced to `id` when `cursor` is supplied. `id` with `order: "desc"` is the only ordering that issues `next_cursor` — see Pagination. |
 | `order` | enum, default `desc` | `order` | |
 | `page` | int ≥ 1, default 1 | `page` | Refused in-process when `page × per_page > 10000`. |
-| `cursor` | string, `^[1-9]\d*$`, optional | `id_below` | The `next_cursor` from a previous id-descending page — always a decimal observation id. A non-numeric value 500s upstream, so the schema enforces the pattern, the same way `place_id` enforces an integer. Mutually exclusive with `page`. |
+| `cursor` | string, `^[1-9]\d*$`, value ≤ 2147483647, optional | `id_below` | The `next_cursor` from a previous id-descending page — always a decimal observation id. Malformed and int32-overflow values fail schema validation before upstream can answer 500. Mutually exclusive with `page`. |
 | `per_page` | positive int, applied max 25, default 10 | `per_page` | Oversized limits clamp by default; strict mode rejects values above 25. Search also enforces the serialized-reply byte budget by deferring whole records. |
 | `include` | enum array, optional | — | `photos` \| `annotations` \| `sounds`. |
 | `sounds` | boolean, optional | `sounds` | `true` selects records with recordings, `false` selects records without them, and omission leaves media unrestricted. This filters records independently of `include: ["sounds"]`, which expands audio arrays. The zero-hit notice names `sounds` when supplied. |
@@ -446,8 +453,8 @@ The omitted fields are `identifications`, `identifications_total`, `identificati
 | reason | code | when | recovery |
 |:--|:--|:--|:--|
 | `invalid_geography` | `ValidationError` | An area was given partially, in two forms at once, with a radius of 0 or less, or with nelat south of swlat. | `Pass lat, lng and a radius above 0 together, or all four of nelat, nelng, swlat and swlng with nelat at or north of swlat, or a single place_id from inaturalist_find_places.` |
-| `inverted_date_range` | `ValidationError` | `d1` is after `d2`. | `Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.` |
-| `inverted_rank_range` | `ValidationError` | `hrank` is a finer rank than `lrank`. | `Set hrank to the coarser rank and lrank to the finer one, or pass the same rank to both for an exact-rank match; list the ranks with inaturalist_list_reference topic ranks.` |
+| `inverted_date_range` | `ValidationError` | `d1` is after `d2`, or `created_d1` is after `created_d2`. | `Pass d1 on or before d2 and created_d1 on or before created_d2; observation and upload bounds are independent, inclusive calendar dates.` |
+| `inverted_rank_range` | `ValidationError` | `hrank` is a finer rank than `lrank`. | `Set hrank to the coarser rank and lrank to the finer one, equal bounds select a rank level, including ranks sharing that level; list the ranks with inaturalist_list_reference topic ranks.` |
 | `result_window_exceeded` | `ValidationError` | `page × per_page` would exceed the upstream 10,000-result window. | `Past 10,000 results only the cursor continues, and only on an id-descending walk: re-run with order_by "id" and order "desc", then pass each page's next_cursor as cursor. Otherwise narrow the filters to bring the records into the first 10,000.` |
 | `conflicting_pagination` | `ValidationError` | Both `page` and `cursor` were supplied. | `Pass page alone to walk the first 10,000 results, or cursor alone to continue past that window.` |
 | `unpaired_annotation_value` | `ValidationError` | `term_value_id` without `term_id`. | `Pass term_id alongside term_value_id; list the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.` |
@@ -509,6 +516,10 @@ Partial success is the norm: attempted IDs that resolve come back in `observatio
 
 ### `inaturalist_get_species_counts`
 
+Counts leaf taxa, including hybrids and coarser identifications; subspecies roll up to their species. Field names remain `total_results` and `species`.
+
+Search and species counts share `introduced`, `native`, `threatened`, `endemic`, `csi`, `hrank`, `lrank`, and observed `month` (integer array, 1–12). These fragments are deliberately absent from tools whose endpoint or handler does not forward them. `csi` includes global statuses and listings at exactly `place_id`, excluding ancestor-place listings; status flags refer to each observation's indexed taxon at its location. Species counts additionally accepts exact `rank` from `RANKS`; `rank=species` is distinct from a species-level band that also includes hybrid. Inverted rank levels fail as `inverted_rank_range` before a request. Empty month/csi arrays are omitted with composed guidance; zero-hit remedies name supplied nonempty filters only.
+
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
 | area params | as above | same | One form, validated as a unit. |
@@ -518,21 +529,25 @@ Partial success is the norm: attempted IDs that resolve come back in `observatio
 | `captive` | boolean, default `false` | `captive` | |
 | `term_id` / `term_value_id` | int arrays, optional | same | Same pairing rule. |
 | `iconic_taxa` | enum array, optional | `iconic_taxa` | |
-| `user_id` / `user_login` / `project_id` | as on `inaturalist_search_observations` | same | One observer or one project; the same pairing rule and blank-login handling. Probed with no quality or captive filter: `user_id=1` and `user_login=kueda` both 11,698 species, `project_id=227779` 73,833, against 597,770 unfiltered. |
+| `user_id` / `user_login` / `project_id` | as on `inaturalist_search_observations` | same | One observer or one project; the same pairing rule and blank-login handling. Probed with no quality or captive filter: `user_id=1` and `user_login=kueda` both 11,698 taxa, `project_id=227779` 73,833, against 597,770 unfiltered. |
 | `per_page` | positive int, applied max 50, default 25 | `per_page` | Oversized values clamp by default; strict mode rejects values above 50. A historical full page measured 42,780 bytes; this is not a byte guarantee. |
 | `page` | int ≥ 1, default 1 | `page` | |
 
-**Output:** `total_results` (distinct species matching), `species[]` — `{ position, taxon_id, name, common_name, rank, iconic_taxon_name, observation_count, photo }`, from `results[].count` and `results[].taxon`. `position` is the row's absolute place in the ranking, counted from page 1: the service computes `(page − 1) × per_page + index + 1` from the raw row index, as `getLeaderboard` does, so a row dropped for carrying no taxon leaves a gap rather than renumbering the rest. `rank` stays the taxonomic rank.
+**Output:** `total_results` (leaf taxa matching), `species[]` — `{ position, taxon_id, name, common_name, rank, iconic_taxon_name, observation_count, photo }`, from `results[].count` and `results[].taxon`. `position` is the row's absolute place in the ranking, counted from page 1: the service computes `(page − 1) × per_page + index + 1` from the raw row index, as `getLeaderboard` does, so a row dropped for carrying no taxon leaves a gap rather than renumbering the rest. `rank` stays the taxonomic rank.
 
 **format():** `total_results` as a header line, then a numbered list ranked by `observation_count` — `{position}. **{common_name}** (*{name}*) — {observation_count} observations · {rank} · {iconic_taxon_name} · taxon_id {taxon_id}` — with the photo block indented under each entry. Page 3 at `per_page` 3 numbers its rows 7, 8, 9.
 
-**Errors:** `invalid_geography`, `inverted_date_range`, `unpaired_annotation_value`, `conflicting_observer`, `unknown_taxon_id`, `unknown_place_id`, `unknown_user`, `unknown_project_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
+**Errors:** `invalid_geography`, `inverted_date_range`, `inverted_rank_range`, `unpaired_annotation_value`, `conflicting_observer`, `unknown_taxon_id`, `unknown_place_id`, `unknown_user`, `unknown_project_id` — same reasons, codes, and recovery strings as on `inaturalist_search_observations`.
 
 **Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response, plus `truncationCeiling` when the page fills. `total_results` is not duplicated into enrichment — it already rides `output`.
 
-**Zero-hit notice:** `No species recorded for those filters.`, followed by one remedy per narrowing filter the call actually supplied, in this order: `widen or drop d1/d2`, `widen the area`, `drop taxon_id or confirm it with inaturalist_resolve_name`, `drop {user_id | user_login} or confirm the observer with inaturalist_resolve_name`, `drop project_id or confirm it with inaturalist_resolve_name`, and `set quality_grade to include "needs_id"` unless it already does. It applies only when `total_results` is 0; an empty page past the end names the last page instead (see Pagination) — `page: 2000, per_page: 50` on `place_id: 1` reads `Page 2000 is past the end: 99891 species match, so the last page holding results at per_page 50 is 1998.` With `place_id` and `taxon_id` under the default quality grade: `No species recorded for those filters. Widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".` `inaturalist_get_leaderboard` composes its notice the same way.
+**Zero-hit notice:** `No taxa recorded for those filters.`, followed by one remedy per narrowing filter the call actually supplied, starting with supplied nonempty establishment/conservation/rank/month filters, then `widen or drop d1/d2`, `widen the area`, `drop taxon_id or confirm it with inaturalist_resolve_name`, `drop {user_id | user_login} or confirm the observer with inaturalist_resolve_name`, `drop project_id or confirm it with inaturalist_resolve_name`, and `set quality_grade to include "needs_id"` unless it already does. It applies only when `total_results` is 0; an empty page past the end names the last page instead (see Pagination) — `page: 2000, per_page: 50` on `place_id: 1` reads `Page 2000 is past the end: 99891 taxa match, so the last page holding results at per_page 50 is 1998.` With `place_id` and `taxon_id` under the default quality grade: `No taxa recorded for those filters. Widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".` `inaturalist_get_leaderboard` composes its notice the same way.
 
 ### `inaturalist_get_histogram`
+
+Histogram and both leaderboard endpoints accept `user_id` or `user_login`, plus `project_id`, through the shared observer/project fragment and endpoint allowlists. Blank login is unset; the observer pair fails as `conflicting_observer` before requests. Unknown selectors map to `unknown_user` or `unknown_project_id`, with `inaturalist_resolve_name` recovery. Histogram cache identity includes every supplied selector. Zero-hit notices name observer/project only when supplied; defaults, bucket keys and ranking positions are unchanged.
+
+On the observers leaderboard, an observer selector selects that observer's own row. On identifiers, it selects contributors who identified that observer's sightings, not identifications authored by the named observer.
 
 | Param | Type | Maps to | Notes |
 |:--|:--|:--|:--|
@@ -551,7 +566,7 @@ Partial success is the norm: attempted IDs that resolve come back in `observatio
 
 **format():** a header line naming `interval` and `total`, then a two-column markdown table of `key` and `count` — small enough at every interval other than `day`/`hour` over a wide range (12 rows for `month_of_year`, 53 for `week_of_year`) to render whole.
 
-**Errors:** `invalid_geography`, `inverted_date_range`, `unpaired_annotation_value`, `unknown_taxon_id`, `unknown_place_id` — same strings; inverted-date validation also covers `created_d1` after `created_d2`.
+**Errors:** `invalid_geography`, `inverted_date_range`, `unpaired_annotation_value`, `unknown_taxon_id`, `unknown_place_id`, `conflicting_observer`, `unknown_user`, `unknown_project_id` — same strings; inverted-date validation also covers `created_d1` after `created_d2`.
 
 **Enrichment:** `applied_filters`, `truncated`/`shown`/`cap` (required, written on every path — the same unconditional-disclosure pattern as the other list tools), `notice`.
 
@@ -663,7 +678,7 @@ The two endpoints return different shapes and are normalised: `observers` gives 
 
 **Output:** `kind`, `count_metric` (`"observations"` or `"identifications"` — names what `count` measures), `total_results`, `entries[]` — `{ rank, login, count, species_count? }`, where `species_count` is present on the observers arm only.
 
-Top species for an area is not a `kind` here; `inaturalist_get_species_counts` already answers it and the tool description says so.
+Top taxa for an area is not a `kind` here; `inaturalist_get_species_counts` already answers it and the tool description says so.
 
 A full page is truncated only when more matching entries remain. An exactly full final page, including exactly 500 total entries, reports `truncated: false` without continuation guidance. With more entries below the 500-entry window, guidance raises `page`; at the window boundary with additional matches, guidance names the ceiling.
 
@@ -682,6 +697,8 @@ A full page is truncated only when more matching entries remain. An exactly full
 **Enrichment:** `applied_filters`, `notice`, truncation disclosure (`truncated`, `shown`, `cap`) on every response. `total_results` is not duplicated into enrichment — it already rides `output`.
 
 **Zero-hit notice:** `Nobody has recorded observations matching those filters.` (`Nobody has made identifications…` for `kind: "identifiers"`), followed by the remedies for the filters the call supplied, composed as on `inaturalist_get_species_counts` — `taxon_id`, the date range, and the area are named only when given. It applies only when `total_results` is 0; an empty page with people matching gets the past-the-end notice (see Pagination). Inside the 500-entry window a page is never past the end of a field of 500 or more, since `leaderboard_window_exceeded` refuses any page past it first.
+
+Both leaderboard kinds also declare `conflicting_observer`, `unknown_user`, and `unknown_project_id`, using the observer/project validation and name-resolution recovery described for histogram. Observer/project selectors are named in zero-hit guidance only when supplied.
 
 ---
 
@@ -749,7 +766,7 @@ No rate-limit headers are returned (no `X-RateLimit-*`, no `Retry-After` on the 
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | No | Minimum spacing between outbound request starts. Default `1100`. |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | No | Maximum requests in flight. Default `4`. |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | No | Outbound requests allowed per UTC day. Default `9000`. |
-| `INATURALIST_CLAMP_LIMITS` | No | Strict boolean, default `true`. Clamp six list limits to 30/30/25/50/50/250 and allow up to 100 submitted by-id IDs while attempting ten distinct IDs. Each list clamp emits a notice, log, and counter. `false` restores the previous advertised schema maxima and ten-submitted-ID validation. |
+| `INATURALIST_CLAMP_LIMITS` | No | Strict boolean, default `true`. Clamp six list limits to 30/30/25/50/50/250 and radius to 20,040 km; allow up to 100 submitted by-id IDs while attempting ten distinct IDs. Each clamp emits a notice, log, and counter. `false` restores the previous advertised schema maxima, including radius at 500 km, and ten-submitted-ID validation. |
 
 No API key. All five server-specific environment variables are optional and declared on both `server.json` package entries. The clamping flag uses strict boolean parsing; invalid boolean text fails startup.
 
@@ -816,8 +833,8 @@ The optional api-token on the two observation paths only unlocks coordinates hid
 | `quality_grade` | `casual`, `needs_id`, `research` |
 | `license` / `photo_license` | `cc-by`, `cc-by-nc`, `cc-by-nd`, `cc-by-sa`, `cc-by-nc-nd`, `cc-by-nc-sa`, `cc0` |
 | `iconic_taxa` | `Actinopterygii`, `Amphibia`, `Animalia`, `Arachnida`, `Aves`, `Chromista`, `Fungi`, `Insecta`, `Mammalia`, `Mollusca`, `Plantae`, `Protozoa`, `Reptilia`, `unknown` |
-| `rank` / `hrank` / `lrank` | `stateofmatter`, `kingdom`, `phylum`, `subphylum`, `superclass`, `class`, `subclass`, `superorder`, `order`, `suborder`, `infraorder`, `superfamily`, `epifamily`, `family`, `subfamily`, `supertribe`, `tribe`, `subtribe`, `genus`, `genushybrid`, `species`, `hybrid`, `subspecies`, `variety`, `form` |
-| `rank_level` | 70 kingdom, 60 phylum, 50 class, 40 order, 30 family, 20 genus, 10 species, 5 subspecies |
+| `rank` / `hrank` / `lrank` | `stateofmatter`, `kingdom`, `phylum`, `subphylum`, `superclass`, `class`, `subclass`, `infraclass`, `subterclass`, `superorder`, `order`, `suborder`, `infraorder`, `parvorder`, `zoosection`, `zoosubsection`, `superfamily`, `epifamily`, `family`, `subfamily`, `supertribe`, `tribe`, `subtribe`, `genus`, `genushybrid`, `subgenus`, `section`, `subsection`, `complex`, `species`, `hybrid`, `subspecies`, `variety`, `form`, `infrahybrid` |
+| `rank_level` | 70 kingdom, 60 phylum, 50 class, 40 order, 30 family, 20 genus, 10 species, 5 subspecies. Supplemental source-table ranks: complex 11, subsection 12, section 13, subgenus 15, infrahybrid 5, zoosection 34, zoosubsection 33.5, parvorder 34.5, subterclass 44, infraclass 45. Fractional levels are compared without rounding. |
 | `csi` | `LC`, `NT`, `VU`, `EN`, `CR`, `EW`, `EX` |
 | `geoprivacy` / `taxon_geoprivacy` | `obscured`, `obscured_private`, `open`, `private` |
 | `interval` | `year`, `month`, `week`, `day`, `hour`, `month_of_year`, `week_of_year` |
@@ -910,7 +927,7 @@ Maximum 100 requests per minute, with an ask to stay at or below 60 per minute a
 | **Rendered upstream strings preserve literal text after CommonMark parsing.** | Inline encoders preserve CR/LF with character references instead of creating physical heading breaks; quoted text preserves its separators, HTML, entities, and whitespace. NUL-containing values use a labeled JSON string literal for lossless recovery. URLs use a separate link encoder; vocabulary codes render as prose rather than escaped text inside code spans. |
 | **The unknown-section rejection names a bounded sample of what it rejected.** | `sections` is an unbounded array of unbounded strings, and naming every unknown entry let one call inflate its own failure message to 106 KB — mirrored into `content[]` and `structuredContent.error` alike, straight into the agent's context. Three names, 40 characters each, plus a count of the rest is all a caller needs to find the typo, and the valid section list follows it regardless. The bound sits in the handler rather than on the schema so the typed `unknown_section` contract and its recovery hint still fire; a `maxItems` on the input would pre-empt them with a framework `invalid_arguments` rejection instead. |
 | **`inaturalist_get_histogram` caps `buckets[]` at 800, in upstream key order.** | Wide daily/hourly ranges produce large arrays. The cap bounds bucket count while `total` sums all upstream buckets; truncation guidance names both date-bound families and a coarser interval. Historical size measurements informed the count cap without guaranteeing arbitrary serialization sizes. |
-| **`cursor` on `inaturalist_search_observations` is validated against `^[1-9]\d*$`, the same way `place_id` enforces an integer.** | `cursor` is forwarded verbatim as upstream `id_below`, and the server's own `next_cursor` is always a decimal observation id — a caller-supplied non-numeric value 500s upstream, which the service maps to an upstream-unavailable error and retries against a fault that a schema rejection would have caught for free. `blankAsUnset` still runs first, so a form client's blank cursor is unset rather than rejected. |
+| **`cursor` validates positive decimal syntax and shares the 2147483647 ceiling with `project_id`.** | Malformed or overflowing `id_below` and overflowing `project_id` answer 500 and consume retries; schema validation prevents those requests. The cursor pattern remains advertised alongside its runtime ceiling refinement, and shared project inputs advertise `maximum`. `blankAsUnset` still runs first, so a blank cursor is unset. |
 | **The by-id arrays — identifications, comments, and filled observation fields — share one 40-entry budget across the batch: `max(4, floor(40 / records returned))` per array per record, first entries in upstream order.** | One heavily discussed id measured 624,791 bytes uncapped, and a per-record cap alone would let ten such records multiply it. Sharing the budget brings 5890862 alone to 28,050 B with the default `include` and 40,102 B with comments; ten ids measured 53,155 and 66,853 B, the extra being the ten records' own fields. Totals and shown counts ride every record, so an under-cap array reads as whole rather than as unknown, and one composed notice names each cut id and array with the two recoveries — a single-id re-call or the record's `url` — since no tool pages them. Upstream order is kept rather than re-sorted; it is stable but not chronological, and the surfaces say "in upstream order", never "earliest". |
 | **`identifications_count` is described as upstream's agree-plus-disagree tally, and no thread-size field was added beside it.** | It equalled `agreements + disagreements` on all 270 sampled records and leaves out the observer's own and any non-committal identification, so describing it as the thread size misled by up to 8 of 14 entries. The thread size already rides `identifications_total` wherever the thread is included. |
 | **The observer's `description` and non-blank `observation_fields` are relayed on the by-id detail arm only.** | The description is often the most useful field on a sighting (host plant, behaviour, habitat) and was being dropped. Search never carries them: a 25-record page would pay for 25 notes nobody asked for. Blank values are dropped because an empty project field tells a reader nothing; every other value is relayed verbatim, the string `"null"` included. The fields take the thread arrays' per-record share, counted after blanks are dropped, because the tail is long: 5890862 carries 906, which relayed whole added 86–94 KB to every reply that included it. `description` is one string and stays whole. |

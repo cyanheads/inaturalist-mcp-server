@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/inaturalist-mcp-server</h1>
-  <p><b>Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Search wildlife sightings, read identification threads, rank taxa by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.</b>
   <div>10 Tools • 2 Domain Resources • 1 Skill</div>
   </p>
 </div>
@@ -29,7 +29,7 @@
 
 ## Overview
 
-iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the species of an area; and check what a look-alike is most often confused with. No API key required.
+iNaturalist's index of 387M+ georeferenced citizen-science observations of plants, animals, and fungi. Search sightings by area, date, taxon, and annotation; read the identification thread behind a record; chart when a taxon appears; rank the taxa of an area; and check what a look-alike is most often confused with. No API key required.
 
 ### Tools
 
@@ -40,7 +40,7 @@ iNaturalist's index of 387M+ georeferenced citizen-science observations of plant
 | `inaturalist_find_places` | Resolve a place name to a place id, or list the places covering a map area, each with its bounding box and containment chain |
 | `inaturalist_search_observations` | Search georeferenced sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence |
 | `inaturalist_get_observation` | Fetch up to 10 observations by id with their community identification thread and consensus taxon |
-| `inaturalist_get_species_counts` | Rank the distinct species recorded in an area and period, most-observed first, optionally for one observer or project |
+| `inaturalist_get_species_counts` | Rank the leaf taxa recorded in an area and period, most-observed first, optionally for one observer or project |
 | `inaturalist_get_histogram` | Build a phenology histogram for a taxon in an area: which months, weeks, or years it is recorded in |
 | `inaturalist_get_leaderboard` | Rank the most active observers or identifiers for an area, period, and taxon |
 | `inaturalist_get_similar_species` | List the taxa a genus-or-finer taxon is most often misidentified as, ranked by correction count |
@@ -86,6 +86,8 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 - `page` walks the first 10,000 results; past that, order by `id` descending and pass each page's `next_cursor` as `cursor`. Returns `total_results` (a live estimate) and `has_more`, and echoes `applied_filters`
 - `license` / `photo_license` take the seven CC codes, OR-joined; `photo_license` matches any photo under the code, independent of the record's own `license_code`
 - The complete serialized reply stays within 50,000 UTF-8 bytes by returning a prefix of whole records. Ordered `deferred` observation IDs identify the suffix; fetch them with `inaturalist_get_observation` and the same `include` before following the upstream page continuation
+- `acc_below` accepts positive fractional metres up to 2,147,483,647 and selects measured accuracy strictly below the threshold, excluding missing accuracy. `obscuration` accepts `obscured`, `private`, and `none`; it checks both observer and taxon geoprivacy, with `none` requiring both to be open/unset. `month` accepts observed calendar months 1–12
+- `created_d1`/`created_d2` independently bound upload dates; `updated_since` accepts a calendar date or ISO datetime with timezone. `identifications` selects `most_agree`, `some_agree`, or `most_disagree`. Search, by-id records, and observation resources preserve nullable `created_at` and `updated_at` strings
 
 ---
 
@@ -99,6 +101,8 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_get_species_counts` <sub>tool</sub>
 
+- Counts leaf taxa, including hybrids and coarser identifications; subspecies roll up to their species. `total_results` counts taxa, and the `species` field retains its upstream name.
+- `introduced`, `native`, `threatened`, `endemic`, `csi`, `hrank`/`lrank`, and observed `month` (integer array, 1–12) are shared with search. `rank` selects one exact rank; equal rank-band bounds select a level, including both species and hybrid at level 10. Conservation codes match global listings plus listings at exactly `place_id`, excluding ancestor-place listings. Status flags describe the observation's indexed taxon at its location.
 - One area form plus the search filters for taxon, dates, quality grade, captive, annotations, iconic taxa, observer, and project; applied `per_page` up to 50, default 25, with `page` offset
 - Rows carry `position` (absolute, counted from page 1), `taxon_id`, and `observation_count`; `truncationCeiling` is the last count shown, which nothing off the page exceeds
 
@@ -109,6 +113,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 - `interval`: `month_of_year` (default) or `week_of_year` for a seasonal curve, or `year` / `month` / `week` / `day` / `hour` for absolute dates; `date_field` `observed` (default) or `created`; `taxon_id` optional, and an annotation pair (Life Stage `1` = Larva `6`) or `iconic_taxa` narrows the curve
 - Returns every bucket in order, zeros included, plus a `total` across all of them; capped at 800 buckets from the start of the range, with `truncated` / `shown` / `cap`
 - `d1`/`d2` bound observation dates; `created_d1`/`created_d2` separately bound upload dates. `date_field` selects which date is bucketed without changing either filter pair
+- `user_id` or `user_login` selects an observer's sightings; `project_id` selects a project. Resolve either with `inaturalist_resolve_name`; an observer ID and login are mutually exclusive
 
 ---
 
@@ -117,6 +122,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 - `kind`: `observers` or `identifiers`, with one area form, `taxon_id`, `d1`/`d2`, and `quality_grade`; applied `per_page` up to 250, default 25
 - Only the top 500 are addressable, so `page × per_page` past 500 fails as `leaderboard_window_exceeded`; entries carry `rank`, `login`, and `count` (measured per `count_metric`), plus `species_count` for observers
 - A full final page reports `truncated: false` when the matching set is exhausted
+- `user_id` or `user_login` and `project_id` scope the underlying observations. On observers, an observer selector returns that observer's own row; on identifiers, it returns people who identified that observer's sightings. It does not select identifications authored by the named observer
 
 ---
 
@@ -153,7 +159,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 iNaturalist-specific:
 
 - Keyless, read-only coverage of the iNaturalist v1 API. Upstream ignores its own `fields=` parameter, so every response is projected in-process (a common taxon record arrives at 95 KB)
-- Area-scoped tools take one area form: `place_id`, `lat`+`lng`+`radius` in kilometres (up to 500), or a four-corner box. Partial or mixed forms fail as `invalid_geography`, and `d1` after `d2` as `inverted_date_range`
+- Area-scoped tools take one area form: `place_id`, `lat`+`lng`+`radius` in kilometres (clamped at 20,040 by default; 500 maximum in strict mode), or a four-corner box. The geographic filter is retained at the ceiling. Partial or mixed forms fail as `invalid_geography`, and `d1` after `d2` as `inverted_date_range`
 - Per-endpoint parameter allowlist, plus in-process rejection of input upstream would silently widen or zero out: a lone `term_value_id`, an impossible date, an unknown licence code
 - Self-paced traffic: spaced request starts, capped concurrency, and a per-UTC-day budget that fails as `rate_budget_exhausted`. The counter is per process, so every caller of the hosted instance shares it. Taxa, places, controlled terms, histograms, and look-alike sets are cached; observation queries are not
 - Licences relayed verbatim: a null `license_code` means all rights reserved, photo `attribution` must travel with the image, and photos are linked, never proxied. An `obscured` coordinate is a locality, and observers are identified by `login` only
@@ -283,7 +289,7 @@ cp .env.example .env
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | Minimum gap between outbound request starts, in ms. The default holds the rate near 54 per minute. | `1100` |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | Maximum outbound requests in flight. | `4` |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | Outbound requests allowed per UTC day, counted in-process and reset on restart. | `9000` |
-| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp oversized list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, with a notice, log, and counter. `false` restores the prior advertised schema caps and rejects oversized input. | `true` |
+| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp oversized list limits to 30/30/25/50/50/250 for name resolution, nearby places, search, species counts, similar species, and leaderboards, and radius to 20,040 km, with a notice, log, and counter. `false` restores the prior advertised schema caps, including radius at 500 km, and rejects oversized input. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
