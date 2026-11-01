@@ -26,7 +26,7 @@
     "clamp_limits": {
       "type": "string",
       "title": "Clamp read limits",
-      "description": "Clamp oversized read limits and defer oversized by-id batches. Set false for strict rejection.",
+      "description": "Clamp oversized read limits and radius (20,040 km), and defer oversized by-id batches. Set false for strict rejection, including radius above 500 km.",
       "default": ""
     }
   }
