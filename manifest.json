@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "inaturalist-mcp-server",
   "version": "0.3.0",
-  "description": "Search wildlife sightings, read identification threads, rank species by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
+  "description": "Search wildlife sightings, read identification threads, rank taxa by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "repository": {
     "type": "git",
@@ -33,7 +33,7 @@
     "clamp_limits": {
       "type": "string",
       "title": "Clamp read limits",
-      "description": "Clamp oversized read limits and defer oversized by-id batches. Set false for strict rejection.",
+      "description": "Clamp oversized read limits and radius (20,040 km), and defer oversized by-id batches. Set false for strict rejection, including radius above 500 km.",
       "default": ""
     }
   }

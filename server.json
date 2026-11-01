@@ -30,7 +30,7 @@
         },
         {
           "name": "INATURALIST_CLAMP_LIMITS",
-          "description": "Clamp oversized read limits and defer oversized by-id batches. Set false to restore strict rejection.",
+          "description": "Clamp oversized read limits and radius (20,040 km), and defer oversized by-id batches. Set false to restore strict rejection, including radius above 500 km.",
           "format": "string",
           "isRequired": false,
           "default": "true"
@@ -117,7 +117,7 @@
         },
         {
           "name": "INATURALIST_CLAMP_LIMITS",
-          "description": "Clamp oversized read limits and defer oversized by-id batches. Set false to restore strict rejection.",
+          "description": "Clamp oversized read limits and radius (20,040 km), and defer oversized by-id batches. Set false to restore strict rejection, including radius above 500 km.",
           "format": "string",
           "isRequired": false,
           "default": "true"
