@@ -6,7 +6,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
+import {
+  applyLimit,
+  LIMIT_CAPS,
+  limitSchema,
+  radiusClampNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   dateRangeInputShape,
@@ -14,8 +19,10 @@ import {
   exceedsWindow,
   LEADERBOARD_WINDOW,
   observationFilterInputShape,
+  observerProjectInputShape,
   resolveArea,
   resolveDateRange,
+  resolveObserver,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText } from '@/mcp-server/tools/observation-record.js';
@@ -35,9 +42,10 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     kind: z
       .enum(['observers', 'identifiers'])
       .describe(
-        'Which leaderboard: "observers" ranks by observations recorded, "identifiers" by identifications made.',
+        'Which leaderboard: "observers" ranks by observations recorded, "identifiers" by identifications made. user_id or user_login scopes observation ownership: observers selects that observer’s own row; identifiers selects people who identified that observer’s observations, not identifications authored by that observer. project_id scopes observations to one project.',
       ),
     ...areaInputShape,
+    ...observerProjectInputShape,
     taxon_id: z
       .number()
       .int()
@@ -115,6 +123,29 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
 
   errors: [
     {
+      reason: 'conflicting_observer',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'user_id and user_login were both supplied.',
+      recovery:
+        'Pass one observer, as user_id or user_login — each names the observer on its own, and a mismatched pair matches nothing.',
+    },
+    {
+      reason: 'unknown_user',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      recovery:
+        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_project_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the project_id does not exist.',
+      recovery:
+        'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_place_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'iNaturalist answered 422 because place_id does not exist.',
@@ -157,7 +188,7 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
       ...requestedInput,
       quality_grade: [...new Set(requestedInput.quality_grade)],
     };
-    const { applied, notice: clampNotice } = applyLimit(
+    const { applied, notice: limitNotice } = applyLimit(
       requestedInput.per_page,
       LIMIT_CAPS.leaderboard,
       ctx,
@@ -169,10 +200,17 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
     }
+    const radiusNotice = radiusClampNotice(area.radiusClamp, ctx, 'inaturalist_get_leaderboard');
+    const clampNotice = [limitNotice, radiusNotice].filter(Boolean).join(' ');
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
       throw ctx.fail('inverted_date_range', dates.message);
+    }
+
+    const observer = resolveObserver(input);
+    if (!observer.ok) {
+      throw ctx.fail('conflicting_observer', observer.message);
     }
 
     // Past 500 both endpoints answer 200 with an empty page, which an agent
@@ -187,6 +225,7 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
     const params: QueryParams & { page: number; per_page: number } = {
       ...area.value,
       ...dates.value,
+      ...observer.value,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       page: input.page,

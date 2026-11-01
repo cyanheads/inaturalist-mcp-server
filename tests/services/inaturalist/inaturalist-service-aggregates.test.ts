@@ -26,6 +26,26 @@ afterEach(() => {
 });
 
 describe('getSpeciesCounts', () => {
+  it('sends exact species rank without substituting an equal-level band, omitting empty arrays', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: () => Response.json({ total_results: 0, results: [] }),
+      },
+    ]);
+    http.install();
+    try {
+      await newService().getSpeciesCounts(
+        { page: 1, per_page: 25, rank: 'species', csi: [], month: [] },
+        createMockContext(),
+      );
+      expect(http.calls[0]?.request.url).toBe(
+        'https://api.inaturalist.org/v1/observations/species_counts?page=1&per_page=25&rank=species',
+      );
+    } finally {
+      http.restore();
+    }
+  });
   it('hits observations/species_counts with the allowed parameter set', async () => {
     const http = createFetchMock([
       {
@@ -162,6 +182,41 @@ describe('getSpeciesCounts', () => {
 });
 
 describe('getHistogram', () => {
+  it('separates observer/project histogram cache identities and reuses identical queries', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: (request) => {
+          const query = new URL(request.url).searchParams;
+          return Response.json({
+            results: {
+              year: { '2026': query.has('project_id') ? 4 : query.get('user_id') === '1' ? 2 : 3 },
+            },
+          });
+        },
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const ctx = createMockContext();
+      expect(await service.getHistogram({ interval: 'year', user_id: 1 }, ctx)).toEqual([
+        { key: '2026', count: 2 },
+      ]);
+      expect(await service.getHistogram({ interval: 'year', user_id: 477 }, ctx)).toEqual([
+        { key: '2026', count: 3 },
+      ]);
+      expect(await service.getHistogram({ interval: 'year', project_id: 185897 }, ctx)).toEqual([
+        { key: '2026', count: 4 },
+      ]);
+      expect(await service.getHistogram({ interval: 'year', user_id: 1 }, ctx)).toEqual([
+        { key: '2026', count: 2 },
+      ]);
+      expect(http.calls).toHaveLength(3);
+    } finally {
+      http.restore();
+    }
+  });
   it('hits observations/histogram and returns the ordered buckets for the requested interval', async () => {
     const http = createFetchMock([
       {
@@ -188,6 +243,69 @@ describe('getHistogram', () => {
       http.restore();
     }
   });
+});
+
+describe('observer/project aggregate service contracts', () => {
+  for (const endpoint of ['histogram', 'observers', 'identifiers'] as const) {
+    it.each([{ user_id: 1 }, { user_login: 'kueda' }, { project_id: 185897 }])(
+      `forwards every observer/project selector to ${endpoint}: %j`,
+      async (filter) => {
+        const http = createFetchMock([
+          {
+            match: /api\.inaturalist\.org/,
+            respond: () =>
+              Response.json({
+                total_results: 0,
+                results: endpoint === 'histogram' ? { year: {} } : [],
+              }),
+          },
+        ]);
+        http.install();
+        try {
+          const service = newService();
+          const ctx = createMockContext();
+          if (endpoint === 'histogram')
+            await service.getHistogram({ interval: 'year', ...filter }, ctx);
+          else await service.getLeaderboard(endpoint, { page: 1, per_page: 25, ...filter }, ctx);
+          const url = new URL(http.calls[0]!.request.url);
+          expect(url.pathname).toBe(`/v1/observations/${endpoint}`);
+          for (const [key, value] of Object.entries(filter))
+            expect(url.searchParams.get(key)).toBe(String(value));
+        } finally {
+          http.restore();
+        }
+      },
+    );
+
+    it.each([
+      [{ user_id: 999999999 }, 'Unknown user_id 999999999', 'unknown_user'],
+      [{ user_login: 'missing-user' }, 'Unknown user_id missing-user', 'unknown_user'],
+      [{ project_id: 999999999 }, 'Unknown project_id: [999999999]', 'unknown_project_id'],
+    ] as const)(
+      `maps nonretryable 422 selectors on ${endpoint}: %j`,
+      async (filter, message, reason) => {
+        const http = createFetchMock([
+          {
+            match: () => true,
+            respond: () => Response.json({ error: message, status: 422 }, { status: 422 }),
+          },
+        ]);
+        http.install();
+        try {
+          const service = newService();
+          const ctx = createMockContext();
+          const result =
+            endpoint === 'histogram'
+              ? service.getHistogram({ interval: 'year', ...filter }, ctx)
+              : service.getLeaderboard(endpoint, { page: 1, per_page: 25, ...filter }, ctx);
+          await expect(result).rejects.toMatchObject({ data: { reason, retryable: false } });
+          expect(http.calls).toHaveLength(1);
+        } finally {
+          http.restore();
+        }
+      },
+    );
+  }
 });
 
 describe('getLeaderboard', () => {

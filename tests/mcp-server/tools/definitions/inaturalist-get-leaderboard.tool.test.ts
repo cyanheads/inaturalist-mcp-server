@@ -7,11 +7,19 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistGetLeaderboard } from '@/mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.js';
 import { LEADERBOARD_WINDOW } from '@/mcp-server/tools/observation-filters.js';
-import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
+import {
+  getINaturalistService,
+  INaturalistService,
+} from '@/services/inaturalist/inaturalist-service.js';
 import {
   asService,
   createFakeService,
@@ -35,6 +43,32 @@ beforeEach(() => {
 function entries(count: number) {
   return Array.from({ length: count }, (_, i) => leaderboardEntry({ rank: i + 1 }));
 }
+
+describe('default request URL characterization', () => {
+  it.each(['observers', 'identifiers'] as const)('preserves the default %s URL', async (kind) => {
+    const http = createFetchMock([
+      { match: () => true, respond: () => Response.json({ total_results: 0, results: [] }) },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetLeaderboard, { kind });
+      expect(result.isError).toBeFalsy();
+      expect(http.calls.map((call) => call.request.url)).toEqual([
+        `https://api.inaturalist.org/v1/observations/${kind}?page=1&per_page=25&quality_grade=research`,
+      ]);
+    } finally {
+      http.restore();
+    }
+  });
+});
 
 describe('input validation', () => {
   it.each(['observers', 'identifiers'] as const)(
@@ -363,6 +397,132 @@ describe('zero-hit and truncation enrichment', () => {
     await inaturalistGetLeaderboard.handler(input, ctx);
 
     expect(getEnrichment(ctx).applied_filters).toEqual({ quality_grade: ['research'] });
+  });
+});
+
+describe('observer and project scope', () => {
+  it('scopes the observers arm to the observer’s own row on both surfaces', async () => {
+    fake.getLeaderboard.mockResolvedValue({
+      total: 1,
+      entries: [{ rank: 1, login: 'kueda', count: 5, species_count: 3 }],
+    });
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'observers',
+      user_id: 1,
+    });
+    expect(fake.getLeaderboard.mock.calls[0]?.slice(0, 2)).toEqual([
+      'observers',
+      expect.objectContaining({ user_id: 1 }),
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      count_metric: 'observations',
+      entries: [{ rank: 1, login: 'kueda', count: 5, species_count: 3 }],
+    });
+    expect(JSON.stringify(result.content)).toContain('5 observations · 3 species_count');
+  });
+  it('keeps past-end guidance about paging with observer/project filters', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 1, entries: [] });
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'identifiers',
+      page: 2,
+      user_id: 1,
+      project_id: 185897,
+    });
+    expect(result.structuredContent).toMatchObject({
+      truncated: false,
+      shown: 0,
+      notice: expect.stringContaining('Page 2 is past the end'),
+    });
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    expect(text).toContain('the filters are not what emptied this page');
+    expect(text).not.toContain('Drop user_id');
+  });
+  it('forwards observer login and project while preserving both output surfaces', async () => {
+    fake.getLeaderboard.mockResolvedValue({
+      total: 1,
+      entries: [{ rank: 1, login: 'identifier', count: 7 }],
+    });
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'identifiers',
+      user_login: 'kueda',
+      project_id: 185897,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getLeaderboard.mock.calls[0]?.[1]).toMatchObject({
+      user_login: 'kueda',
+      project_id: 185897,
+    });
+    expect(result.structuredContent).toMatchObject({
+      entries: [{ rank: 1, login: 'identifier', count: 7 }],
+      count_metric: 'identifications',
+    });
+    expect(JSON.stringify(result.content)).toContain('7 identifications');
+  });
+  it('rejects conflicting observers before requesting with recovery on both surfaces', async () => {
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'identifiers',
+      user_id: 1,
+      user_login: 'kueda',
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'conflicting_observer',
+          recovery: { hint: expect.stringContaining('user_id or user_login') },
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('user_id or user_login');
+    expect(fake.getLeaderboard).not.toHaveBeenCalled();
+  });
+  it('treats a blank login as absent beside a numeric observer', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'identifiers',
+      user_id: 1,
+      user_login: '',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getLeaderboard.mock.calls[0]?.[1]).toMatchObject({
+      user_id: 1,
+      user_login: undefined,
+    });
+  });
+  it.each(['unknown_user', 'unknown_project_id'] as const)(
+    'declares %s recovery on both surfaces',
+    async (reason) => {
+      fake.getLeaderboard.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ValidationError, 'Unknown upstream filter.', { reason }),
+      );
+      const result = await runToolContract(inaturalistGetLeaderboard, {
+        kind: 'identifiers',
+        user_id: 1,
+        project_id: 185897,
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: { reason, recovery: { hint: expect.stringContaining('inaturalist_resolve_name') } },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('inaturalist_resolve_name');
+    },
+  );
+  it('names supplied observer and project filters when no records match on both surfaces', async () => {
+    fake.getLeaderboard.mockResolvedValue({ total: 0, entries: [] });
+    const result = await runToolContract(inaturalistGetLeaderboard, {
+      kind: 'identifiers',
+      user_id: 1,
+      project_id: 185897,
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain('user_id');
+    expect(notice).toContain('project_id');
+    expect(
+      (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join(''),
+    ).toContain(notice);
   });
 });
 

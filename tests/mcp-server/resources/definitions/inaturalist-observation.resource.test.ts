@@ -176,6 +176,20 @@ describe('thread cap and detail fields on a real read', () => {
       identifications: Array.from({ length: count }, (_, i) => rawIdentification({ id: i + 1 })),
     });
 
+  it('preserves full nullable observation timestamps through the resource JSON projection', async () => {
+    const result = await read(
+      rawObservation({ created_at: null, updated_at: '2026-10-31T01:02:03.123456-07:00' }),
+    );
+    expect(inaturalistObservationResource.output?.parse(result)).toMatchObject({
+      created_at: null,
+      updated_at: '2026-10-31T01:02:03.123456-07:00',
+    });
+    expect(JSON.parse(JSON.stringify(result))).toMatchObject({
+      created_at: null,
+      updated_at: '2026-10-31T01:02:03.123456-07:00',
+    });
+  });
+
   it('cuts a thread past 40 to its first 40 entries and reports the upstream total', async () => {
     const result = await read(withThread(1113));
 

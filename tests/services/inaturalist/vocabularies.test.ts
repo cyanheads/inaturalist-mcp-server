@@ -43,11 +43,11 @@ describe('STATIC_VOCABULARIES', () => {
     expect(STATIC_VOCABULARIES.iconic_taxa?.map((entry) => entry.code)).toContain('unknown');
   });
 
-  it('lists all 25 spec ranks, noting rank_level only on the 8 documented rungs', () => {
+  it('lists all 35 usable ranks, noting levels on documented and supplemental rungs', () => {
     const ranks = STATIC_VOCABULARIES.ranks ?? [];
-    expect(ranks).toHaveLength(25);
+    expect(ranks).toHaveLength(35);
     const withLevels = ranks.filter((entry) => entry.notes?.includes('rank_level'));
-    expect(withLevels).toHaveLength(8);
+    expect(withLevels).toHaveLength(18);
     expect(ranks.find((entry) => entry.code === 'species')?.notes).toBe('rank_level 10.');
     expect(ranks.find((entry) => entry.code === 'genushybrid')?.notes).toBeUndefined();
   });

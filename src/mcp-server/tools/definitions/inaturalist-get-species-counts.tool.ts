@@ -1,23 +1,33 @@
 /**
- * @fileoverview Ranks the distinct species recorded in an area and period,
+ * @fileoverview Ranks the taxa recorded in an area and period,
  * most-observed first.
  * @module mcp-server/tools/definitions/inaturalist-get-species-counts.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
+  applyLimit,
+  LIMIT_CAPS,
+  limitSchema,
+  radiusClampNotice,
+} from '@/mcp-server/tools/limit-policy.js';
+import {
+  annotationFilterNotice,
   areaInputShape,
+  blankAsUnset,
   dateRangeInputShape,
   emptyFilterNotice,
   emptyPageNotice,
+  monthInputShape,
   observationFilterInputShape,
   observerProjectInputShape,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
   resolveObserver,
+  resolveRankRange,
+  taxonStatusInputShape,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
@@ -25,13 +35,14 @@ import {
   getINaturalistService,
   type QueryParams,
 } from '@/services/inaturalist/inaturalist-service.js';
+import { RANKS } from '@/services/inaturalist/vocabularies.js';
 
 const SpeciesSchema = z
   .object({
     position: z
       .number()
       .describe(
-        'Absolute place in this ranking, counted from page 1 — 7 is the seventh most-observed species. Not the taxonomic rank, which is rank.',
+        'Absolute place in this ranking, counted from page 1 — 7 is the seventh most-observed taxon. Not the taxonomic rank, which is rank.',
       ),
     taxon_id: z
       .number()
@@ -50,11 +61,11 @@ const SpeciesSchema = z
       .describe('How many matching observations record this taxon. The ranking key.'),
     photo: PhotoSchema.optional().describe('Representative photo, when the taxon carries one.'),
   })
-  .describe('One species and how often it was recorded in the requested area and period.');
+  .describe('One leaf taxon and how often it was recorded in the requested area and period.');
 
 export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts', {
   description:
-    'Rank the distinct species recorded in an area and period, most-observed first — the "what lives here" answer, without paging through individual sightings. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Narrow to a clade by passing taxon_id, e.g. the birds of a park, or to one observer or one project by user_id, user_login, or project_id. Defaults to research-grade, wild-only records and echoes those defaults back. For the most active people rather than the most recorded species, use inaturalist_get_leaderboard.',
+    'Rank leaf taxa recorded in an area and period, most-observed first. Includes hybrids and coarser identifications; subspecies roll up to their species. An area is given in exactly one form: place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box. Narrow to a clade by passing taxon_id, e.g. the birds of a park, or to one observer or one project by user_id, user_login, or project_id. Defaults to research-grade, wild-only records and echoes those defaults back. For the most active people rather than the most recorded taxa, use inaturalist_get_leaderboard.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -70,11 +81,16 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     ...dateRangeInputShape,
     ...observationFilterInputShape,
     ...observerProjectInputShape,
+    ...taxonStatusInputShape,
+    ...monthInputShape,
+    rank: blankAsUnset(z.enum(RANKS).optional()).describe(
+      'Exact identification rank. Unlike hrank/lrank, species does not also select hybrid.',
+    ),
     page: z.number().int().min(1).default(1).describe('Page number. Defaults to 1.'),
     per_page: limitSchema(
       LIMIT_CAPS.speciesCounts,
       25,
-      'Species per page. Raise page to continue the ranking.',
+      'Taxa per page. Raise page to continue the ranking.',
     ),
   }),
 
@@ -82,12 +98,12 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     total_results: z
       .number()
       .describe(
-        'How many distinct species match. An estimate over a live index — it drifts between calls seconds apart.',
+        'How many taxa match. An estimate over a live index — it drifts between calls seconds apart.',
       ),
     species: z
       .array(SpeciesSchema)
       .describe(
-        'The species, ranked by observation_count, most-observed first, each at its absolute position.',
+        'The taxa, ranked by observation_count, most-observed first, each at its absolute position.',
       ),
   }),
 
@@ -98,20 +114,20 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         captive: z.boolean().describe('Captive-only when true, wild-only when false.'),
       })
       .describe('The server-applied defaults that determine what this answer means.'),
-    truncated: z.boolean().describe('True when the page filled per_page and more species follow.'),
-    shown: z.number().describe('How many species this page carries.'),
+    truncated: z.boolean().describe('True when the page filled per_page and more taxa follow.'),
+    shown: z.number().describe('How many taxa this page carries.'),
     cap: z.number().describe('The per_page that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
       .describe(
-        'Observation count of the last species shown. The ranking is descending, so no species left off this page exceeds it.',
+        'Observation count of the last taxon shown. The ranking is descending, so no taxon left off this page exceeds it.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when nothing matched, when the page is past the last one holding species, or how to reach the species beyond this page.',
+        'Guidance when nothing matched, when the page is past the last one holding taxa, or how to reach the taxa beyond this page.',
       ),
   },
 
@@ -123,6 +139,13 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
   },
 
   errors: [
+    {
+      reason: 'inverted_rank_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'hrank is a finer rank level than lrank.',
+      recovery:
+        'Set hrank to the coarser rank and lrank to the finer one; equal bounds select a rank level, while rank selects one exact rank. List ranks with inaturalist_list_reference topic ranks.',
+    },
     {
       reason: 'unknown_place_id',
       code: JsonRpcErrorCode.ValidationError,
@@ -212,6 +235,9 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       throw ctx.fail('unpaired_annotation_value', annotation.message);
     }
 
+    const ranks = resolveRankRange(input);
+    if (!ranks.ok) throw ctx.fail('inverted_rank_range', ranks.message);
+
     const observer = resolveObserver(input);
     if (!observer.ok) {
       throw ctx.fail('conflicting_observer', observer.message);
@@ -222,6 +248,14 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       ...annotation.value,
       ...dates.value,
       ...observer.value,
+      ...ranks.value,
+      rank: input.rank,
+      introduced: input.introduced,
+      native: input.native,
+      threatened: input.threatened,
+      endemic: input.endemic,
+      csi: input.csi,
+      month: input.month,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       captive: input.captive,
@@ -231,10 +265,18 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     };
 
     const hasArea = Object.keys(area.value).length > 0;
-    ctx.log.info('Ranking species for an area', { perPage: input.per_page, hasArea });
+    ctx.log.info('Ranking taxa for an area', { perPage: input.per_page, hasArea });
 
     const { total, species } = await getINaturalistService().getSpeciesCounts(params, ctx);
-    const ignoredFilters = [clampNotice, emptyFilterNotice(input)].filter(Boolean).join(' ');
+    const radiusNotice = radiusClampNotice(area.radiusClamp, ctx, 'inaturalist_get_species_counts');
+    const ignoredFilters = [
+      clampNotice,
+      radiusNotice,
+      emptyFilterNotice(input),
+      annotationFilterNotice(input),
+    ]
+      .filter(Boolean)
+      .join(' ');
 
     // The baseline disclosure rides every path — the enrichment block declares
     // these three as required, and `ctx.enrich.truncated` below overwrites them
@@ -251,13 +293,13 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         ctx.enrich.notice(
           [
             ignoredFilters,
-            emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'species' }),
+            emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'taxa' }),
           ]
             .filter(Boolean)
             .join(' '),
         );
       } else {
-        const lead = 'No species recorded for those filters.';
+        const lead = 'No taxa recorded for those filters.';
         const guidance = wideningGuidance(input, hasArea);
         ctx.enrich.notice([ignoredFilters, lead, guidance].filter(Boolean).join(' '));
       }
@@ -265,7 +307,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     }
 
     if (species.length >= input.per_page && input.page * input.per_page < total) {
-      // The ranking is descending, so the last count shown bounds every species
+      // The ranking is descending, so the last count shown bounds every taxon
       // this page left off.
       const ceiling = species.at(-1)?.observation_count;
       ctx.enrich.truncated({
@@ -274,7 +316,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         ...(ceiling === undefined ? {} : { ceiling }),
         guidance: [
           ignoredFilters,
-          `${total} distinct species match. Raise page to walk further down the ranking, or raise per_page (max ${LIMIT_CAPS.speciesCounts}).`,
+          `${total} taxa match. Raise page to walk further down the ranking, or raise per_page (max ${LIMIT_CAPS.speciesCounts}).`,
         ]
           .filter(Boolean)
           .join(' '),
@@ -285,7 +327,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
   },
 
   format: (result) => {
-    const lines: string[] = [`**total_results:** ${result.total_results} distinct species`];
+    const lines: string[] = [`**total_results:** ${result.total_results} taxa`];
     for (const species of result.species) {
       lines.push(
         '',

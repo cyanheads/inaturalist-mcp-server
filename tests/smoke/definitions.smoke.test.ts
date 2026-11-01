@@ -85,6 +85,8 @@ describe('definition smoke test', () => {
       url: null,
       observed_on: null,
       observed_at: null,
+      created_at: null,
+      updated_at: null,
       taxon: null,
       place_guess: null,
       coordinate: null,

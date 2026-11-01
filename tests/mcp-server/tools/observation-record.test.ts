@@ -17,6 +17,7 @@ import {
   renderPhoto,
   SearchObservationSchema,
 } from '@/mcp-server/tools/observation-record.js';
+import { projectObservation } from '@/services/inaturalist/projections.js';
 import {
   coordinate,
   projectedAnnotation,
@@ -42,6 +43,45 @@ describe('literal relay characterization', () => {
 });
 
 describe('search schema fragment', () => {
+  it('preserves full timestamp strings through projection, parsing and literal rendering', () => {
+    const created_at = `2026-10-31T18:21:59.123456789-07:00${' '.repeat(8_000)}<&amp;>\r\n`;
+    const updated_at = '';
+    const observation = projectObservation({ id: 1, created_at, updated_at });
+    for (const schema of [ObservationSchema, SearchObservationSchema]) {
+      const parsed = schema.parse(observation);
+      expect(parsed.created_at).toBe(created_at);
+      expect(parsed.updated_at).toBe(updated_at);
+      const text = markdownText(renderObservation(parsed).join('\n'));
+      expect(text).toContain(`created_at: ${created_at} · updated_at:`);
+    }
+  });
+
+  it('retains complete observation timestamps on both output schemas and CommonMark', () => {
+    const timestamps = {
+      created_at: '2026-10-31T18:21:59-07:00',
+      updated_at: '2026-10-31T21:14:43-07:00',
+    };
+    for (const schema of [ObservationSchema, SearchObservationSchema]) {
+      const parsed = schema.parse({ ...projectedObservation(), ...timestamps });
+      expect(parsed).toMatchObject(timestamps);
+      const text = markdownText(renderObservation(parsed).join('\n'));
+      expect(text).toContain(`created_at: ${timestamps.created_at}`);
+      expect(text).toContain(`updated_at: ${timestamps.updated_at}`);
+    }
+  });
+
+  it('renders both null observation timestamp keys explicitly', () => {
+    const parsed = ObservationSchema.parse({
+      ...projectedObservation(),
+      created_at: null,
+      updated_at: null,
+    });
+    expect(parsed).toMatchObject({ created_at: null, updated_at: null });
+    const text = markdownText(renderObservation(parsed).join('\n'));
+    expect(text).toContain('created_at: null');
+    expect(text).toContain('updated_at: null');
+  });
+
   it('exports a schema omitting exactly the twelve unreachable detail fields', async () => {
     const detailFields = [
       'identifications',

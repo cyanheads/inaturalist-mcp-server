@@ -123,11 +123,22 @@ const OBSERVATION_FILTER_PARAMS = [
   'iconic_taxa',
 ] as const;
 
-/** Observer and project scoping, probed on `/observations` and `/observations/species_counts` only. */
+/** Observation ownership/project scoping supported by search, counts, histograms and both leaderboards. */
 const OBSERVER_PROJECT_PARAMS = ['user_id', 'user_login', 'project_id'] as const;
+
+const TAXON_STATUS_PARAMS = [
+  'hrank',
+  'lrank',
+  'csi',
+  'threatened',
+  'native',
+  'introduced',
+  'endemic',
+] as const;
 
 const LEADERBOARD_PARAMS = [
   ...AREA_PARAMS,
+  ...OBSERVER_PROJECT_PARAMS,
   'taxon_id',
   'd1',
   'd2',
@@ -153,13 +164,14 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
     ...OBSERVER_PROJECT_PARAMS,
-    'hrank',
-    'lrank',
-    'csi',
-    'threatened',
-    'native',
-    'introduced',
-    'endemic',
+    ...TAXON_STATUS_PARAMS,
+    'month',
+    'acc_below',
+    'obscuration',
+    'created_d1',
+    'created_d2',
+    'updated_since',
+    'identifications',
     'licensed',
     'photo_licensed',
     'license',
@@ -177,12 +189,16 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
     ...OBSERVER_PROJECT_PARAMS,
+    ...TAXON_STATUS_PARAMS,
+    'rank',
+    'month',
     'page',
     'per_page',
   ]),
   'observations/histogram': new Set([
     ...AREA_PARAMS,
     ...OBSERVATION_FILTER_PARAMS,
+    ...OBSERVER_PROJECT_PARAMS,
     'interval',
     'date_field',
     'created_d1',
@@ -677,7 +693,7 @@ export class INaturalistService {
   // ─── Aggregates ─────────────────────────────────────────────────────────────
 
   /**
-   * Distinct species in an area, pre-aggregated upstream and ranked by count.
+   * Leaf taxa in an area, pre-aggregated upstream and ranked by count.
    * Positions are absolute, counted from the page offset against the raw row
    * index — so a row dropped for carrying no taxon leaves a gap rather than
    * renumbering the rows after it.

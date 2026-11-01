@@ -7,18 +7,67 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import {
+  annotationFilterNotice,
   areaInputShape,
+  blankAsUnset,
   dateRangeInputShape,
   emptyPageNotice,
   exceedsWindow,
+  monthInputShape,
   observerProjectInputShape,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
   resolveObserver,
   resolveRankRange,
+  taxonStatusInputShape,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
+
+describe('blankAsUnset optional enums', () => {
+  it('preserves the complete advertised inner schema including defaults', () => {
+    for (const inner of [
+      z.enum(['asc', 'desc']).optional(),
+      z.enum(['asc', 'desc']).default('desc'),
+    ]) {
+      expect(z.toJSONSchema(blankAsUnset(inner))).toEqual(z.toJSONSchema(inner));
+      expect(blankAsUnset(inner).parse('')).toEqual(inner.parse(undefined));
+      expect(blankAsUnset(inner).safeParse(' ').success).toBe(false);
+      expect(blankAsUnset(inner).safeParse('sideways').success).toBe(false);
+    }
+  });
+});
+
+describe('taxon status and month filters', () => {
+  const schema = z.object({ ...taxonStatusInputShape, ...monthInputShape });
+  it.each([0, 13, 1.5])('rejects invalid observed month %s', (month) => {
+    expect(schema.safeParse({ month: [month] }).success).toBe(false);
+  });
+  it('retains empty arrays, false flags and equal-level bands for the caller', () => {
+    expect(
+      schema.parse({ month: [], csi: [], introduced: false, hrank: 'hybrid', lrank: 'species' }),
+    ).toEqual({ month: [], csi: [], introduced: false, hrank: 'hybrid', lrank: 'species' });
+    expect(schema.parse({ hrank: '', lrank: '' })).toEqual({});
+    expect(schema.safeParse({ hrank: 'not-a-rank' }).success).toBe(false);
+  });
+});
+
+describe('annotationFilterNotice', () => {
+  it.each([{}, { term_id: [1], term_value_id: [2] }, { term_id: [1, 1], term_value_id: [2] }])(
+    'omits the union notice for a single distinct member: %j',
+    (input) => {
+      expect(annotationFilterNotice(input)).toBeUndefined();
+    },
+  );
+  it.each([
+    { term_id: [1, 9], term_value_id: [2, 11] },
+    { term_id: [1], term_value_id: [2, 6] },
+    { term_id: [1, 9] },
+  ])('explains membership sets: %j', (input) => {
+    expect(annotationFilterNotice(input)).toContain('any one annotation');
+    expect(annotationFilterNotice(input)).toContain('not positional pairs');
+  });
+});
 
 describe('dateRangeInputShape', () => {
   const schema = z.object(dateRangeInputShape);
@@ -153,12 +202,13 @@ describe('areaInputShape radius', () => {
   it('leaves the lower bound to resolveArea, so 0 and negatives reach invalid_geography with its hint', () => {
     expect(schema.safeParse({ lat: 37, lng: -120, radius: 0 }).success).toBe(true);
     expect(schema.safeParse({ lat: 37, lng: -120, radius: -5 }).success).toBe(true);
-    expect(schema.safeParse({ lat: 37, lng: -120, radius: 501 }).success).toBe(false);
+    expect(schema.safeParse({ lat: 37, lng: -120, radius: 501 }).success).toBe(true);
   });
 
-  it('advertises only the 500 km ceiling in JSON Schema', () => {
+  it('leaves the default-on ceiling to runtime clamping', () => {
     const json = z.toJSONSchema(schema) as { properties: Record<string, Record<string, unknown>> };
-    expect(json.properties.radius).toMatchObject({ type: 'number', maximum: 500 });
+    expect(json.properties.radius).toMatchObject({ type: 'number' });
+    expect(json.properties.radius).not.toHaveProperty('maximum');
     expect(json.properties.radius).not.toHaveProperty('minimum');
     expect(json.properties.radius).not.toHaveProperty('exclusiveMinimum');
   });
@@ -247,6 +297,11 @@ describe('resolveDateRange', () => {
 });
 
 describe('resolveRankRange', () => {
+  it('compares supplemental fractional levels without rounding and preserves ties', () => {
+    expect(resolveRankRange({ hrank: 'parvorder', lrank: 'parvorder' }).ok).toBe(true);
+    expect(resolveRankRange({ hrank: 'zoosubsection', lrank: 'parvorder' }).ok).toBe(false);
+    expect(resolveRankRange({ hrank: 'infrahybrid', lrank: 'form' }).ok).toBe(true);
+  });
   it('resolves to an empty fragment when neither rank is given', () => {
     expect(resolveRankRange({})).toEqual({ ok: true, value: {} });
   });
@@ -341,6 +396,13 @@ describe('observerProjectInputShape', () => {
   it('refuses a non-positive or fractional id', () => {
     expect(schema.safeParse({ user_id: 0 }).success).toBe(false);
     expect(schema.safeParse({ project_id: 1.5 }).success).toBe(false);
+  });
+
+  it('advertises and enforces the upstream int32 project ceiling', () => {
+    expect(schema.safeParse({ project_id: 2147483647 }).success).toBe(true);
+    expect(schema.safeParse({ project_id: 2147483648 }).success).toBe(false);
+    const json = z.toJSONSchema(schema) as { properties: Record<string, unknown> };
+    expect(json.properties.project_id).toMatchObject({ maximum: 2147483647 });
   });
 });
 

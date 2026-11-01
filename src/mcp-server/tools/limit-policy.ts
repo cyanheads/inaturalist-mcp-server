@@ -16,12 +16,14 @@ export const LIMIT_CAPS = {
   leaderboard: 250,
   observationBatch: 10,
   submittedObservationIds: 100,
+  radius: 20_040,
 } as const;
 
 /** Startup snapshot used by validation and execution alike. */
 export const clampLimits = getServerConfig().clampLimits;
 
 type LimitTool =
+  | 'inaturalist_get_histogram'
   | 'inaturalist_resolve_name'
   | 'inaturalist_find_places'
   | 'inaturalist_search_observations'
@@ -29,7 +31,7 @@ type LimitTool =
   | 'inaturalist_get_similar_species'
   | 'inaturalist_get_leaderboard'
   | 'inaturalist_get_observation';
-type LimitField = 'limit' | 'per_page' | 'observation_id';
+type LimitField = 'limit' | 'per_page' | 'observation_id' | 'radius';
 const clampCounter = createCounter(
   'mcp.inaturalist.limits.clamped',
   'Read limits reduced to their documented ceiling',
@@ -69,4 +71,13 @@ export function applyLimit(
   if (requested <= cap) return { applied: requested };
   recordClamp(requested, cap, ctx, tool, field);
   return { applied: cap, notice: `${field} ${requested} was clamped to ${cap}.` };
+}
+
+/** Records a resolved radius clamp and returns its caller-visible notice, when present. */
+export function radiusClampNotice(
+  clamp: { requested: number; applied: number } | undefined,
+  ctx: Context,
+  tool: LimitTool,
+): string | undefined {
+  return clamp ? applyLimit(clamp.requested, clamp.applied, ctx, tool, 'radius').notice : undefined;
 }

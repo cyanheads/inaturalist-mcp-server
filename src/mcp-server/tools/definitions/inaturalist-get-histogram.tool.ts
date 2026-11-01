@@ -6,15 +6,20 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { radiusClampNotice } from '@/mcp-server/tools/limit-policy.js';
 import {
+  annotationFilterNotice,
   areaInputShape,
+  blankAsUnset,
   creationDateRangeInputShape,
   dateRangeInputShape,
   emptyFilterNotice,
   observationFilterInputShape,
+  observerProjectInputShape,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
+  resolveObserver,
 } from '@/mcp-server/tools/observation-filters.js';
 import {
   getINaturalistService,
@@ -60,18 +65,13 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         'Restrict to this taxon and its descendants. Omit to chart every taxon in the area. Resolve a name to an id with inaturalist_resolve_name.',
       ),
     ...areaInputShape,
-    interval: z
-      .enum(INTERVALS)
-      .default('month_of_year')
-      .describe(
-        `Bucketing. month_of_year and week_of_year fold every year together into a seasonal curve; the rest bucket absolute dates. day and hour over a wide date range can generate thousands of buckets — the response is capped at ${HISTOGRAM_BUCKET_CAP}, kept from the start of the range; narrow d1/d2 or use a coarser interval to see the rest.`,
-      ),
-    date_field: z
-      .enum(['observed', 'created'])
-      .default('observed')
-      .describe(
-        'Which date to bucket by: when the organism was observed, or when the record was uploaded.',
-      ),
+    ...observerProjectInputShape,
+    interval: blankAsUnset(z.enum(INTERVALS).default('month_of_year')).describe(
+      `Bucketing. month_of_year and week_of_year fold every year together into a seasonal curve; the rest bucket absolute dates. day and hour over a wide date range can generate thousands of buckets — the response is capped at ${HISTOGRAM_BUCKET_CAP}, kept from the start of the range; narrow d1/d2 or use a coarser interval to see the rest.`,
+    ),
+    date_field: blankAsUnset(z.enum(['observed', 'created']).default('observed')).describe(
+      'Which date to bucket by: when the organism was observed, or when the record was uploaded.',
+    ),
     ...dateRangeInputShape,
     ...creationDateRangeInputShape,
     d1: dateRangeInputShape.d1.describe(
@@ -137,6 +137,29 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
 
   errors: [
     {
+      reason: 'conflicting_observer',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'user_id and user_login were both supplied.',
+      recovery:
+        'Pass one observer, as user_id or user_login — each names the observer on its own, and a mismatched pair matches nothing.',
+    },
+    {
+      reason: 'unknown_user',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      recovery:
+        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'unknown_project_id',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'iNaturalist answered 422 because the project_id does not exist.',
+      recovery:
+        'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_place_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'iNaturalist answered 422 because place_id does not exist.',
@@ -186,6 +209,11 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       throw ctx.fail('inverted_date_range', dates.message);
     }
 
+    const observer = resolveObserver(input);
+    if (!observer.ok) {
+      throw ctx.fail('conflicting_observer', observer.message);
+    }
+
     const annotation = resolveAnnotation(input);
     if (!annotation.ok) {
       throw ctx.fail('unpaired_annotation_value', annotation.message);
@@ -195,6 +223,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       ...area.value,
       ...annotation.value,
       ...dates.value,
+      ...observer.value,
       taxon_id: input.taxon_id,
       quality_grade: input.quality_grade,
       captive: input.captive,
@@ -230,8 +259,11 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
     // so a genuinely empty answer is recognised even when the cap bites — and
     // its notice replaces the truncation guidance, since narrowing the range
     // would not help. The notice is written once, on whichever call applies.
+    const radiusNotice = radiusClampNotice(area.radiusClamp, ctx, 'inaturalist_get_histogram');
     const notice = [
+      radiusNotice,
       emptyFilterNotice(input),
+      annotationFilterNotice(input),
       total === 0 ? zeroHitNotice(input, Object.keys(area.value).length > 0) : undefined,
     ]
       .filter(Boolean)
@@ -284,6 +316,9 @@ function zeroHitNotice(
     created_d2?: string | undefined;
     term_id?: readonly number[] | undefined;
     iconic_taxa?: readonly string[] | undefined;
+    user_id?: number | undefined;
+    user_login?: string | undefined;
+    project_id?: number | undefined;
   },
   hasArea: boolean,
 ): string {
@@ -293,6 +328,9 @@ function zeroHitNotice(
   const hasAnnotation = (input.term_id?.length ?? 0) > 0;
   const iconic = input.iconic_taxa?.length ? input.iconic_taxa.join(', ') : undefined;
   const narrowing = [
+    ...(input.user_id !== undefined ? ['the user_id observer filter'] : []),
+    ...(input.user_login !== undefined ? ['the user_login observer filter'] : []),
+    ...(input.project_id !== undefined ? ['the project_id filter'] : []),
     ...(hasAnnotation ? ['the annotation filter'] : []),
     ...(iconic ? [`iconic_taxa ${iconic}`] : []),
   ];
@@ -314,6 +352,14 @@ function zeroHitNotice(
     finding = `Every bucket is zero — no records${of}${where} match ${narrowing.join(' and ')}.`;
   }
   const filterChecks = [
+    ...(input.user_id !== undefined || input.user_login !== undefined
+      ? [
+          'Drop the observer filter or confirm the observer with inaturalist_resolve_name type user.',
+        ]
+      : []),
+    ...(input.project_id !== undefined
+      ? ['Drop project_id or confirm the project with inaturalist_resolve_name type project.']
+      : []),
     ...(hasAnnotation
       ? [
           `Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms${hasTaxon ? ' and taxon_id' : ''}, or drop the annotation filter.`,

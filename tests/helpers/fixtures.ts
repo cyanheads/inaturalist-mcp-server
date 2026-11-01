@@ -316,6 +316,8 @@ export function projectedObservation(
     url: 'https://www.inaturalist.org/observations/401617560',
     observed_on: '2026-06-01',
     observed_at: '2026-06-01T10:00:00-07:00',
+    created_at: null,
+    updated_at: null,
     taxon: taxonSummary(),
     place_guess: 'Seattle, WA',
     coordinate: coordinate(),

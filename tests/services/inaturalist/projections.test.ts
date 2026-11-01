@@ -290,6 +290,38 @@ describe('projectTaxonSummary / projectTaxonRecord', () => {
 });
 
 describe('projectObservation', () => {
+  it('relays creation and update timestamps verbatim on search and detail records', () => {
+    const timestamps = {
+      created_at: '2026-10-31T18:21:59-07:00',
+      updated_at: '2026-10-31T21:14:43-07:00',
+    };
+    for (const detail of [false, true]) {
+      expect(projectObservation({ ...rawObservation(), ...timestamps }, { detail })).toMatchObject(
+        timestamps,
+      );
+    }
+  });
+
+  it('relays omitted and explicit-null observation timestamps as null keys', () => {
+    for (const raw of [{ id: 1 }, { id: 1, created_at: null, updated_at: null }]) {
+      for (const detail of [false, true]) {
+        expect(projectObservation(raw, { detail })).toMatchObject({
+          created_at: null,
+          updated_at: null,
+        });
+      }
+    }
+  });
+
+  it('preserves observation dates independently of detail projection', () => {
+    for (const detail of [false, true]) {
+      expect(projectObservation(rawObservation(), { detail })).toMatchObject({
+        observed_on: '2026-06-01',
+        observed_at: '2026-06-01T10:00:00-07:00',
+      });
+    }
+  });
+
   it('projects the default record with no expansion arrays present', () => {
     const observation = projectObservation(rawObservation());
     expect(observation).toMatchObject({

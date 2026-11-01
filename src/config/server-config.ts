@@ -20,7 +20,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(true)
     .describe(
-      'Clamp oversized read limits to their documented ceiling. False restores strict rejection.',
+      'Clamp oversized read limits and radius to their documented ceilings. False restores strict rejection, including the legacy 500 km radius ceiling.',
     ),
   userAgent: z
     .string()

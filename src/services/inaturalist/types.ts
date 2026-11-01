@@ -90,6 +90,8 @@ export type RawObservation = {
   uri?: string | null;
   observed_on?: string | null;
   time_observed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
   taxon?: RawTaxon | null;
   community_taxon?: RawTaxon | null;
   place_guess?: string | null;
@@ -299,6 +301,8 @@ export type ProjectedObservation = {
   url: string | null;
   observed_on: string | null;
   observed_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
   taxon: TaxonSummary | null;
   place_guess: string | null;
   coordinate: Coordinate | null;

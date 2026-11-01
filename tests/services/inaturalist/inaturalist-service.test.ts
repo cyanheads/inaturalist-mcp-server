@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe('parameter allowlist', () => {
-  it('forwards creation bounds only for histograms and sounds only for search', () => {
+  it('forwards creation bounds for histograms/search and sounds only for search', () => {
     const service = internals(newService());
     expect(
       service.buildUrl({
@@ -96,20 +96,21 @@ describe('parameter allowlist', () => {
     expect(url).toBe('https://api.inaturalist.org/v1/taxa/autocomplete?per_page=10&q=monarch');
   });
 
-  it('allows the observer and project filters on observations and species_counts only', () => {
+  it('allows observer/project filters on search, counts, histogram and both leaderboards', () => {
     const service = newService();
     const params = { user_id: 1, user_login: 'kueda', project_id: 227779 };
-    for (const endpoint of ['observations', 'observations/species_counts'] as const) {
+    for (const endpoint of [
+      'observations',
+      'observations/species_counts',
+      'observations/histogram',
+      'observations/observers',
+      'observations/identifiers',
+    ] as const) {
       expect(internals(service).buildUrl({ endpoint, params })).toContain(
         '?project_id=227779&user_id=1&user_login=kueda',
       );
     }
-    for (const endpoint of [
-      'observations/histogram',
-      'observations/observers',
-      'observations/identifiers',
-      'identifications/similar_species',
-    ] as const) {
+    for (const endpoint of ['identifications/similar_species'] as const) {
       for (const key of Object.keys(params)) {
         expect(() => internals(service).buildUrl({ endpoint, params: { [key]: 1 } })).toThrow(
           McpError,

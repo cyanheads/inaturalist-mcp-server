@@ -150,6 +150,14 @@ export const ObservationSchema = z
       .nullable()
       .describe('Observation date, YYYY-MM-DD. Null when the observer recorded no date.'),
     observed_at: z.string().nullable().describe('Observation timestamp with offset, ISO 8601.'),
+    created_at: z
+      .string()
+      .nullable()
+      .describe('Record creation timestamp, verbatim from upstream. Null when absent.'),
+    updated_at: z
+      .string()
+      .nullable()
+      .describe('Record update timestamp, verbatim from upstream. Null when absent.'),
     taxon: TaxonSummarySchema.nullable().describe(
       'Current identification. Null when nobody has identified the record.',
     ),
@@ -398,6 +406,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
   if (observation.taxon) lines.push(`**Identified as:** ${taxonLine(observation.taxon)}`);
   lines.push(
     `**Observed:** ${inlineText(observation.observed_on ?? 'date not recorded')} · ${inlineText(observation.observed_at ?? 'no timestamp recorded')}`,
+    `**created_at:** ${inlineText(observation.created_at ?? 'null')} · **updated_at:** ${inlineText(observation.updated_at ?? 'null')}`,
   );
 
   const coordinate = observation.coordinate;

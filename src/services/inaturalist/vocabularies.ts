@@ -55,10 +55,15 @@ export const RANKS = [
   'superclass',
   'class',
   'subclass',
+  'infraclass',
+  'subterclass',
   'superorder',
   'order',
   'suborder',
   'infraorder',
+  'parvorder',
+  'zoosection',
+  'zoosubsection',
   'superfamily',
   'epifamily',
   'family',
@@ -68,11 +73,16 @@ export const RANKS = [
   'subtribe',
   'genus',
   'genushybrid',
+  'subgenus',
+  'section',
+  'subsection',
+  'complex',
   'species',
   'hybrid',
   'subspecies',
   'variety',
   'form',
+  'infrahybrid',
 ] as const;
 
 export type Rank = (typeof RANKS)[number];
@@ -91,10 +101,15 @@ export const RANK_LEVEL: Readonly<Record<Rank, number>> = {
   superclass: 53,
   class: 50,
   subclass: 47,
+  infraclass: 45,
+  subterclass: 44,
   superorder: 43,
   order: 40,
   suborder: 37,
   infraorder: 35,
+  parvorder: 34.5,
+  zoosection: 34,
+  zoosubsection: 33.5,
   superfamily: 33,
   epifamily: 32,
   family: 30,
@@ -104,11 +119,16 @@ export const RANK_LEVEL: Readonly<Record<Rank, number>> = {
   subtribe: 24,
   genus: 20,
   genushybrid: 20,
+  subgenus: 15,
+  section: 13,
+  subsection: 12,
+  complex: 11,
   species: 10,
   hybrid: 10,
   subspecies: 5,
   variety: 5,
   form: 5,
+  infrahybrid: 5,
 };
 
 export const CONSERVATION_STATUS_CODES = ['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX'] as const;
@@ -123,7 +143,7 @@ export const LICENSE_CODES = [
   'cc0',
 ] as const;
 
-/** The rungs whose rank level the spec documents; the ranks topic notes only these. */
+/** Levels published in the API spec or its supplemental Taxon.ranks source table. */
 const DOCUMENTED_RANK_LEVELS: ReadonlySet<Rank> = new Set([
   'kingdom',
   'phylum',
@@ -133,6 +153,16 @@ const DOCUMENTED_RANK_LEVELS: ReadonlySet<Rank> = new Set([
   'genus',
   'species',
   'subspecies',
+  'complex',
+  'subsection',
+  'section',
+  'subgenus',
+  'infrahybrid',
+  'zoosection',
+  'zoosubsection',
+  'parvorder',
+  'subterclass',
+  'infraclass',
 ]);
 
 const QUALITY_GRADE_ENTRIES: readonly VocabularyEntry[] = [

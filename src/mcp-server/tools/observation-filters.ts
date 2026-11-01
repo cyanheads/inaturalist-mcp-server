@@ -13,11 +13,14 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { clampLimits, LIMIT_CAPS } from '@/mcp-server/tools/limit-policy.js';
 import type { QueryParams } from '@/services/inaturalist/inaturalist-service.js';
 import {
+  CONSERVATION_STATUS_CODES,
   ICONIC_TAXA,
   QUALITY_GRADES,
   RANK_LEVEL,
+  RANKS,
   type Rank,
 } from '@/services/inaturalist/vocabularies.js';
 
@@ -65,6 +68,9 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
 /** The upstream result window: `page × per_page` past this answers HTTP 403. */
 export const RESULT_WINDOW = 10_000;
 
+/** Elasticsearch's signed-int ceiling for project_id and observation id_below. */
+export const UPSTREAM_INT_MAX = 2_147_483_647;
+
 /**
  * The addressable window on `/observations/observers` and
  * `/observations/identifiers` — far tighter than the 10,000 above, and unsignalled:
@@ -99,12 +105,10 @@ export const areaInputShape = {
     .max(180)
     .optional()
     .describe('Longitude of the search centre, in decimal degrees. Requires lat and radius.'),
-  radius: z
-    .number()
-    .max(500)
+  radius: (clampLimits ? z.number() : z.number().max(500))
     .optional()
     .describe(
-      'Search radius around lat/lng, in KILOMETRES, greater than 0. Requires lat and lng. The upstream publishes no bound; 500 is a verified ceiling this server imposes.',
+      `Search radius around lat/lng, in KILOMETRES, greater than 0. Requires lat and lng. Ceiling: ${clampLimits ? LIMIT_CAPS.radius : 500}; oversized values are ${clampLimits ? 'clamped with notice' : 'rejected'}.`,
     ),
   nelat: z
     .number()
@@ -148,7 +152,7 @@ export const dateRangeInputShape = {
   d2: blankAsUnset(observedOnDate).describe('Latest observation date, YYYY-MM-DD. Inclusive.'),
 };
 
-/** Upload-calendar bounds, accepted only by the histogram tool. */
+/** Upload-calendar bounds, independent of observation-date bounds. */
 export const creationDateRangeInputShape = {
   created_d1: blankAsUnset(observedOnDate).describe(
     'Earliest upload date, YYYY-MM-DD. Inclusive. Must be on or before created_d2.',
@@ -156,14 +160,30 @@ export const creationDateRangeInputShape = {
   created_d2: blankAsUnset(observedOnDate).describe('Latest upload date, YYYY-MM-DD. Inclusive.'),
 };
 
+/** Calendar date or timezone-bearing ISO datetime, with calendar validity enforced by the date schemas. */
+export const updatedSinceInputShape = {
+  updated_since: blankAsUnset(
+    z.union([observedOnDate.unwrap(), z.iso.datetime({ offset: true })]).optional(),
+  ).describe(
+    'Records updated since this calendar date (YYYY-MM-DD) or ISO datetime with timezone, e.g. 2026-10-30T12:00:00Z.',
+  ),
+};
+
 /** Names ignored optional filter arrays without changing their accepted shape. */
 export function emptyFilterNotice(input: object): string | undefined {
   const fields = Object.entries(input)
     .filter(
       ([key, value]) =>
-        ['license', 'photo_license', 'csi', 'term_id', 'term_value_id', 'iconic_taxa'].includes(
-          key,
-        ) &&
+        [
+          'license',
+          'photo_license',
+          'csi',
+          'term_id',
+          'term_value_id',
+          'iconic_taxa',
+          'month',
+          'obscuration',
+        ].includes(key) &&
         Array.isArray(value) &&
         value.length === 0,
     )
@@ -171,6 +191,15 @@ export function emptyFilterNotice(input: object): string | undefined {
   return fields.length > 0
     ? `${fields.join(', ')} ${fields.length === 1 ? 'was' : 'were'} empty and ignored; omit empty filters to search without those restrictions.`
     : undefined;
+}
+
+/** Explains the union semantics when an annotation filter has several distinct members. */
+export function annotationFilterNotice(input: {
+  term_id?: readonly number[] | undefined;
+  term_value_id?: readonly number[] | undefined;
+}): string | undefined {
+  if (new Set(input.term_id).size <= 1 && new Set(input.term_value_id).size <= 1) return;
+  return 'Multiple annotation values match any one annotation whose attribute is in term_id and whose value is in term_value_id when supplied; these are membership sets, not positional pairs or a requirement to match both annotations.';
 }
 
 /** The two defaults that most determine what an answer means, plus the annotation pair. */
@@ -192,13 +221,13 @@ export const observationFilterInputShape = {
     .array(z.number().int().min(1))
     .optional()
     .describe(
-      'Annotation attribute ids, from inaturalist_list_reference topic controlled_terms — e.g. 1 for Life Stage.',
+      'Annotation attribute ids, from inaturalist_list_reference topic controlled_terms — e.g. 1 for Life Stage. Multiple ids match any one annotation, not all annotations; arrays are membership sets, not positional pairs.',
     ),
   term_value_id: z
     .array(z.number().int().min(1))
     .optional()
     .describe(
-      'Annotation value ids, from the same attribute listing — e.g. 6 for Larva. Requires term_id; sent alone it is ignored upstream and the unfiltered corpus comes back.',
+      'Annotation value ids, from the same attribute listing — e.g. 6 for Larva. Requires term_id; sent alone it is ignored upstream and the unfiltered corpus comes back. Multiple ids match any one annotation with an attribute in term_id and a value in this set, not both annotations.',
     ),
   iconic_taxa: z
     .array(z.enum(ICONIC_TAXA))
@@ -231,11 +260,99 @@ export const observerProjectInputShape = {
     .number()
     .int()
     .min(1)
+    .max(UPSTREAM_INT_MAX)
     .optional()
     .describe(
       'Restrict to observations in one project, by numeric project id from inaturalist_resolve_name type project.',
     ),
 };
+
+/** Establishment, conservation and rank-level filters supported by search and taxon counts. */
+export const taxonStatusInputShape = {
+  hrank: blankAsUnset(z.enum(RANKS).optional()).describe(
+    'Highest (coarsest) identification rank level to accept. Must be at or above lrank.',
+  ),
+  lrank: blankAsUnset(z.enum(RANKS).optional()).describe(
+    'Lowest (finest) identification rank level to accept. Equal bounds select a level, including ranks sharing that level such as species and hybrid.',
+  ),
+  csi: z
+    .array(z.enum(CONSERVATION_STATUS_CODES))
+    .optional()
+    .describe(
+      'IUCN-normalised conservation status codes. Matches global statuses plus statuses listed at exactly place_id, excluding ancestor-place listings; decode with inaturalist_list_reference topic conservation_status_codes.',
+    ),
+  threatened: z
+    .boolean()
+    .optional()
+    .describe('Filter the observation’s indexed taxon as threatened at its location.'),
+  native: z
+    .boolean()
+    .optional()
+    .describe('Filter the observation’s indexed taxon as native at its location.'),
+  introduced: z
+    .boolean()
+    .optional()
+    .describe('Filter the observation’s indexed taxon as introduced at its location.'),
+  endemic: z
+    .boolean()
+    .optional()
+    .describe('Filter the observation’s indexed taxon as endemic at its location.'),
+};
+
+/** Observed calendar months; exposed only on endpoints that forward this filter. */
+export const monthInputShape = {
+  month: z
+    .array(z.number().int().min(1).max(12))
+    .optional()
+    .describe('Observed calendar months, 1–12, matched as alternatives.'),
+};
+
+/** Optional narrowing filters whose supplied values can explain a zero-hit query. */
+export type OptionalNarrowingFilters = {
+  introduced?: boolean | undefined;
+  native?: boolean | undefined;
+  threatened?: boolean | undefined;
+  endemic?: boolean | undefined;
+  csi?: readonly string[] | undefined;
+  hrank?: string | undefined;
+  lrank?: string | undefined;
+  rank?: string | undefined;
+  month?: readonly number[] | undefined;
+  acc_below?: number | undefined;
+  obscuration?: readonly string[] | undefined;
+  created_d1?: string | undefined;
+  created_d2?: string | undefined;
+  updated_since?: string | undefined;
+  identifications?: string | undefined;
+};
+
+/** Names only supplied, nonempty filters; empty arrays already have an ignored-filter notice. */
+export function optionalFilterGuidance(input: OptionalNarrowingFilters): string[] {
+  return (
+    [
+      'introduced',
+      'native',
+      'threatened',
+      'endemic',
+      'csi',
+      'hrank',
+      'lrank',
+      'rank',
+      'month',
+      'acc_below',
+      'obscuration',
+      'created_d1',
+      'created_d2',
+      'updated_since',
+      'identifications',
+    ] as const
+  ).flatMap((key) => {
+    const value = input[key];
+    return value === undefined || (Array.isArray(value) && value.length === 0)
+      ? []
+      : [`drop ${key}`];
+  });
+}
 
 export type AreaInput = {
   place_id?: number | undefined;
@@ -257,7 +374,9 @@ function present(...values: Array<number | undefined>): number {
  * them, or explains why the combination cannot be sent. No area at all is a
  * valid global search and resolves to an empty fragment.
  */
-export function resolveArea(input: AreaInput): FilterResult<QueryParams> {
+export function resolveArea(
+  input: AreaInput,
+): FilterResult<QueryParams> & { radiusClamp?: { requested: number; applied: number } } {
   const triple = present(input.lat, input.lng, input.radius);
   const box = present(input.nelat, input.nelng, input.swlat, input.swlng);
   const place = input.place_id === undefined ? 0 : 1;
@@ -285,15 +404,22 @@ export function resolveArea(input: AreaInput): FilterResult<QueryParams> {
   }
 
   if (place === 1) return { ok: true, value: { place_id: input.place_id } };
-  if (triple === 3) {
+  if (input.radius !== undefined) {
     // Upstream answers a radius of 0 or less with HTTP 500, which the client then retries.
-    if ((input.radius ?? 0) <= 0) {
+    if (input.radius <= 0) {
       return {
         ok: false,
         message: `radius must be greater than 0 kilometres; ${input.radius} was supplied. Upstream fails on a radius of 0 or less rather than returning an empty result.`,
       };
     }
-    return { ok: true, value: { lat: input.lat, lng: input.lng, radius: input.radius } };
+    const radius = Math.min(input.radius, clampLimits ? LIMIT_CAPS.radius : 500);
+    return {
+      ok: true,
+      value: { lat: input.lat, lng: input.lng, radius },
+      ...(radius !== input.radius
+        ? { radiusClamp: { requested: input.radius, applied: radius } }
+        : {}),
+    };
   }
   const bboxProblem = checkBoundingBox(input);
   if (bboxProblem) return { ok: false, message: bboxProblem };
@@ -456,7 +582,7 @@ export function emptyPageNotice(args: {
  * caller controls narrowed the query.
  */
 export function wideningGuidance(
-  input: {
+  input: OptionalNarrowingFilters & {
     d1?: string | undefined;
     d2?: string | undefined;
     taxon_id?: number | undefined;
@@ -469,6 +595,7 @@ export function wideningGuidance(
 ): string | undefined {
   const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
   const options = [
+    ...optionalFilterGuidance(input),
     ...(input.d1 !== undefined || input.d2 !== undefined ? ['widen or drop d1/d2'] : []),
     ...(hasArea ? ['widen the area'] : []),
     ...(input.taxon_id !== undefined

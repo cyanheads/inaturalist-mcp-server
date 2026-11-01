@@ -7,22 +7,35 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
 import {
+  applyLimit,
+  LIMIT_CAPS,
+  limitSchema,
+  radiusClampNotice,
+} from '@/mcp-server/tools/limit-policy.js';
+import {
+  annotationFilterNotice,
   areaInputShape,
   blankAsUnset,
+  creationDateRangeInputShape,
   dateRangeInputShape,
   emptyFilterNotice,
   emptyPageNotice,
   exceedsWindow,
+  monthInputShape,
+  type OptionalNarrowingFilters,
   observationFilterInputShape,
   observerProjectInputShape,
+  optionalFilterGuidance,
   RESULT_WINDOW,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
   resolveObserver,
   resolveRankRange,
+  taxonStatusInputShape,
+  UPSTREAM_INT_MAX,
+  updatedSinceInputShape,
 } from '@/mcp-server/tools/observation-filters.js';
 import {
   renderObservation,
@@ -33,11 +46,7 @@ import {
   type QueryParams,
 } from '@/services/inaturalist/inaturalist-service.js';
 import type { ObservationExpansion } from '@/services/inaturalist/types.js';
-import {
-  CONSERVATION_STATUS_CODES,
-  LICENSE_CODES,
-  RANKS,
-} from '@/services/inaturalist/vocabularies.js';
+import { LICENSE_CODES } from '@/services/inaturalist/vocabularies.js';
 
 const RESPONSE_BUDGET_BYTES = 50_000;
 const RESPONSE_OVERHEAD_BYTES = 4_096;
@@ -120,37 +129,27 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     ...dateRangeInputShape,
     ...observationFilterInputShape,
     ...observerProjectInputShape,
-    hrank: z
-      .enum(RANKS)
+    ...taxonStatusInputShape,
+    ...monthInputShape,
+    ...creationDateRangeInputShape,
+    ...updatedSinceInputShape,
+    acc_below: z
+      .number()
+      .positive()
+      .max(UPSTREAM_INT_MAX)
       .optional()
       .describe(
-        'Highest (coarsest) taxonomic rank of the identification to accept. Must be at or above lrank; ranks compare by rank level.',
+        'Measured positional accuracy strictly below this positive threshold in metres, up to 2147483647; fractional metres are accepted. Records without measured accuracy are excluded.',
       ),
-    lrank: z
-      .enum(RANKS)
+    obscuration: z
+      .array(z.enum(['obscured', 'private', 'none']))
       .optional()
       .describe(
-        'Lowest (finest) taxonomic rank of the identification to accept. Equal to hrank for an exact-rank match.',
+        'Observer or taxon geoprivacy values to include; none requires both to be open or unset. Multiple values match alternatives.',
       ),
-    csi: z
-      .array(z.enum(CONSERVATION_STATUS_CODES))
-      .optional()
-      .describe(
-        'IUCN-normalised conservation status codes to include, e.g. ["EN","CR"]. Decode them with inaturalist_list_reference topic conservation_status_codes.',
-      ),
-    threatened: z
-      .boolean()
-      .optional()
-      .describe('Restrict to taxa considered threatened where observed.'),
-    native: z.boolean().optional().describe('Restrict to taxa native to the observation location.'),
-    introduced: z
-      .boolean()
-      .optional()
-      .describe('Restrict to taxa introduced to the observation location.'),
-    endemic: z
-      .boolean()
-      .optional()
-      .describe('Restrict to taxa endemic to the observation location.'),
+    identifications: blankAsUnset(
+      z.enum(['most_agree', 'some_agree', 'most_disagree']).optional(),
+    ).describe('Filter community identification agreement using one agreement category.'),
     licensed: z
       .boolean()
       .optional()
@@ -184,17 +183,13 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     q: blankAsUnset(z.string().min(1).optional()).describe(
       'Free text matched across observation properties.',
     ),
-    search_on: z
-      .enum(['names', 'tags', 'description', 'place'])
-      .optional()
-      .describe('Narrow what q matches against. Requires q.'),
-    order_by: z
-      .enum(ORDER_BY)
-      .default('observed_on')
-      .describe(
-        'Sort field. Set "id" with order "desc" to walk past 10,000 results: that is the one ordering next_cursor continues, so it is the only one that issues a next_cursor. A cursor forces it.',
-      ),
-    order: z.enum(['asc', 'desc']).default('desc').describe('Sort direction.'),
+    search_on: blankAsUnset(z.enum(['names', 'tags', 'description', 'place']).optional()).describe(
+      'Narrow what q matches against. Requires q.',
+    ),
+    order_by: blankAsUnset(z.enum(ORDER_BY).default('observed_on')).describe(
+      'Sort field. Set "id" with order "desc" to walk past 10,000 results: that is the one ordering next_cursor continues, so it is the only one that issues a next_cursor. A cursor forces it.',
+    ),
+    order: blankAsUnset(z.enum(['asc', 'desc']).default('desc')).describe('Sort direction.'),
     page: z
       .number()
       .int()
@@ -207,6 +202,9 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       z
         .string()
         .regex(/^[1-9]\d*$/)
+        .refine((value) => Number(value) <= UPSTREAM_INT_MAX, {
+          message: `Must be at most ${UPSTREAM_INT_MAX}.`,
+        })
         .optional(),
     ).describe(
       'next_cursor from a previous id-descending page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces order_by "id", order "desc".',
@@ -278,16 +276,16 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     {
       reason: 'inverted_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'd1 is after d2.',
+      when: 'd1 is after d2, or created_d1 is after created_d2.',
       recovery:
-        'Pass d1 on or before d2 — both bounds are inclusive, so equal dates select a single day.',
+        'Pass d1 on or before d2 and created_d1 on or before created_d2; observation and upload bounds are independent, inclusive calendar dates.',
     },
     {
       reason: 'inverted_rank_range',
       code: JsonRpcErrorCode.ValidationError,
       when: 'hrank is a finer rank than lrank.',
       recovery:
-        'Set hrank to the coarser rank and lrank to the finer one, or pass the same rank to both for an exact-rank match; list the ranks with inaturalist_list_reference topic ranks.',
+        'Set hrank to the coarser rank and lrank to the finer one; equal bounds select a rank level, including ranks sharing that level. List ranks with inaturalist_list_reference topic ranks.',
     },
     {
       reason: 'result_window_exceeded',
@@ -421,6 +419,11 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       captive: input.captive,
       iconic_taxa: input.iconic_taxa,
       csi: input.csi,
+      month: input.month,
+      acc_below: input.acc_below,
+      obscuration: input.obscuration,
+      updated_since: input.updated_since,
+      identifications: input.identifications,
       threatened: input.threatened,
       native: input.native,
       introduced: input.introduced,
@@ -451,9 +454,17 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       ctx,
     );
     const ignoredFilters = emptyFilterNotice(input);
-    const notices = [limit.notice, ignoredFilters].filter(
-      (notice): notice is string => notice !== undefined,
+    const radiusNotice = radiusClampNotice(
+      area.radiusClamp,
+      ctx,
+      'inaturalist_search_observations',
     );
+    const notices = [
+      limit.notice,
+      radiusNotice,
+      ignoredFilters,
+      annotationFilterNotice(input),
+    ].filter((notice): notice is string => notice !== undefined);
 
     /** Required disclosure on every path; nonempty pages update it after budgeting. */
     ctx.enrich({
@@ -562,20 +573,25 @@ function formatSearchPage(result: SearchPage) {
  * relaxes one thing rather than guessing. Composed by condition, most specific
  * first, and never naming a filter the call did not supply.
  */
-function zeroHitNotice(input: {
-  quality_grade: readonly string[];
-  captive: boolean;
-  sounds?: boolean | undefined;
-  taxon_id?: number | undefined;
-  d1?: string | undefined;
-  d2?: string | undefined;
-  term_id?: readonly number[] | undefined;
-  radius?: number | undefined;
-  user_id?: number | undefined;
-  user_login?: string | undefined;
-  project_id?: number | undefined;
-}): string {
+function zeroHitNotice(
+  input: OptionalNarrowingFilters & {
+    quality_grade: readonly string[];
+    captive: boolean;
+    sounds?: boolean | undefined;
+    taxon_id?: number | undefined;
+    d1?: string | undefined;
+    d2?: string | undefined;
+    term_id?: readonly number[] | undefined;
+    radius?: number | undefined;
+    user_id?: number | undefined;
+    user_login?: string | undefined;
+    project_id?: number | undefined;
+  },
+): string {
   const fragments: string[] = [];
+  const optionalGuidance = optionalFilterGuidance(input);
+  if (optionalGuidance.length > 0)
+    fragments.push(`Relax supplied filters one at a time: ${optionalGuidance.join(', ')}.`);
 
   if (input.quality_grade.length === 1 && input.quality_grade[0] === 'research') {
     fragments.push(

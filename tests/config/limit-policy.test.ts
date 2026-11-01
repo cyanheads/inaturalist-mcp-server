@@ -23,6 +23,52 @@ afterEach(() => {
 });
 
 describe('limit policy', () => {
+  it.each(['true', 'false'])('advertises and validates radius under %s policy', async (mode) => {
+    vi.stubEnv('INATURALIST_CLAMP_LIMITS', mode);
+    vi.resetModules();
+    const { areaInputShape, resolveArea } = await import(
+      '@/mcp-server/tools/observation-filters.js'
+    );
+    const schema = z.object(areaInputShape);
+    expect(schema.safeParse({ lat: 47.6, lng: -122.3, radius: 501 }).success).toBe(mode === 'true');
+    expect(z.toJSONSchema(schema).properties?.radius).toMatchObject(
+      mode === 'false' ? { maximum: 500 } : { type: 'number' },
+    );
+    if (mode === 'true') {
+      expect(z.toJSONSchema(schema).properties?.radius).not.toHaveProperty('maximum');
+      for (const radius of [3000, 20040])
+        expect(resolveArea({ lat: 47.6, lng: -122.3, radius })).toEqual({
+          ok: true,
+          value: { lat: 47.6, lng: -122.3, radius },
+        });
+      expect(resolveArea({ lat: 47.6, lng: -122.3, radius: 20041 })).toEqual({
+        ok: true,
+        value: { lat: 47.6, lng: -122.3, radius: 20040 },
+        radiusClamp: { requested: 20041, applied: 20040 },
+      });
+    }
+  });
+  it('records one radius event and log with the existing bounded labels', async () => {
+    const { radiusClampNotice } = await import('@/mcp-server/tools/limit-policy.js');
+    const ctx = createMockContext();
+    const log = vi.spyOn(ctx.log, 'info');
+    expect(radiusClampNotice(undefined, ctx, 'inaturalist_get_histogram')).toBeUndefined();
+    expect(add).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(
+      radiusClampNotice({ requested: 20041, applied: 20040 }, ctx, 'inaturalist_get_histogram'),
+    ).toBe('radius 20041 was clamped to 20040.');
+    expect(add).toHaveBeenCalledExactlyOnceWith(1, {
+      tool: 'inaturalist_get_histogram',
+      field: 'radius',
+    });
+    expect(log).toHaveBeenCalledExactlyOnceWith('Read limit clamped', {
+      tool: 'inaturalist_get_histogram',
+      field: 'radius',
+      requested: 20041,
+      applied: 20040,
+    });
+  });
   it.each(['false', 'true'])(
     'loads .env mode %s before constructing every advertised limit schema from a neutral working directory',
     (mode) => {

@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
+import { blankAsUnset } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { RANKS } from '@/services/inaturalist/vocabularies.js';
@@ -41,18 +42,14 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       .describe(
         'The name to resolve. On type "taxon" this is a name prefix or an exact taxon id; on the other types it is matched across the record text.',
       ),
-    type: z
-      .enum(['taxon', 'place', 'project', 'user', 'any'])
-      .default('taxon')
-      .describe(
-        'Which kind of record to resolve. "taxon" uses the taxon autocomplete; the rest use the scored cross-kind search, and "any" searches every kind at once. For a place’s bounding box and containment chain rather than just its id, use inaturalist_find_places instead.',
-      ),
-    rank: z
-      .enum(RANKS)
-      .optional()
-      .describe(
-        'Restrict taxon candidates to one rank. Honoured only on type "taxon" — the cross-kind search has no rank filter.',
-      ),
+    type: blankAsUnset(
+      z.enum(['taxon', 'place', 'project', 'user', 'any']).default('taxon'),
+    ).describe(
+      'Which kind of record to resolve. "taxon" uses the taxon autocomplete; the rest use the scored cross-kind search, and "any" searches every kind at once. For a place’s bounding box and containment chain rather than just its id, use inaturalist_find_places instead.',
+    ),
+    rank: blankAsUnset(z.enum(RANKS).optional()).describe(
+      'Restrict taxon candidates to one rank. Honoured only on type "taxon" — the cross-kind search has no rank filter.',
+    ),
     limit: limitSchema(
       LIMIT_CAPS.resolveName,
       10,

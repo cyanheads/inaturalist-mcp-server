@@ -46,6 +46,8 @@ vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) 
 });
 
 const fake = createFakeService();
+// Widen only the harness input type to exercise malformed/form-client payloads at the schema boundary.
+const searchContract: Parameters<typeof runToolContract>[0] = inaturalistSearchObservations;
 
 beforeEach(() => {
   resetFakeService(fake);
@@ -57,6 +59,162 @@ function observations(count: number, idOffset = 0) {
 }
 
 describe('input validation', () => {
+  it('forwards accurate/open, monthly, uploaded/updated and disputed filters through the real service', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: () =>
+          Response.json({
+            total_results: 1,
+            results: [
+              rawObservation({ created_at: '2026-10-30T01:02:03.123456+02:00', updated_at: null }),
+            ],
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistSearchObservations, {
+        acc_below: 0.5,
+        obscuration: ['none'],
+        month: [1, 12],
+        d1: '2000-01-01',
+        d2: '2000-12-31',
+        created_d1: '2026-01-01',
+        created_d2: '2026-12-31',
+        updated_since: '2026-10-30T00:00:00+02:00',
+        identifications: 'most_disagree',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(Object.fromEntries(new URL(http.calls[0]!.request.url).searchParams)).toMatchObject({
+        acc_below: '0.5',
+        obscuration: 'none',
+        month: '1,12',
+        d1: '2000-01-01',
+        d2: '2000-12-31',
+        created_d1: '2026-01-01',
+        created_d2: '2026-12-31',
+        updated_since: '2026-10-30T00:00:00+02:00',
+        identifications: 'most_disagree',
+      });
+      expect(result.structuredContent).toMatchObject({
+        observations: [{ created_at: '2026-10-30T01:02:03.123456+02:00', updated_at: null }],
+      });
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
+      expect(text).toContain('2026-10-30T01:02:03.123456+02:00');
+      expect(text).toContain('updated_at');
+      expect(text).toContain('null');
+      const detail = await runToolContract(inaturalistGetObservation, {
+        observation_id: [401617560],
+        include: [],
+      });
+      expect(detail.isError).toBeFalsy();
+      expect(detail.structuredContent).toMatchObject({
+        observations: [{ created_at: '2026-10-30T01:02:03.123456+02:00', updated_at: null }],
+      });
+      expect(JSON.stringify(detail.content)).toContain('2026-10-30T01:02:03.123456+02:00');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('keeps framework numeric-string repair and blank optional monitoring filters', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(searchContract, {
+      acc_below: '0.5',
+      created_d1: '',
+      created_d2: '',
+      updated_since: '',
+      identifications: '',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.searchObservations.mock.calls[0]?.[0]).toMatchObject({ acc_below: 0.5 });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).not.toContain('drop updated_since');
+  });
+
+  it.each([
+    { acc_below: 0 },
+    { acc_below: -1 },
+    { acc_below: 2147483648 },
+    { acc_below: 'many' },
+    { obscuration: ['open'] },
+    { month: [13] },
+    { month: [0] },
+    { month: [1.5] },
+    { created_d1: '2026-02-30' },
+    { created_d2: '2026-13-01' },
+    { updated_since: '2026-02-30' },
+    { updated_since: '2026-02-30T12:00:00Z' },
+    { updated_since: '2026-10-30T12:00:00' },
+    { updated_since: '2026-10-30T12:00:00+25:00' },
+    { identifications: ['most_agree'] },
+    { identifications: 'unknown' },
+  ])('rejects malformed new search filters before any request: %j', async (args) => {
+    const http = createFetchMock([
+      { match: () => true, respond: () => Response.json({ results: [] }) },
+    ]);
+    http.install();
+    try {
+      const result = await runToolContract(searchContract, args);
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('invalid_arguments');
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('rejects inverted upload bounds independently with date recovery on both surfaces', async () => {
+    const { http, service } = failingUpstream();
+    vi.mocked(getINaturalistService).mockReturnValue(service);
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistSearchObservations, {
+        created_d1: '2026-12-31',
+        created_d2: '2026-01-01',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'inverted_date_range',
+            recovery: { hint: expect.stringContaining('created_d1') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('created_d1');
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('composes empty arrays and zero-hit advice only for supplied new filters', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      month: [],
+      obscuration: [],
+      acc_below: 0.5,
+      updated_since: '2026-10-30',
+      identifications: 'some_agree',
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
+    expect(text).toContain('month, obscuration were empty and ignored');
+    expect(text).toContain('drop acc_below');
+    expect(text).toContain('drop updated_since');
+    expect(text).toContain('drop identifications');
+    expect(text).not.toContain('drop created_d1');
+  });
+
   it('retrieves a deferred oversized record whole by id with the same expansions', async () => {
     const locality = '🌿'.repeat(20_000);
     const record = projectedObservation({
@@ -97,8 +255,8 @@ describe('input validation', () => {
     expect(fake.getObservations).toHaveBeenCalledTimes(1);
   });
   it.each([
-    [21_860, 1],
-    [21_861, 0],
+    [21_819, 1],
+    [21_820, 0],
   ])('keeps complete records at the measured reserve boundary (%s)', async (length, shown) => {
     fake.searchObservations.mockResolvedValue({
       total: 1,
@@ -113,12 +271,18 @@ describe('input validation', () => {
     });
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
-    if (shown === 1) expect(text).toContain('x'.repeat(21_860));
+    if (shown === 1) expect(text).toContain('x'.repeat(21_819));
     else expect(text).toContain('inaturalist_get_observation');
   });
 
   it('composes clamp, ignored-filter, pagination and deferred guidance once', async () => {
-    fake.searchObservations.mockResolvedValue({ total: 100, observations: observations(25) });
+    // Shorter synthetic text offsets timestamp fields while keeping the same 23-record boundary.
+    const records = observations(25).map((record) => ({
+      ...record,
+      observer: 'ab',
+      photo: projectedPhoto({ attribution: 'credit' }),
+    }));
+    fake.searchObservations.mockResolvedValue({ total: 100, observations: records });
     const result = await runToolContract(inaturalistSearchObservations, {
       per_page: 26,
       order_by: 'id',
@@ -767,7 +931,12 @@ describe('has_more / next_cursor', () => {
   });
 
   it('points a non-id ordering at order_by id / order desc when the next page would pass the 10,000 window', async () => {
-    fake.searchObservations.mockResolvedValue({ total: 50_000, observations: observations(25) });
+    const records = observations(25).map((record) => ({
+      ...record,
+      observer: 'ab',
+      photo: projectedPhoto({ attribution: 'credit' }),
+    }));
+    fake.searchObservations.mockResolvedValue({ total: 50_000, observations: records });
 
     const result = await runToolContract(inaturalistSearchObservations, {
       page: 400,

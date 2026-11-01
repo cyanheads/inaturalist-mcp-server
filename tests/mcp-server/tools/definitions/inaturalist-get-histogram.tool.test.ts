@@ -510,6 +510,32 @@ describe('annotation and iconic-group filters', () => {
 });
 
 describe('request URL without the annotation or iconic filters', () => {
+  it('preserves the no-input URL', async () => {
+    const http = createFetchMock([
+      {
+        match: () => true,
+        respond: () => Response.json({ results: { month_of_year: { '1': 3 } } }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetHistogram, {});
+      expect(result.isError).toBeFalsy();
+      expect(http.calls.map((call) => call.request.url)).toEqual([
+        'https://api.inaturalist.org/v1/observations/histogram?captive=false&date_field=observed&interval=month_of_year&quality_grade=research',
+      ]);
+    } finally {
+      http.restore();
+    }
+  });
   it('builds the same query string as before those filters existed', async () => {
     const http = createFetchMock([
       {
@@ -539,6 +565,83 @@ describe('request URL without the annotation or iconic filters', () => {
     } finally {
       http.restore();
     }
+  });
+});
+
+describe('observer and project scope', () => {
+  it('forwards observer login and project while preserving both output surfaces', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 7 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      user_login: 'kueda',
+      project_id: 185897,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      user_login: 'kueda',
+      project_id: 185897,
+    });
+    expect(result.structuredContent).toMatchObject({ buckets: [{ key: '1', count: 7 }], total: 7 });
+    expect(JSON.stringify(result.content)).toContain('| 1 | 7 |');
+  });
+  it('rejects conflicting observers before requesting with recovery on both surfaces', async () => {
+    const result = await runToolContract(inaturalistGetHistogram, {
+      user_id: 1,
+      user_login: 'kueda',
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'conflicting_observer',
+          recovery: { hint: expect.stringContaining('user_id or user_login') },
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('user_id or user_login');
+    expect(fake.getHistogram).not.toHaveBeenCalled();
+  });
+  it('treats a blank login as absent beside a numeric observer', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      user_id: 1,
+      user_login: '',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.getHistogram.mock.calls[0]?.[0]).toMatchObject({
+      user_id: 1,
+      user_login: undefined,
+    });
+  });
+  it.each(['unknown_user', 'unknown_project_id'] as const)(
+    'declares %s recovery on both surfaces',
+    async (reason) => {
+      fake.getHistogram.mockRejectedValue(
+        new McpError(JsonRpcErrorCode.ValidationError, 'Unknown upstream filter.', { reason }),
+      );
+      const result = await runToolContract(inaturalistGetHistogram, {
+        user_id: 1,
+        project_id: 185897,
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: { reason, recovery: { hint: expect.stringContaining('inaturalist_resolve_name') } },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('inaturalist_resolve_name');
+    },
+  );
+  it('names supplied observer and project filters when no records match on both surfaces', async () => {
+    fake.getHistogram.mockResolvedValue([]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      user_id: 1,
+      project_id: 185897,
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain('user_id');
+    expect(notice).toContain('project_id');
+    expect(
+      (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join(''),
+    ).toContain(notice);
   });
 });
 

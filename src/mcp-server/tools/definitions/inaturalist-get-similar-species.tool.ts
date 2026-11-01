@@ -6,7 +6,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { applyLimit, LIMIT_CAPS, limitSchema } from '@/mcp-server/tools/limit-policy.js';
+import {
+  applyLimit,
+  LIMIT_CAPS,
+  limitSchema,
+  radiusClampNotice,
+} from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
   dateRangeInputShape,
@@ -140,7 +145,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       ...requestedInput,
       quality_grade: [...new Set(requestedInput.quality_grade)],
     };
-    const { applied, notice: clampNotice } = applyLimit(
+    const { applied, notice: limitNotice } = applyLimit(
       requestedInput.limit,
       LIMIT_CAPS.similarSpecies,
       ctx,
@@ -152,6 +157,12 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
     if (!area.ok) {
       throw ctx.fail('invalid_geography', area.message);
     }
+    const radiusNotice = radiusClampNotice(
+      area.radiusClamp,
+      ctx,
+      'inaturalist_get_similar_species',
+    );
+    const clampNotice = [limitNotice, radiusNotice].filter(Boolean).join(' ');
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {

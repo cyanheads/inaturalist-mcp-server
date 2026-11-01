@@ -47,6 +47,104 @@ function species(count: number) {
 }
 
 describe('input validation', () => {
+  it('forwards establishment, conservation, exact rank, rank band and month through the real service', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org/,
+        respond: () =>
+          Response.json({
+            total_results: 1,
+            results: [{ count: 4, taxon: { id: 336675, rank: 'hybrid', name: 'Hybrid' } }],
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSpeciesCounts, {
+        introduced: true,
+        native: false,
+        threatened: true,
+        endemic: false,
+        csi: ['EN', 'CR'],
+        hrank: 'family',
+        lrank: 'species',
+        rank: 'hybrid',
+        month: [1, 12],
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        total_results: 1,
+        species: [{ taxon_id: 336675, rank: 'hybrid', observation_count: 4 }],
+      });
+      const url = new URL(http.calls[0]!.request.url);
+      expect(Object.fromEntries(url.searchParams)).toMatchObject({
+        introduced: 'true',
+        native: 'false',
+        threatened: 'true',
+        endemic: 'false',
+        csi: 'EN,CR',
+        hrank: 'family',
+        lrank: 'species',
+        rank: 'hybrid',
+        month: '1,12',
+      });
+      expect(JSON.stringify(result.content)).toContain('**total_results:** 1 taxa');
+      expect(JSON.stringify(result.content)).toContain('hybrid');
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('rejects inverted rank levels before any request with recovery on both surfaces', async () => {
+    const { http, service } = failingUpstream();
+    vi.mocked(getINaturalistService).mockReturnValue(service);
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistGetSpeciesCounts, {
+        hrank: 'species',
+        lrank: 'family',
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'inverted_rank_range',
+            recovery: { hint: expect.stringContaining('coarser') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('coarser');
+      expect(http.calls).toHaveLength(0);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('composes empty month/csi notices and names only supplied narrowing filters', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      month: [],
+      csi: [],
+      introduced: false,
+      rank: 'species',
+      quality_grade: ['research', 'needs_id'],
+    });
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('csi, month were empty and ignored');
+    expect(notice).toContain('Drop introduced');
+    expect(notice).toContain('drop rank');
+    expect(notice).not.toContain('drop native');
+    expect(JSON.stringify(result.content)).toContain(notice);
+  });
+
   it('keeps the default and accepts oversized per_page for clamping', () => {
     expect(inaturalistGetSpeciesCounts.input.parse({}).per_page).toBe(25);
     expect(inaturalistGetSpeciesCounts.input.safeParse({ per_page: 50 }).success).toBe(true);
@@ -216,7 +314,7 @@ describe('zero-hit and truncation enrichment', () => {
 
     expect(result).toEqual({ total_results: 0, species: [] });
     expect(getEnrichment(ctx).notice).toBe(
-      'No species recorded for those filters. Set quality_grade to include "needs_id".',
+      'No taxa recorded for those filters. Set quality_grade to include "needs_id".',
     );
   });
 
@@ -231,7 +329,7 @@ describe('zero-hit and truncation enrichment', () => {
     await inaturalistGetSpeciesCounts.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'No species recorded for those filters. Widen or drop d1/d2.',
+      'No taxa recorded for those filters. Widen or drop d1/d2.',
     );
   });
 
@@ -246,7 +344,7 @@ describe('zero-hit and truncation enrichment', () => {
     expect(result.isError).toBeFalsy();
     const notice = (result.structuredContent as { notice?: string }).notice;
     expect(notice).toBe(
-      'No species recorded for those filters. Widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
+      'No taxa recorded for those filters. Widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
     );
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
@@ -293,13 +391,13 @@ describe('zero-hit and truncation enrichment', () => {
       truncated: false,
       shown: 0,
       cap: 25,
-      notice: 'No species recorded for those filters. Set quality_grade to include "needs_id".',
+      notice: 'No taxa recorded for those filters. Set quality_grade to include "needs_id".',
     });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
       .join('');
     expect(text).toContain(
-      'No species recorded for those filters. Set quality_grade to include "needs_id".',
+      'No taxa recorded for those filters. Set quality_grade to include "needs_id".',
     );
   });
 
@@ -329,7 +427,7 @@ describe('a page past the end of the ranking', () => {
 
     expect(result.isError).toBeFalsy();
     const expected =
-      'Page 2000 is past the end: 99891 species match, so the last page holding results at per_page 50 is 1998. Request page 1998 or lower — the filters are not what emptied this page.';
+      'Page 2000 is past the end: 99891 taxa match, so the last page holding results at per_page 50 is 1998. Request page 1998 or lower — the filters are not what emptied this page.';
     expect(result.structuredContent).toMatchObject({
       total_results: 99_891,
       species: [],
@@ -434,7 +532,7 @@ describe('observer and project filters', () => {
     );
 
     expect(getEnrichment(ctx).notice).toBe(
-      'No species recorded for those filters. Drop user_id or confirm the observer with inaturalist_resolve_name, drop project_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
+      'No taxa recorded for those filters. Drop user_id or confirm the observer with inaturalist_resolve_name, drop project_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
     );
   });
 
@@ -514,12 +612,28 @@ describe('request URL without the observer or project filters', () => {
 });
 
 describe('format()', () => {
+  it('labels hybrid leaf taxa without changing row fields or ranking positions', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({
+      total: 1,
+      species: [speciesCount({ position: 7, taxon_id: 336675, rank: 'hybrid' })],
+    });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {});
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total_results: 1,
+      species: [{ position: 7, taxon_id: 336675, rank: 'hybrid' }],
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('**total_results:** 1 taxa');
+    expect(text).toContain('7. **Monarch**');
+    expect(text).toContain('hybrid');
+  });
   it('renders the header and a ranked numbered list with the photo block', () => {
     const result = { total_results: 4200, species: [speciesCount()] };
     const [block] = inaturalistGetSpeciesCounts.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
 
-    expect(text).toContain('**total_results:** 4200 distinct species');
+    expect(text).toContain('**total_results:** 4200 taxa');
     expect(text).toContain(
       '1. **Monarch** (*Danaus plexippus*) — 4200 observations · species · Insecta · taxon_id 48662',
     );
@@ -531,7 +645,7 @@ describe('format()', () => {
     const [block] = inaturalistGetSpeciesCounts.format?.(result) ?? [];
     const text = block && 'text' in block ? block.text : '';
 
-    expect(text).toBe('**total_results:** 0 distinct species');
+    expect(text).toBe('**total_results:** 0 taxa');
   });
 
   it('does not let a community-editable name forge a heading', () => {

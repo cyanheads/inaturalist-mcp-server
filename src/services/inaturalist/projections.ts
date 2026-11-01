@@ -361,6 +361,8 @@ export function projectObservation(
     url: raw.uri ?? null,
     observed_on: raw.observed_on ?? null,
     observed_at: raw.time_observed_at ?? null,
+    created_at: raw.created_at ?? null,
+    updated_at: raw.updated_at ?? null,
     taxon: projectTaxonSummary(raw.taxon),
     place_guess: raw.place_guess ?? null,
     coordinate: parseLocation(raw.location, raw.public_positional_accuracy),
