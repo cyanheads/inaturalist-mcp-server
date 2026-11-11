@@ -2,8 +2,8 @@
 
 **Server:** inaturalist-mcp-server
 **Version:** 0.3.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -57,17 +57,17 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Patterns
 
-Search returns a prefix of whole records within 50,000 UTF-8 bytes of the serialized `CallToolResult`, counting both surfaces, enrichment, and SDK fields. Its ordered `deferred` IDs account for the remaining upstream-page suffix; retrieve them with `inaturalist_get_observation` and the same `include` before following the full page's continuation. Detail strings stay complete, with no universal byte ceiling. By-id lookup accepts up to 100 submitted IDs by default, deduplicates in first-seen order, attempts ten distinct IDs, and separates deferred work from attempted misses; strict mode restores the ten-submitted-ID schema limit.
+Search returns a prefix of whole records within 50,000 UTF-8 bytes of the serialized `CallToolResult`, counting both surfaces, enrichment, and SDK fields. Its ordered `deferred` IDs account for the remaining upstream-page suffix; retrieve them with `inaturalist_get_observation` and the same `include` before following the full page's continuation. Detail strings stay complete, with no universal byte ceiling. By-id lookup accepts up to 100 submitted IDs by default, deduplicates in first-seen order, attempts ten distinct IDs, and separates deferred work from attempted misses; strict mode restores the ten-submitted-ID schema limit. Its identification, comment, and observation-field arrays are sorted by ascending `id` and paged by `array_offset` / `array_limit`; `next_array_offset` continues them.
 
-Species counts rank leaf taxa, including hybrids and coarser identifications, with subspecies rolled up to species; retain the `species` field name. Search and species counts share establishment/conservation/rank-level and observed-month filters, while exact `rank` is species-count-only. Search adds accuracy, obscuration, independent upload-date bounds, updated-since date/datetime, and identification-agreement filters. Observation records retain nullable full `created_at`/`updated_at` strings on both surfaces.
+Species counts rank leaf taxa, including hybrids and coarser identifications, with subspecies rolled up to species; retain the `species` field name. Search and species counts share establishment/conservation/rank-level and observed-month filters and the `ident_user_id` / `unobserved_by_user_id` user selectors, while exact `rank` is species-count-only. Search adds accuracy, obscuration, independent upload-date bounds, updated-since date/datetime, and identification-agreement filters. Observation records retain nullable full `created_at`/`updated_at` strings on both surfaces.
 
-`INATURALIST_CLAMP_LIMITS` defaults on and clamps list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, with notice, log, and counter. Off restores strict input maxima, including 30 places and 50 similar species; their served ceilings remain 20 and 24 in both modes. Empty optional filter arrays are ignored with a composed notice; nonempty annotation values still require nonempty attributes. `include: []` is unchanged. `captive: true` selects captive/cultivated records only, and false selects wild records only. Histogram upload bounds `created_d1`/`created_d2` are independent of observation bounds `d1`/`d2`; `date_field` selects bucketing only. Search's optional boolean `sounds` filters records separately from expansion. Unknown places map to `unknown_place_id` with `inaturalist_find_places` recovery on all five area-filter tools.
+`INATURALIST_CLAMP_LIMITS` defaults on and clamps list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, and by-id `array_limit` to 1,500, with notice, log, and counter. Off restores strict input maxima, including 30 places, 50 similar species, and `array_limit` rejected above 1,500; their served ceilings remain 20 and 24 in both modes. Empty optional filter arrays are ignored with a composed notice; nonempty annotation values still require nonempty attributes. `include: []` is unchanged. `captive: true` selects captive/cultivated records only, and false selects wild records only. Captive records are graded casual, so pair true with "casual" in quality_grade, or a notice discloses the grade-inconsistent cohort. Histogram upload bounds `created_d1`/`created_d2` are independent of observation bounds `d1`/`d2`; `date_field` selects bucketing only. Search's optional boolean `sounds` filters records separately from expansion. Unknown places map to `unknown_place_id` with `inaturalist_find_places` recovery on all five area-filter tools.
 
 Name resolution without `page` retains relevance ordering. Explicit taxon-name pages use `/taxa` with ascending ID order from page 1 and may match a different multilingual population from autocomplete; numeric taxon IDs remain singleton autocomplete lookups. Reject explicit `page × applied limit > 10,000`. Place-name autocomplete forwards the applied `per_page` up to 20 and offers no offsets. Similar-species counts are symmetric observations carrying current, non-hidden identifications of both taxa, including ancestors; the retained `misidentification_count` name does not imply directional corrections or an exhaustive list.
 
 Absolute histograms derive only the selected date family's missing lower bound from its upper bound or today UTC (year/month: 100 calendar years; week: ten years; day: one year; hour: seven days), disclose `applied_filters.window_start`, and add no upper bound. Seasonal curves have no generated start. The 25,000-bucket cap bounds rows, not bytes; `total` sums the complete upstream window. Continuation follows the first omitted key, retaining other filters and upper bounds, with conservative date overlap and earlier counts preserved on repeated keys; partial boundary counts cannot reconstruct complete buckets.
 
-Render upstream strings as literal CommonMark text, preserving CR/LF, HTML, entities, and whitespace. NUL-containing strings use labeled JSON string literals; URLs use Markdown links. Present empty expansions, zero counts, and null/empty descriptions remain distinguishable. Search derives its schema from the shared observation schema, omitting only twelve unreachable detail fields; detail and resource schemas stay full.
+Render upstream strings as literal CommonMark text, preserving CR/LF, HTML, entities, and whitespace. NUL-containing strings use labeled JSON string literals; URLs use Markdown links. Present empty expansions, zero counts, and null/empty descriptions remain distinguishable. Search derives its schema from the shared observation schema, omitting only fourteen unreachable detail fields; detail and resource schemas stay full.
 
 ### Tool
 
@@ -139,11 +139,11 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
 
 ### Resource
 
-Abridged from `src/mcp-server/resources/definitions/inaturalist-taxon.resource.ts`. A URI param arrives as a string, so the numeric shape is enforced by regex and converted in the handler; `cacheHint` matches the service's own TTL for that surface.
+Abridged from `src/mcp-server/resources/definitions/inaturalist-taxon.resource.ts`. A URI param arrives as a string, so the numeric shape is enforced by regex and converted in the handler; `cacheHint` matches the service's own TTL for that surface; a miss throws through `ctx.fail` against the declared `not_found` reason, so the error carries `data.reason` and the recovery hint.
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { TaxonDocumentSchema } from '@/mcp-server/tools/taxon-document.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
@@ -156,15 +156,17 @@ export const inaturalistTaxonResource = resource('inaturalist://taxa/{taxon_id}'
     taxon_id: z.string().regex(/^[1-9]\d*$/).describe('Numeric iNaturalist taxon id, e.g. 48662.'),
   }),
   output: TaxonDocumentSchema,
+  errors: [
+    { reason: 'not_found', code: JsonRpcErrorCode.NotFound,
+      when: 'iNaturalist answered with an empty results array for that taxon id.',
+      recovery: 'Resolve the organism name with inaturalist_resolve_name and read the resource at the taxon id it returns.' },
+  ],
 
   async handler(params, ctx) {
     const taxonId = Number(params.taxon_id);
     const doc = await getINaturalistService().getTaxon(taxonId, ctx);
     if (!doc) {
-      throw notFound(`iNaturalist holds no taxon with id ${taxonId}.`, {
-        taxon_id: taxonId,
-        recovery: { hint: 'Resolve the organism name with inaturalist_resolve_name and read the resource at the taxon id it returns.' },
-      });
+      throw ctx.fail('not_found', `iNaturalist holds no taxon with id ${taxonId}.`, { taxon_id: taxonId });
     }
     return doc;
   },
@@ -447,7 +449,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

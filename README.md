@@ -61,7 +61,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_list_reference` <sub>tool</sub>
 
-- `topic` picks one table: `controlled_terms` (fetched live), `quality_grades`, `licenses`, `ranks`, `iconic_taxa`, or `conservation_status_codes`; `taxon_id`, valid only with `controlled_terms`, adds `observed_usage`, the annotation pairs recorded for that taxon with counts
+- `topic` picks one table: `controlled_terms` (fetched live), `quality_grades`, `licenses`, `ranks`, `iconic_taxa`, or `conservation_status_codes` (the `iucn` levels listings carry, all but `NE` and `DD` valid as `csi`); `taxon_id`, valid only with `controlled_terms`, adds `observed_usage`, the annotation pairs recorded for that taxon with counts
 - `source` is `upstream` or `static`; annotation attributes and their values carry numeric ids to pass as `term_id` and `term_value_id`, since labels repeat across attributes
 
 ---
@@ -70,7 +70,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 - `q` plus `type`: `taxon` (default; word-start name matching or exact numeric ID, with optional `rank`) or `place` / `project` / `user` / `any` (scored cross-kind search with limited spelling tolerance); applied `limit` up to 30, default 10
 - Omit `page` for relevance-ranked suggestions. Explicit taxon name pages browse ascending taxon IDs from page 1; their multilingual match population can differ from autocomplete. Keep the limit fixed; `page × applied limit` must stay within 10,000. Numeric taxon IDs have one page
-- Each candidate carries `kind` and `id`, plus `login` on users. A true miss returns `found: false` with `guidance`; an empty page beyond matching records retains `found: true`. Every reply discloses `totalCount`, `truncated`, `shown`, and `cap`
+- Each candidate carries `kind` and `id`, plus `login` on users, and `is_active` on taxa with `current_synonymous_taxon_ids` when the taxon is inactive. A true miss returns `found: false` with `guidance`; an empty page beyond matching records retains `found: true`. Every reply discloses `totalCount`, `truncated`, `shown`, and `cap`
 
 ---
 
@@ -84,10 +84,10 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_search_observations` <sub>tool</sub>
 
-- One area form plus `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `user_id` or `user_login`, `project_id`, and `q`+`search_on`; applied `per_page` up to 25, default 10; optional `sounds` filters for audio-bearing records, while `include` expands `photos`, `annotations`, `sounds` (identification threads live on `inaturalist_get_observation`)
+- One area form plus `taxon_id`, `d1`/`d2`, `quality_grade`, `captive`, `term_id`+`term_value_id`, `iconic_taxa`, `hrank`/`lrank`, `csi`, `threatened`/`native`/`introduced`/`endemic`, `user_id` or `user_login`, `ident_user_id`, `unobserved_by_user_id`, `project_id`, and `q`+`search_on`; applied `per_page` up to 25, default 10; optional `sounds` filters for audio-bearing records, while `include` expands `photos`, `annotations`, `sounds` (identification threads live on `inaturalist_get_observation`)
 - `page` walks the first 10,000 results; past that, order by `id` descending and pass each page's `next_cursor` as `cursor`. Returns `total_results` (a live estimate) and `has_more`, and echoes `applied_filters`
 - `license` / `photo_license` take the seven CC codes, OR-joined; `photo_license` matches any photo under the code, independent of the record's own `license_code`
-- The complete serialized reply stays within 50,000 UTF-8 bytes by returning a prefix of whole records. Ordered `deferred` observation IDs identify the suffix; fetch them with `inaturalist_get_observation` and the same `include` before following the upstream page continuation
+- The complete serialized reply stays within 50,000 UTF-8 bytes by returning a prefix of whole records. Ordered `deferred` observation IDs identify the suffix; fetch them with `inaturalist_get_observation` and the same `include` before following the upstream page continuation. Every record carries `outlinks`, e.g. its GBIF occurrence for citation, counted inside the byte budget
 - `acc_below` accepts positive fractional metres up to 2,147,483,647 and selects measured accuracy strictly below the threshold, excluding missing accuracy. `obscuration` accepts `obscured`, `private`, and `none`; it checks both observer and taxon geoprivacy, with `none` requiring both to be open/unset. `month` accepts observed calendar months 1–12
 - `created_d1`/`created_d2` independently bound upload dates; `updated_since` accepts a calendar date or ISO datetime with timezone. `identifications` selects `most_agree`, `some_agree`, or `most_disagree`. Search, by-id records, and observation resources preserve nullable `created_at` and `updated_at` strings
 
@@ -96,8 +96,8 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 ### `inaturalist_get_observation` <sub>tool</sub>
 
 - Submit 1–100 `observation_id`s: duplicates are removed in first-seen order, the first ten distinct IDs are attempted in one upstream request, and the rest return in `deferred`; with limit clamping disabled, at most ten submitted IDs are accepted. `include` defaults to `["identifications"]`, with `comments`, `photos`, `annotations`, and `sounds` available
-- Resolved records come back in `observations` in request order, attempted misses in `unresolved`; fails as `not_found` only when none resolve and nothing is deferred. Adds `community_taxon`, `description`, and filled `observation_fields`; strings remain complete, so detail replies have no universal byte ceiling
-- Identifications, comments, and observation fields share a 40-entry budget: each record keeps `max(4, floor(40 / records returned))` entries per array and reports `*_total` beside `*_shown`
+- Resolved records come back in `observations` in request order, attempted misses in `unresolved`; fails as `not_found` only when none resolve and nothing is deferred. Adds `community_taxon`, `description`, and filled `observation_fields` (each with `datatype`, and the five-field `taxon` when upstream resolved a taxon-type value); strings remain complete, so detail replies have no universal byte ceiling
+- Identifications, comments, and observation fields are sorted by ascending id and share the `array_limit` budget (default 40, ceiling 1,500): each record keeps `min(array_limit, max(4, floor(array_limit / records returned)))` entries per array from `array_offset` and reports `*_total` beside `*_shown`; `next_array_offset` continues every array with the same ids and `include`; each identification and comment relays upstream's `hidden` flag, and `identifications_hidden` / `comments_hidden` count hidden entries over the whole array, the same on every page
 
 ---
 
@@ -105,7 +105,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 - Counts leaf taxa, including hybrids and coarser identifications; subspecies roll up to their species. `total_results` counts taxa, and the `species` field retains its upstream name.
 - `introduced`, `native`, `threatened`, `endemic`, `csi`, `hrank`/`lrank`, and observed `month` (integer array, 1–12) are shared with search. `rank` selects one exact rank; equal rank-band bounds select a level, including both species and hybrid at level 10. Conservation codes match global listings plus listings at exactly `place_id`, excluding ancestor-place listings. Status flags describe the observation's indexed taxon at its location.
-- One area form plus the search filters for taxon, dates, quality grade, captive, annotations, iconic taxa, observer, and project; applied `per_page` up to 50, default 25, with `page` offset
+- One area form plus the search filters for taxon, dates, quality grade, captive, annotations, iconic taxa, observer, `ident_user_id` (records a user identified, their own observations included), `unobserved_by_user_id` (taxa a user has never observed), and project; applied `per_page` up to 50, default 25, with `page` offset
 - Rows carry `position` (absolute, counted from page 1), `taxon_id`, and `observation_count`; `truncationCeiling` is the last count shown, which nothing off the page exceeds
 
 ---
@@ -139,7 +139,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist_get_taxon` <sub>tool</sub>
 
-- One `taxon_id`; `sections` selects from `summary`, `taxonomy`, `children`, `conservation`, `photos`, `encyclopedia`, and an unknown name fails as `unknown_section`
+- One `taxon_id`; an inactive taxon carries its successor ids in `current_synonymous_taxon_ids`, and each conservation listing carries `iucn` with its `iucn_code`; `sections` selects from `summary`, `taxonomy`, `children`, `conservation`, `photos`, `encyclopedia`, and an unknown name fails as `unknown_section`
 - `kind: "full"` carries the profile; `kind: "outline"` lists each section with its byte size when the profile overflows. A named section always comes back whole, so sum the outline's sizes before asking for several
 
 ---
@@ -153,7 +153,7 @@ The published [inaturalist-guide](./skills/inaturalist-guide/SKILL.md) covers id
 
 ### `inaturalist://observations/{observation_id}` <sub>resource</sub>
 
-- One observation as `application/json` with its first 40 identifications and first 40 filled observation fields, each with its `_total` beside its `_shown`
+- One observation as `application/json` with its first 40 identifications and first 40 filled observation fields by ascending id, each with its `_total` beside its `_shown`, plus `identifications_hidden` and the record's `outlinks`; page the rest with `inaturalist_get_observation` `array_offset`
 - `observation_id` comes from `inaturalist_search_observations`; cached for fifteen minutes
 
 ## Features
@@ -170,7 +170,7 @@ iNaturalist-specific:
 
 Agent-friendly output:
 
-- Applied defaults echoed: search, species counts, histograms, and leaderboards return `applied_filters` (research-grade and wild-only by default, plus any ordering a cursor forced). `captive: true` selects captive or cultivated records only; `false` selects wild records only
+- Applied defaults echoed: search, species counts, and histograms return `applied_filters` (research-grade and wild-only by default, plus any ordering a cursor forced); leaderboards echo `quality_grade` alone, take no `captive`, and count captive records too. `captive: true` selects captive or cultivated records only; `false` selects wild records only. Captive records are graded casual, so pair `true` with `"casual"` in `quality_grade`; without it a notice discloses the grade-inconsistent cohort
 - Zero-hit notices name the filter most likely responsible and the tool that decodes it (`inaturalist_list_reference` for vocabularies, since an unrecognised value returns nothing); a page past the end names the last page with results
 - Truncation disclosed on every path: `truncated`, `shown`, and `cap`, plus `truncationCeiling` on descending rankings
 - Empty filter arrays are ignored with a notice; nonempty annotation values still require a nonempty attribute array. `include: []` retains its explicit expansion selection
@@ -255,7 +255,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - No API key: the iNaturalist v1 API is keyless. The published terms ask clients to identify themselves, so a `User-Agent` with a contact URL is sent by default; keep one in any `INATURALIST_USER_AGENT` override.
 
 ### Installation
@@ -293,7 +293,7 @@ cp .env.example .env
 | `INATURALIST_MIN_REQUEST_INTERVAL_MS` | Minimum gap between outbound request starts, in ms. The default holds the rate near 54 per minute. | `1100` |
 | `INATURALIST_MAX_CONCURRENT_REQUESTS` | Maximum outbound requests in flight. | `4` |
 | `INATURALIST_DAILY_REQUEST_BUDGET` | Outbound requests allowed per UTC day, counted in-process and reset on restart. | `9000` |
-| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, and radius to 20,040 km, with a notice, log, and counter. `false` restores strict input maxima (places 30, similar species 50, radius 500 km); places and similar species still serve at most 20/24 in either mode. | `true` |
+| `INATURALIST_CLAMP_LIMITS` | Strict boolean. Clamp list limits to 30/20/25/50/24/250 for name resolution, places, search, species counts, similar species, and leaderboards, by-id `array_limit` to 1,500, and radius to 20,040 km, with a notice, log, and counter. `false` restores strict input maxima (places 30, similar species 50, radius 500 km; `array_limit` rejected above 1,500); places and similar species still serve at most 20/24 in either mode. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |

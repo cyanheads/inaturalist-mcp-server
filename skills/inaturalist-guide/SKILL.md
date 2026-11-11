@@ -4,7 +4,7 @@ description: Use inaturalist_* tools to compare local wildlife records, chart an
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.2"
+  version: "1.3"
 ---
 
 ## Scope
@@ -13,7 +13,7 @@ Use public iNaturalist sightings and community identifications for local species
 
 ## Identifiers
 
-- `inaturalist_resolve_name` returns typed candidates: taxon IDs, observer user IDs and logins, and project IDs. Check the candidate's kind, scientific name, and rank before using its ID; a common-name match alone may not identify the organism intended.
+- `inaturalist_resolve_name` returns typed candidates: taxon IDs, observer user IDs and logins, and project IDs. Check the candidate's kind, scientific name, and rank before using its ID; a common-name match alone may not identify the organism intended. A taxon candidate with `is_active: false` was retired by a taxonomic change and carries `current_synonymous_taxon_ids`; pass one of those as `taxon_id` for the current taxon, choosing among several after a split, and treat an empty list as no recorded successor.
 - `inaturalist_find_places` returns place IDs with administrative context and containment information. Select the intended place before using it in another tool; similarly named places need not cover the same area.
 - `inaturalist_search_observations` returns observation IDs for `inaturalist_get_observation` and the observation resource. Species-count and similar-species results return taxon IDs for `inaturalist_get_taxon`.
 - `inaturalist_get_leaderboard` entries and observation records carry observer logins. Use a login directly for observer filtering, or resolve that user when a numeric ID is needed. An identifier's login names the contributor, not the observer of every record they identified.
@@ -24,8 +24,8 @@ Use public iNaturalist sightings and community identifications for local species
 1. Before comparing counts, curves, and individual sightings, keep the area, date range, taxon, and quality selection consistent across tools that support them. Read the applied defaults. Tools have different filter surfaces; do not describe unmatched cohorts as the same population.
 2. Treat taxon rankings and histograms as records of sightings, not an exhaustive inventory or a measurement of organism abundance. A zero result establishes no matching records under the chosen filters, not biological absence. Check the selected place and taxon, defaults, and pagination notice before widening the search.
 3. Choose an annotation value from its returned parent attribute. Labels can repeat across attributes: an Egg value under Life Stage is distinct from an Egg value under Evidence of Presence. Empty taxon-scoped usage does not make the full controlled vocabulary invalid.
-4. Distinguish wild and captive cohorts. Where the tool accepts `captive`, false selects wild records and true selects captive or cultivated records only; true does not combine both groups.
-5. Before describing identification agreement, inspect the community taxon, disagreement fields, and identification thread together. Compare total and shown counts before making claims about the whole thread; use the observation's source URL when the returned thread is incomplete.
+4. Distinguish wild and captive cohorts. Where the tool accepts `captive`, false selects wild records and true selects captive or cultivated records only; true does not combine both groups. iNaturalist grades captive records casual, so pair `captive: true` with `"casual"` in `quality_grade`; without it the call returns only records whose grade disagrees with their captive flag, and a notice says so.
+5. Before describing identification agreement, inspect the community taxon, disagreement fields, and identification thread together. Compare total and shown counts before making claims about the whole thread; hidden identifications (`hidden: true`) stay in the thread and in `identifications_total`, so read `identifications_hidden` and say so when citing a hidden entry; when the returned thread is incomplete, follow `next_array_offset` as `array_offset` with the same ids and `include`, or raise `array_limit`. By-id identifications, comments, and observation fields are sorted by ascending `id`, which is creation order, so the newest entries sit at the end.
 6. Read truncation and continuation guidance before claiming a list is complete. Retrieve search's ordered `deferred` IDs with `inaturalist_get_observation` and the same `include` before following its upstream-page continuation, even when `has_more` is false. By-id calls may also defer IDs beyond the first ten distinct attempts; re-call with that tail and the same `include`. A contributor missing from the top-500 leaderboard may still have contributions. Counts come from a live index and can change between calls.
 
 ## Core chain
@@ -60,4 +60,4 @@ Use `inaturalist_get_leaderboard` to distinguish observation activity from ident
 
 Histogram and both leaderboard kinds accept an observer (`user_id` or `user_login`) and `project_id`. Carry those selectors into supported tools when comparing cohorts. On observers, the observer selector returns that person's own row; on identifiers it ranks people who identified that observer's sightings, rather than identifications authored by that observer.
 
-For injectable source context, read `inaturalist://observations/{observation_id}` for a record with its identification thread, or `inaturalist://taxa/{taxon_id}` for a whole projected taxon profile. Use `inaturalist_get_taxon` instead when an outline or selected sections are needed. Preserve each record's licensing, attribution, and coordinate uncertainty when presenting evidence.
+For injectable source context, read `inaturalist://observations/{observation_id}` for a record with its first 40 identifications (use `inaturalist_get_observation` with `array_offset` for the rest), or `inaturalist://taxa/{taxon_id}` for a whole projected taxon profile. Use `inaturalist_get_taxon` instead when an outline or selected sections are needed. Preserve each record's licensing, attribution, and coordinate uncertainty when presenting evidence.
