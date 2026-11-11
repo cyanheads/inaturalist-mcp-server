@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-11-11
+
+Observation threads page past their 40-entry cap, new filters select identifiers and unobserved taxa, and records carry outlinks, hidden flags, taxon-typed fields, and IUCN codes. Zero-hit and captive guidance name the filters at fault.
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-31
 
 Discovery paging and explicit histogram windows.
