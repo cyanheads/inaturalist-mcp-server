@@ -2,7 +2,7 @@
  * @fileoverview Tests for the inaturalist://observations/{observation_id}
  * resource — the happy path (identifications expanded by default), the
  * 40-entry thread cap with its counts, the observer's description and
- * observation fields, the notFound() miss with its recovery hint, and the
+ * observation fields, the declared not_found miss with its recovery hint, and the
  * observation_id path-param schema rejecting a value that is not a positive
  * integer.
  * @module tests/mcp-server/resources/definitions/inaturalist-observation.resource.test
@@ -26,6 +26,7 @@ import {
   projectedObservation,
   rawIdentification,
   rawObservation,
+  rawObservationField,
 } from '../../../helpers/fixtures.js';
 
 vi.mock('@/services/inaturalist/inaturalist-service.js', async (importOriginal) => {
@@ -57,7 +58,7 @@ describe('happy path', () => {
       fake.getObservations.mockResolvedValue({ observations: [observation], unresolved: [] });
       const result = await inaturalistObservationResource.handler(
         { observation_id: '401617560' },
-        createMockContext(),
+        createMockContext({ errors: inaturalistObservationResource.errors }),
       );
       expect(inaturalistObservationResource.mimeType).toBe('application/json');
       expect(inaturalistObservationResource.format).toBeUndefined();
@@ -77,7 +78,10 @@ describe('happy path', () => {
   it('resolves the id with the identifications expansion, always', async () => {
     const observation = projectedObservation();
     fake.getObservations.mockResolvedValue({ observations: [observation], unresolved: [] });
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: inaturalistObservationResource.errors,
+    });
     const params = inaturalistObservationResource.params!.parse({
       observation_id: '401617560',
     });
@@ -94,27 +98,27 @@ describe('happy path', () => {
 });
 
 describe('miss', () => {
-  it('throws notFound with a recovery hint pointing at inaturalist_search_observations', async () => {
+  it('fails with the declared not_found reason, the id, and the contract recovery', async () => {
     fake.getObservations.mockResolvedValue({ observations: [], unresolved: [999_999_999_999] });
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = createMockContext({
+      tenantId: 'test-tenant',
+      errors: inaturalistObservationResource.errors,
+    });
     const params = inaturalistObservationResource.params!.parse({
       observation_id: '999999999999',
     });
 
-    let error: unknown;
-    try {
-      await inaturalistObservationResource.handler(params, ctx);
-    } catch (e) {
-      error = e;
-    }
-
-    expect(error).toMatchObject({
+    await expect(inaturalistObservationResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: {
-        observation_id: 999_999_999_999,
-        recovery: { hint: expect.stringContaining('inaturalist_search_observations') },
-      },
+      data: { reason: 'not_found', observation_id: 999_999_999_999 },
     });
+    expect(inaturalistObservationResource.errors).toEqual([
+      expect.objectContaining({
+        reason: 'not_found',
+        code: JsonRpcErrorCode.NotFound,
+        recovery: expect.stringContaining('inaturalist_search_observations'),
+      }),
+    ]);
   });
 });
 
@@ -160,7 +164,10 @@ describe('thread cap and detail fields on a real read', () => {
     );
     http.install();
     try {
-      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const ctx = createMockContext({
+        tenantId: 'test-tenant',
+        errors: inaturalistObservationResource.errors,
+      });
       const params = inaturalistObservationResource.params!.parse({
         observation_id: String(record.id),
       });
@@ -202,6 +209,78 @@ describe('thread cap and detail fields on a real read', () => {
     expect(inaturalistObservationResource.output?.parse(result)).toEqual(result);
   });
 
+  it('relays each hidden flag and counts hidden identifications over the whole thread', async () => {
+    const { hidden: _omitted, ...unkeyed } = rawIdentification({ id: 3 });
+    const result = await read(
+      rawObservation({
+        id: 5890862,
+        identifications: [
+          ...Array.from({ length: 45 }, (_, i) =>
+            rawIdentification({ id: 100 + i, hidden: i % 10 === 0 }),
+          ),
+          rawIdentification({ id: 1, hidden: true, body: 'Hidden by a moderator.' }),
+          unkeyed,
+        ],
+      }),
+    );
+
+    // Id 140, hidden past the 40-entry cut, still counts; the unkeyed entry does not.
+    expect(result).toMatchObject({
+      identifications_total: 47,
+      identifications_shown: 40,
+      identifications_hidden: 6,
+    });
+    expect(result.identifications?.[0]).toMatchObject({
+      id: 1,
+      hidden: true,
+      body: 'Hidden by a moderator.',
+    });
+    expect(result.identifications?.[1]).not.toHaveProperty('hidden');
+    expect(result.identifications?.[2]).toMatchObject({ id: 100, hidden: true });
+    expect(result).not.toHaveProperty('comments_hidden');
+    expect(inaturalistObservationResource.output?.parse(result)).toEqual(result);
+  });
+
+  it('relays outlinks in upstream order, and omits the field when upstream sent no key', async () => {
+    const outlinks = [
+      { source: 'GBIF', url: 'http://www.gbif.org/occurrence/2006102216' },
+      { source: 'GloBI', url: 'http://www.globalbioticinteractions.org/?a=1&b=2' },
+    ];
+    const result = await read(rawObservation({ id: 5890862, outlinks }));
+    expect(result.outlinks).toEqual(outlinks);
+    expect(inaturalistObservationResource.output?.parse(result)).toEqual(result);
+
+    const { outlinks: _omitted, ...withoutKey } = rawObservation({ id: 7 });
+    expect(await read(withoutKey)).not.toHaveProperty('outlinks');
+  });
+
+  it('keeps the first 40 identifications and fields by ascending id, whatever upstream order', async () => {
+    const order = Array.from({ length: 50 }, (_, i) => 1 + ((i * 37) % 50));
+    const result = await read(
+      rawObservation({
+        id: 5890862,
+        identifications: order.map((id) => rawIdentification({ id })),
+        ofvs: order.map((id) => ({ id, name: `Field ${id}`, value: 'alive' })),
+      }),
+    );
+
+    const first40 = Array.from({ length: 40 }, (_, i) => i + 1);
+    expect(result.identifications?.map((entry) => entry.id)).toEqual(first40);
+    expect(result.observation_fields?.map((field) => field.name)).toEqual(
+      first40.map((id) => `Field ${id}`),
+    );
+    expect(result).toMatchObject({ identifications_total: 50, observation_fields_total: 50 });
+  });
+
+  it('takes no paging parameter and names the tool that pages the rest', () => {
+    expect(Object.keys(inaturalistObservationResource.params?.shape ?? {})).toEqual([
+      'observation_id',
+    ]);
+    expect(inaturalistObservationResource.description).toContain('inaturalist_get_observation');
+    expect(inaturalistObservationResource.description).toContain('array_offset');
+    expect(inaturalistObservationResource.description).not.toContain('upstream order');
+  });
+
   it('keeps a thread of exactly 40 whole', async () => {
     const result = await read(withThread(40));
 
@@ -216,16 +295,33 @@ describe('thread cap and detail fields on a real read', () => {
         id: 402402822,
         description: 'caterpillar on narrow-leaf milkweed',
         ofvs: [
-          { name: 'Habitat_Description', value: 'Garden' },
-          { name: 'Blank', value: ' ' },
+          { name: 'Habitat_Description', datatype: 'text', value: 'Garden' },
+          { name: 'Blank', datatype: 'text', value: ' ' },
+          rawObservationField(),
         ],
       }),
     );
 
     expect(result.description).toBe('caterpillar on narrow-leaf milkweed');
-    expect(result.observation_fields).toEqual([{ name: 'Habitat_Description', value: 'Garden' }]);
-    expect(result.observation_fields_total).toBe(1);
-    expect(result.observation_fields_shown).toBe(1);
+    expect(result.observation_fields).toEqual([
+      { name: 'Habitat_Description', datatype: 'text', value: 'Garden' },
+      {
+        name: 'Host',
+        datatype: 'taxon',
+        value: '125625',
+        taxon: {
+          id: 125625,
+          name: 'Miscanthus',
+          rank: 'genus',
+          common_name: 'Silvergrasses',
+          iconic_taxon_name: 'Plantae',
+        },
+      },
+    ]);
+    expect(JSON.stringify(result.observation_fields)).not.toContain('matched_term');
+    expect(result.observation_fields_total).toBe(2);
+    expect(result.observation_fields_shown).toBe(2);
+    expect(inaturalistObservationResource.output?.parse(result)).toEqual(result);
   });
 
   it('cuts filled observation fields past 40 to the first 40 and reports the filled total', async () => {

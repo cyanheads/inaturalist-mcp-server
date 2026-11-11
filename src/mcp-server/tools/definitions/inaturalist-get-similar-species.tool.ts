@@ -14,6 +14,7 @@ import {
 } from '@/mcp-server/tools/limit-policy.js';
 import {
   areaInputShape,
+  captiveCohortNotice,
   dateRangeInputShape,
   observationFilterInputShape,
   resolveArea,
@@ -143,6 +144,15 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         'Pass a genus or species id: resolve a specific organism by name with inaturalist_resolve_name, or walk children with inaturalist_get_taxon down to a genus, which takes several calls from a class (order, family, subfamily, tribe, subtribe, genus).',
       thrownBy: 'service',
     },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
 
   async handler(requestedInput, ctx) {
@@ -167,7 +177,9 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       ctx,
       'inaturalist_get_similar_species',
     );
-    const clampNotice = [limitNotice, radiusNotice].filter(Boolean).join(' ');
+    const leadNotices = [limitNotice, radiusNotice, captiveCohortNotice(input)]
+      .filter(Boolean)
+      .join(' ');
 
     const dates = resolveDateRange(input);
     if (!dates.ok) {
@@ -203,7 +215,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
       ];
       ctx.enrich.notice(
         [
-          clampNotice,
+          leadNotices,
           scope.length === 0
             ? 'No related taxa were returned for these filters.'
             : `No related taxa were returned for these filters. Re-run without ${scope.join(' and ')} to broaden the result.`,
@@ -220,7 +232,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
         cap: input.limit,
         ...(ceiling === undefined ? {} : { ceiling }),
         guidance: [
-          clampNotice,
+          leadNotices,
           input.limit < SERVED_CAPS.similarSpecies
             ? `Raise limit (max ${SERVED_CAPS.similarSpecies}) to see more returned taxa. Upstream serves at most 24 and publishes no paging, so further taxa may be omitted.`
             : 'Upstream serves at most 24 related taxa and publishes no paging, so this list may be cut. Narrow the area or date filters to explore a smaller set.',
@@ -228,7 +240,7 @@ export const inaturalistGetSimilarSpecies = tool('inaturalist_get_similar_specie
           .filter(Boolean)
           .join(' '),
       });
-    } else if (clampNotice) ctx.enrich.notice(clampNotice);
+    } else if (leadNotices) ctx.enrich.notice(leadNotices);
 
     return { taxon_id: input.taxon_id, similar_species: shown };
   },

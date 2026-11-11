@@ -27,6 +27,7 @@ import type {
   RawIdentification,
   RawLeaderboardEntry,
   RawObservation,
+  RawObservationFieldValue,
   RawPhoto,
   RawPlace,
   RawPopularFieldValue,
@@ -114,6 +115,7 @@ export function rawIdentification(overrides: Partial<RawIdentification> = {}): R
     vision: false,
     body: 'Clear wing pattern match.',
     created_at: '2026-06-01T12:00:00-07:00',
+    hidden: false,
     ...overrides,
   };
 }
@@ -124,6 +126,34 @@ export function rawComment(overrides: Partial<RawComment> = {}): RawComment {
     user: { login: 'commenter_one' },
     body: 'Great find!',
     created_at: '2026-06-01T13:00:00-07:00',
+    hidden: false,
+    ...overrides,
+  };
+}
+
+/**
+ * A taxon-type observation field upstream resolved, as on 412088410. Its taxon
+ * is the full raw record, so the raw-only keys (`rank_level`,
+ * `observations_count`, `matched_term`, `default_photo`) are there to be dropped.
+ */
+export function rawObservationField(
+  overrides: Partial<RawObservationFieldValue> = {},
+): RawObservationFieldValue {
+  return {
+    id: 43288312,
+    name: 'Host',
+    datatype: 'taxon',
+    value: '125625',
+    taxon: rawTaxon({
+      id: 125625,
+      name: 'Miscanthus',
+      rank: 'genus',
+      rank_level: 20,
+      preferred_common_name: 'Silvergrasses',
+      iconic_taxon_name: 'Plantae',
+      observations_count: 987_654,
+      matched_term: 'raw-only matched term',
+    }),
     ...overrides,
   };
 }
@@ -157,6 +187,7 @@ export function rawObservation(overrides: Partial<RawObservation> = {}): RawObse
     num_identification_disagreements: 0,
     identification_disagreements_count: 0,
     community_taxon_id: 48662,
+    outlinks: [{ source: 'GBIF', url: 'http://www.gbif.org/occurrence/5000000001' }],
     ...overrides,
   };
 }
@@ -293,6 +324,7 @@ export function projectedIdentification(
     from_vision: false,
     body: 'Clear wing pattern match.',
     created_at: '2026-06-01T12:00:00-07:00',
+    hidden: false,
     ...overrides,
   };
 }
@@ -303,6 +335,7 @@ export function projectedComment(overrides: Partial<ProjectedComment> = {}): Pro
     by: 'commenter_one',
     body: 'Great find!',
     created_at: '2026-06-01T13:00:00-07:00',
+    hidden: false,
     ...overrides,
   };
 }
@@ -335,6 +368,7 @@ export function projectedObservation(
     agreements: 1,
     disagreements: 0,
     community_taxon_id: 48662,
+    outlinks: [{ source: 'GBIF', url: 'http://www.gbif.org/occurrence/5000000001' }],
     ...overrides,
   };
 }
@@ -517,6 +551,7 @@ export function projectedTaxonDocument(
     common_name: 'Monarch',
     iconic_taxon_name: 'Insecta',
     is_active: true,
+    current_synonymous_taxon_ids: null,
     extinct: false,
     observations_count: 250_000,
     listed_taxa_count: 42,
@@ -537,6 +572,7 @@ export function projectedTaxonDocument(
           status: 'Special Concern',
           authority: 'NatureServe',
           iucn: 10,
+          iucn_code: 'LC',
           place: 'Canada',
           url: 'https://example.test/status',
         },

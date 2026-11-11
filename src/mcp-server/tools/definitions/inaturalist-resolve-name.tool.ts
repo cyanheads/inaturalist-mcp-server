@@ -13,6 +13,7 @@ import {
   RESULT_WINDOW,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
+import { successorsText } from '@/mcp-server/tools/taxon-document.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 import { RANKS } from '@/services/inaturalist/vocabularies.js';
 
@@ -101,6 +102,18 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
               ),
             common_name: z.string().optional().describe('Preferred common name, on taxa.'),
             rank: z.string().optional().describe('Taxonomic rank, on taxa.'),
+            is_active: z
+              .boolean()
+              .optional()
+              .describe(
+                'On taxa: false for a taxon a taxonomic change retired, whose successors are in current_synonymous_taxon_ids.',
+              ),
+            current_synonymous_taxon_ids: z
+              .array(z.number())
+              .optional()
+              .describe(
+                'On inactive taxa only: the taxon ids that replace it; pass one as taxon_id for the current taxon. Empty when upstream records no successor, and several after a split, where the caller chooses.',
+              ),
             display_name: z
               .string()
               .optional()
@@ -163,6 +176,15 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       when: 'rank was supplied with a type other than taxon.',
       recovery:
         'Drop rank, or set type to taxon where the rank filter applies; list valid ranks with inaturalist_list_reference topic ranks.',
+    },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
     },
   ],
 
@@ -268,6 +290,10 @@ export const inaturalistResolveName = tool('inaturalist_resolve_name', {
       if (candidate.login) parts.push(`login ${inlineText(candidate.login)}`);
       if (candidate.common_name) parts.push(`common name ${inlineText(candidate.common_name)}`);
       if (candidate.rank) parts.push(`rank ${inlineText(candidate.rank)}`);
+      if (candidate.is_active !== undefined) parts.push(`is_active ${candidate.is_active}`);
+      if (candidate.current_synonymous_taxon_ids) {
+        parts.push(successorsText(candidate.current_synonymous_taxon_ids));
+      }
       if (candidate.display_name) parts.push(`display name ${inlineText(candidate.display_name)}`);
       if (candidate.slug) parts.push(`slug ${inlineText(candidate.slug)}`);
       if (candidate.matched_term) {

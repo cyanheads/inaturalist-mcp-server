@@ -84,6 +84,75 @@ describe('unknown place recovery', () => {
   );
 });
 
+describe('daily request budget', () => {
+  const RECOVERY =
+    'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.';
+  const definitions = {
+    search: inaturalistSearchObservations,
+    species: inaturalistGetSpeciesCounts,
+    histogram: inaturalistGetHistogram,
+    observers: inaturalistGetLeaderboard,
+    identifiers: inaturalistGetLeaderboard,
+    similar: inaturalistGetSimilarSpecies,
+  } as const;
+
+  it.each(areaCalls)('%s declares rate_budget_exhausted as a service reason', (name) => {
+    expect(
+      definitions[name].errors?.find((entry) => entry.reason === 'rate_budget_exhausted'),
+    ).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      retryable: false,
+      thrownBy: 'service',
+      recovery: RECOVERY,
+    });
+  });
+
+  it.each(areaCalls)(
+    '%s fails a call past the budget as -32003 with the recovery, on both surfaces',
+    async (_name, call) => {
+      vi.mocked(getINaturalistService).mockReturnValue(
+        new INaturalistService({
+          userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+          minRequestIntervalMs: 0,
+          maxConcurrentRequests: 4,
+          dailyRequestBudget: 1,
+        }),
+      );
+      const http = createFetchMock([
+        {
+          match: /api\.inaturalist\.org/,
+          respond: (request) =>
+            Response.json(
+              new URL(request.url).pathname.endsWith('/histogram')
+                ? { results: { month_of_year: {} } }
+                : { total_results: 0, results: [] },
+            ),
+        },
+      ]);
+      http.install();
+      try {
+        expect((await call()).isError).toBeFalsy();
+        const spent = await call();
+        expect(spent.isError).toBe(true);
+        expect(spent.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.RateLimited,
+            data: {
+              reason: 'rate_budget_exhausted',
+              retryable: false,
+              recovery: { hint: RECOVERY },
+            },
+          },
+        });
+        expect(JSON.stringify(spent.content)).toContain('INATURALIST_DAILY_REQUEST_BUDGET');
+        expect(http.calls).toHaveLength(1);
+      } finally {
+        http.restore();
+      }
+    },
+  );
+});
+
 describe('search filters on the wire', () => {
   it.each([
     [inaturalistSearchObservations, {}, ['hrank', 'lrank', 'search_on', 'order_by', 'order']],

@@ -4,8 +4,12 @@
  * @module tests/services/inaturalist/vocabularies.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
+import { taxonStatusInputShape } from '@/mcp-server/tools/observation-filters.js';
 import {
+  CONSERVATION_STATUS_CODES,
+  iucnCode,
   LICENSE_CODES,
   STATIC_VOCABULARIES,
   toQualityGrade,
@@ -52,13 +56,72 @@ describe('STATIC_VOCABULARIES', () => {
     expect(ranks.find((entry) => entry.code === 'genushybrid')?.notes).toBeUndefined();
   });
 
-  it('lists the 7 IUCN-normalised conservation status codes', () => {
-    expect(STATIC_VOCABULARIES.conservation_status_codes).toHaveLength(7);
+  it('lists the 7 csi codes with their levels, then NE and DD as listing-only levels', () => {
+    expect(
+      (STATIC_VOCABULARIES.conservation_status_codes ?? []).map(({ code, notes }) => [
+        code,
+        notes?.split(' ').slice(0, 2).join(' '),
+      ]),
+    ).toEqual([
+      ['LC', 'iucn 10.'],
+      ['NT', 'iucn 20.'],
+      ['VU', 'iucn 30.'],
+      ['EN', 'iucn 40.'],
+      ['CR', 'iucn 50.'],
+      ['EW', 'iucn 60.'],
+      ['EX', 'iucn 70.'],
+      ['NE', 'iucn 0.'],
+      ['DD', 'iucn 5.'],
+    ]);
+    for (const entry of STATIC_VOCABULARIES.conservation_status_codes ?? []) {
+      expect(entry.notes?.includes('not a csi value')).toBe(['NE', 'DD'].includes(entry.code));
+    }
+    expect(STATIC_VOCABULARIES.conservation_status_codes?.slice(0, 3)).toEqual([
+      { code: 'LC', label: 'Least concern', notes: 'iucn 10.' },
+      { code: 'NT', label: 'Near threatened', notes: 'iucn 20.' },
+      { code: 'VU', label: 'Vulnerable', notes: 'iucn 30.' },
+    ]);
   });
 
   it('includes the null-license entry meaning all rights reserved', () => {
     const entry = STATIC_VOCABULARIES.licenses?.find((e) => e.code === 'null');
     expect(entry?.label).toBe('All rights reserved');
+  });
+});
+
+describe('iucnCode', () => {
+  it.each([
+    [0, 'NE'],
+    [5, 'DD'],
+    [10, 'LC'],
+    [20, 'NT'],
+    [30, 'VU'],
+    [40, 'EN'],
+    [50, 'CR'],
+    [60, 'EW'],
+    [70, 'EX'],
+  ] as const)('decodes the published level %i to %s', (level, code) => {
+    expect(iucnCode(level)).toBe(code);
+  });
+
+  it.each([35, -10, 75, 10.5, null])(
+    'returns null for %s, which is off the published scale or absent',
+    (level) => {
+      expect(iucnCode(level)).toBeNull();
+    },
+  );
+});
+
+describe('csi filter codes', () => {
+  const csi = z.object(taxonStatusInputShape).shape.csi;
+
+  it('still accepts exactly LC, NT, VU, EN, CR, EW, and EX', () => {
+    expect(CONSERVATION_STATUS_CODES).toEqual(['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX']);
+    expect(csi.safeParse([...CONSERVATION_STATUS_CODES]).success).toBe(true);
+  });
+
+  it.each(['NE', 'DD'])('rejects the listing-only level %s', (code) => {
+    expect(csi.safeParse([code]).success).toBe(false);
   });
 });
 

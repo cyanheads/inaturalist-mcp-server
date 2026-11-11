@@ -91,6 +91,40 @@ describe('static topics', () => {
   });
 });
 
+describe('conservation_status_codes', () => {
+  it('serves the nine iucn levels on both surfaces, NE and DD last and marked as not csi values', async () => {
+    const result = await runToolContract(inaturalistListReference, {
+      topic: 'conservation_status_codes',
+    });
+    expect(result.isError).toBeFalsy();
+    const { entries } = result.structuredContent as {
+      entries: Array<{ code: string; label: string; notes?: string }>;
+    };
+    expect(entries.map((entry) => entry.code)).toEqual([
+      'LC',
+      'NT',
+      'VU',
+      'EN',
+      'CR',
+      'EW',
+      'EX',
+      'NE',
+      'DD',
+    ]);
+    expect(entries[2]).toEqual({ code: 'VU', label: 'Vulnerable', notes: 'iucn 30.' });
+    expect(entries[7]).toMatchObject({ code: 'NE', notes: expect.stringMatching(/^iucn 0\. /) });
+    const text = markdownText(
+      (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join('\n'),
+    );
+    expect(text).toContain('Vulnerable · code VU\niucn 30.');
+    for (const entry of entries) {
+      expect(text).toContain(`code ${entry.code}`);
+      expect(text).toContain(entry.notes ?? '');
+    }
+    expect(fake.getControlledTerms).not.toHaveBeenCalled();
+  });
+});
+
 describe('controlled_terms (live) topic', () => {
   it('fetches the vocabulary from the service when taxon_id is omitted', async () => {
     fake.getControlledTerms.mockResolvedValue([controlledTerm()]);
@@ -214,6 +248,18 @@ describe('controlled_terms (live) topic', () => {
 });
 
 describe('errors', () => {
+  it('declares the service-thrown daily budget refusal inline', () => {
+    expect(inaturalistListReference.errors).toContainEqual({
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    });
+  });
+
   it('throws taxon_id_not_applicable when taxon_id is given with a non-controlled_terms topic', async () => {
     const ctx = createMockContext({ errors: inaturalistListReference.errors });
     const input = inaturalistListReference.input.parse({ topic: 'ranks', taxon_id: 48662 });

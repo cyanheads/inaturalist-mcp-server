@@ -10,6 +10,7 @@ import {
   annotationFilterNotice,
   areaInputShape,
   blankAsUnset,
+  captiveCohortNotice,
   dateRangeInputShape,
   emptyPageNotice,
   exceedsWindow,
@@ -21,6 +22,7 @@ import {
   resolveObserver,
   resolveRankRange,
   taxonStatusInputShape,
+  userActivityInputShape,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 
@@ -406,6 +408,32 @@ describe('observerProjectInputShape', () => {
   });
 });
 
+describe('userActivityInputShape', () => {
+  const schema = z.object(userActivityInputShape);
+
+  it('takes a positive integer user id or a login in one field', () => {
+    expect(schema.parse({ ident_user_id: 205278, unobserved_by_user_id: 'natureguy' })).toEqual({
+      ident_user_id: 205278,
+      unobserved_by_user_id: 'natureguy',
+    });
+    expect(schema.parse({ ident_user_id: 'ajwright' })).toEqual({ ident_user_id: 'ajwright' });
+  });
+
+  it('treats a blank value as unset, and keeps a whitespace-only one for upstream to refuse', () => {
+    expect(schema.parse({ ident_user_id: '', unobserved_by_user_id: '' })).toEqual({});
+    expect(schema.parse({ unobserved_by_user_id: ' ' })).toEqual({ unobserved_by_user_id: ' ' });
+  });
+
+  it.each([0, -1, 1.5, true])('refuses %j', (value) => {
+    expect(schema.safeParse({ ident_user_id: value }).success).toBe(false);
+    expect(schema.safeParse({ unobserved_by_user_id: value }).success).toBe(false);
+  });
+
+  it('says the user’s own observations count toward ident_user_id', () => {
+    expect(userActivityInputShape.ident_user_id.description).toContain('own observations');
+  });
+});
+
 describe('resolveObserver', () => {
   it('resolves to an empty fragment when no observer or project is given', () => {
     expect(resolveObserver({})).toEqual({ ok: true, value: {} });
@@ -455,6 +483,113 @@ describe('wideningGuidance', () => {
       wideningGuidance({ quality_grade: ['research', 'needs_id'], project_id: 227779 }, false),
     ).toBe('Drop project_id or confirm it with inaturalist_resolve_name.');
     expect(wideningGuidance({ quality_grade: ['research', 'needs_id'] }, false)).toBeUndefined();
+  });
+
+  it.each([
+    [{ q: 'moth' }, 'Drop q.'],
+    [{ q: 'moth', search_on: 'tags' }, 'Drop search_on or drop q with it.'],
+    [{ license: ['cc0'] }, 'Drop license.'],
+    [{ photo_license: ['cc-by'] }, 'Drop photo_license.'],
+    [{ licensed: false }, 'Drop licensed.'],
+    [{ photo_licensed: true }, 'Drop photo_licensed.'],
+    [{ iconic_taxa: ['Chromista'] }, 'Drop iconic_taxa.'],
+  ] as const)('names the supplied filter %j in the drop list', (filter, expected) => {
+    expect(wideningGuidance({ quality_grade: ['research', 'needs_id'], ...filter }, false)).toBe(
+      expected,
+    );
+  });
+
+  it('names the identifier and unobserved-by filters after the observer, only when supplied', () => {
+    expect(
+      wideningGuidance(
+        {
+          quality_grade: ['research', 'needs_id'],
+          user_id: 1,
+          ident_user_id: 'ajwright',
+          unobserved_by_user_id: 134993,
+          project_id: 5,
+        },
+        false,
+      ),
+    ).toBe(
+      'Drop user_id or confirm the observer with inaturalist_resolve_name, drop ident_user_id or confirm the identifier with inaturalist_resolve_name, drop unobserved_by_user_id or confirm the user with inaturalist_resolve_name, or drop project_id or confirm it with inaturalist_resolve_name.',
+    );
+    expect(
+      wideningGuidance({ quality_grade: ['research', 'needs_id'], user_login: 'kueda' }, false),
+    ).not.toMatch(/ident_user_id|unobserved_by_user_id/);
+  });
+
+  it('never names an empty array the caller already sees reported as ignored', () => {
+    expect(
+      wideningGuidance(
+        {
+          quality_grade: ['research', 'needs_id'],
+          license: [],
+          photo_license: [],
+          iconic_taxa: [],
+        },
+        false,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('checks the annotation pairing before the quality_grade remedy, naming the taxon when given', () => {
+    expect(
+      wideningGuidance({ quality_grade: ['research'], term_id: [1], term_value_id: [6] }, true),
+    ).toBe(
+      'Widen the area, check the term_id/term_value_id pairing with inaturalist_list_reference topic controlled_terms, or set quality_grade to include "needs_id".',
+    );
+    expect(
+      wideningGuidance(
+        { quality_grade: ['research', 'needs_id'], taxon_id: 3, term_id: [1], term_value_id: [6] },
+        false,
+      ),
+    ).toBe(
+      'Drop taxon_id or confirm it with inaturalist_resolve_name, or check the term_id/term_value_id pairing with inaturalist_list_reference topic controlled_terms and taxon_id.',
+    );
+    expect(wideningGuidance({ quality_grade: ['research', 'needs_id'], term_id: [1] }, false)).toBe(
+      'Check term_id with inaturalist_list_reference topic controlled_terms.',
+    );
+  });
+});
+
+describe('captiveCohortNotice', () => {
+  const NOTICE =
+    'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+
+  it.each([['research'], ['needs_id'], ['research', 'needs_id'], ['needs_id', 'research']])(
+    'discloses the grade-inconsistent cohort for captive true with %j',
+    (...quality_grade) => {
+      expect(captiveCohortNotice({ captive: true, quality_grade })).toBe(NOTICE);
+    },
+  );
+
+  it.each([['casual'], ['research', 'casual'], ['needs_id', 'casual', 'research']])(
+    'stays silent once casual is anywhere in %j',
+    (...quality_grade) => {
+      expect(captiveCohortNotice({ captive: true, quality_grade })).toBeUndefined();
+    },
+  );
+
+  it.each([['research'], ['casual'], ['research', 'needs_id']])(
+    'stays silent for wild-only or unset captive with %j',
+    (...quality_grade) => {
+      expect(captiveCohortNotice({ captive: false, quality_grade })).toBeUndefined();
+      expect(captiveCohortNotice({ quality_grade })).toBeUndefined();
+    },
+  );
+
+  it('drops the needs_id remedy from widening guidance under captive: true, which casual grades', () => {
+    expect(wideningGuidance({ quality_grade: ['research'], captive: true }, true)).toBe(
+      'Widen the area.',
+    );
+    expect(wideningGuidance({ quality_grade: ['research'], captive: true }, false)).toBeUndefined();
+    expect(
+      wideningGuidance({ quality_grade: ['casual'], captive: true, d1: '2027-01-01' }, true),
+    ).toBe('Widen or drop d1/d2, or widen the area.');
+    expect(wideningGuidance({ quality_grade: ['research'], captive: false }, false)).toBe(
+      'Set quality_grade to include "needs_id".',
+    );
   });
 });
 

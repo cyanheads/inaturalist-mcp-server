@@ -5,11 +5,15 @@
  * @module tests/smoke/definitions.smoke.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { inaturalistFindPlaces } from '@/mcp-server/tools/definitions/inaturalist-find-places.tool.js';
+import { inaturalistGetHistogram } from '@/mcp-server/tools/definitions/inaturalist-get-histogram.tool.js';
+import { inaturalistGetLeaderboard } from '@/mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.js';
 import { inaturalistGetObservation } from '@/mcp-server/tools/definitions/inaturalist-get-observation.tool.js';
 import { inaturalistGetSimilarSpecies } from '@/mcp-server/tools/definitions/inaturalist-get-similar-species.tool.js';
+import { inaturalistGetSpeciesCounts } from '@/mcp-server/tools/definitions/inaturalist-get-species-counts.tool.js';
 import { inaturalistListReference } from '@/mcp-server/tools/definitions/inaturalist-list-reference.tool.js';
 import { inaturalistResolveName } from '@/mcp-server/tools/definitions/inaturalist-resolve-name.tool.js';
 import { inaturalistSearchObservations } from '@/mcp-server/tools/definitions/inaturalist-search-observations.tool.js';
@@ -68,6 +72,35 @@ describe('definition smoke test', () => {
     });
   });
 
+  it.each([
+    inaturalistSearchObservations,
+    inaturalistGetSpeciesCounts,
+    inaturalistGetHistogram,
+    inaturalistGetSimilarSpecies,
+    inaturalistGetLeaderboard,
+  ])('describes what $name fields do, not how upstream is wired', (definition) => {
+    const advertised = JSON.stringify([definition.description, z.toJSONSchema(definition.input)]);
+    for (const clause of [
+      'answers HTTP 500 upstream',
+      'ignored upstream and the unfiltered corpus comes back',
+      'matches nothing upstream',
+      'sent upstream as id_below',
+      '28 KB',
+    ]) {
+      expect(advertised).not.toContain(clause);
+    }
+    expect(advertised).toContain('inaturalist_find_places');
+  });
+
+  it('keeps each trimmed field’s constraint and pointer', () => {
+    const shape = inaturalistSearchObservations.input.shape;
+    expect(shape.place_id.description).toContain('Mutually exclusive');
+    expect(shape.term_value_id.description).toContain('Requires term_id');
+    expect(shape.iconic_taxa.description).toContain('inaturalist_list_reference topic iconic_taxa');
+    expect(shape.cursor.description).toContain('Mutually exclusive with page');
+    expect(inaturalistSearchObservations.description).toContain('inaturalist_get_observation');
+  });
+
   it('declares the upstream rank floor on inaturalist_get_similar_species as a typed reason', () => {
     expect(inaturalistGetSimilarSpecies.errors?.map((entry) => entry.reason)).toEqual([
       'unknown_place_id',
@@ -75,6 +108,7 @@ describe('definition smoke test', () => {
       'inverted_date_range',
       'unknown_taxon_id',
       'taxon_rank_too_coarse',
+      'rate_budget_exhausted',
     ]);
   });
 
@@ -120,9 +154,11 @@ describe('definition smoke test', () => {
       'identifications',
       'identifications_total',
       'identifications_shown',
+      'identifications_hidden',
       'comments',
       'comments_total',
       'comments_shown',
+      'comments_hidden',
       'community_taxon',
       'identification_disagreements_count',
       'description',

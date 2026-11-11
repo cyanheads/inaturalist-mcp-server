@@ -106,6 +106,12 @@ export const IdentificationSchema = z
       .describe('True when the identification came from the upstream image classifier.'),
     body: z.string().nullable().describe('Free-text note written by the identifier.'),
     created_at: z.string().nullable().describe('When the identification was added, ISO 8601.'),
+    hidden: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when a moderator hid this identification; it keeps its place in the thread. Absent when upstream sent no flag.',
+      ),
   })
   .describe('One identification in the community thread.');
 
@@ -115,15 +121,45 @@ export const CommentSchema = z
     by: z.string().nullable().describe('Login of the commenter.'),
     body: z.string().nullable().describe('Free-text comment body.'),
     created_at: z.string().nullable().describe('When the comment was posted, ISO 8601.'),
+    hidden: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when a moderator hid this comment; it keeps its place in the list. Absent when upstream sent no flag.',
+      ),
   })
   .describe('One discussion comment on the record.');
 
 export const ObservationFieldSchema = z
   .object({
     name: z.string().nullable().describe('Verbatim field name, e.g. "Habitat_Description".'),
-    value: z.string().describe('The value filled in, verbatim.'),
+    value: z
+      .string()
+      .describe('The value filled in, verbatim. On a taxon field it is usually a taxon id.'),
+    datatype: z
+      .string()
+      .nullable()
+      .describe(
+        'Field type as upstream names it, e.g. text, numeric, taxon, date. Null when upstream sent none.',
+      ),
+    taxon: TaxonSummarySchema.optional().describe(
+      'The taxon a taxon-type value names, when upstream resolved one; its id works with inaturalist_get_taxon and taxon_id filters. Absent for free text, such as a typed species name.',
+    ),
   })
   .describe('One filled observation field.');
+
+export const OutlinkSchema = z
+  .object({
+    source: z
+      .string()
+      .nullable()
+      .describe('External database name, verbatim, e.g. "GBIF". Null when upstream sent none.'),
+    url: z
+      .string()
+      .nullable()
+      .describe('The record’s page in that database, verbatim. Null when upstream sent none.'),
+  })
+  .describe('One external database holding a copy of this record.');
 
 export const CoordinateSchema = z.object({
   lat: z.number().describe('Latitude in decimal degrees.'),
@@ -210,6 +246,12 @@ export const ObservationSchema = z
       .number()
       .nullable()
       .describe('Consensus taxon id. Differs from taxon.id while a thread is contested.'),
+    outlinks: z
+      .array(OutlinkSchema)
+      .optional()
+      .describe(
+        'External copies of the record in upstream order, e.g. its GBIF occurrence for citation; empty when none. GBIF links appear only on research-grade CC0, CC BY, or CC BY-NC records once exported.',
+      ),
     photos: z
       .array(PhotoSchema)
       .optional()
@@ -226,30 +268,46 @@ export const ObservationSchema = z
       .array(IdentificationSchema)
       .optional()
       .describe(
-        'Requested identification thread, first entries in upstream order (not strictly chronological), sharing a 40-entry budget across records.',
+        'Requested identification thread sorted by ascending id, which is creation order: the page from array_offset, at most each record’s share of array_limit. The resource keeps the first 40.',
       ),
     identifications_total: z
       .number()
       .optional()
-      .describe('Thread size before the cap; present with "identifications".'),
+      .describe('Whole thread size, the same on every page; present with "identifications".'),
     identifications_shown: z
       .number()
       .optional()
-      .describe('Identification entries returned; below identifications_total when capped.'),
+      .describe(
+        'Identification entries on this page; below identifications_total when the page holds part of the thread.',
+      ),
+    identifications_hidden: z
+      .number()
+      .optional()
+      .describe(
+        'Hidden identifications in the whole thread, the same on every page; present with "identifications". Hidden entries are kept and counted in identifications_total.',
+      ),
     comments: z
       .array(CommentSchema)
       .optional()
       .describe(
-        'Requested comments, first entries in upstream order (not strictly chronological), sharing a 40-entry budget across records.',
+        'Requested comments sorted by ascending id, which is posting order, paged like identifications.',
       ),
     comments_total: z
       .number()
       .optional()
-      .describe('Comment count before the cap; present with "comments".'),
+      .describe('Whole comment count, the same on every page; present with "comments".'),
     comments_shown: z
       .number()
       .optional()
-      .describe('Comment entries returned; below comments_total when capped.'),
+      .describe(
+        'Comment entries on this page; below comments_total when the page holds part of them.',
+      ),
+    comments_hidden: z
+      .number()
+      .optional()
+      .describe(
+        'Hidden comments among all comments, the same on every page; present with "comments". Hidden entries are kept and counted in comments_total.',
+      ),
     community_taxon: TaxonSummarySchema.nullable()
       .optional()
       .describe('Resolved consensus taxon on detail records; null without consensus.'),
@@ -268,16 +326,18 @@ export const ObservationSchema = z
       .array(ObservationFieldSchema)
       .optional()
       .describe(
-        'Filled fields on detail records, verbatim; blanks omitted. First entries in upstream order, sharing a 40-entry budget across records.',
+        'Filled fields on detail records, verbatim; blanks omitted, then sorted by ascending field-value id and paged like identifications.',
       ),
     observation_fields_total: z
       .number()
       .optional()
-      .describe('Filled field count before the cap on detail records.'),
+      .describe('Whole filled field count on detail records, the same on every page.'),
     observation_fields_shown: z
       .number()
       .optional()
-      .describe('Filled fields returned; below observation_fields_total when capped.'),
+      .describe(
+        'Filled fields on this page; below observation_fields_total when the page holds part of them.',
+      ),
   })
   .describe('One projected observation record.');
 
@@ -286,9 +346,11 @@ export const SearchObservationSchema = ObservationSchema.omit({
   identifications: true,
   identifications_total: true,
   identifications_shown: true,
+  identifications_hidden: true,
   comments: true,
   comments_total: true,
   comments_shown: true,
+  comments_hidden: true,
   community_taxon: true,
   identification_disagreements_count: true,
   description: true,
@@ -321,11 +383,18 @@ export function inlineText(text: string): string {
     .join('');
 }
 
-/** Link a URL without normalizing its value; non-linkable values remain literal text. */
-export function urlText(url: string): string {
-  return url.includes('\r') || url.includes('\n') || url.includes('\u0000')
-    ? inlineText(url)
-    : markdownLink(url, url);
+/** True when a value cannot sit inside one Markdown link on one physical line. */
+function breaksLink(text: string): boolean {
+  return text.includes('\r') || text.includes('\n') || text.includes('\u0000');
+}
+
+/**
+ * Link a URL under `label` (the URL itself by default) without normalizing
+ * either; a pair that cannot form a single-line link stays literal text.
+ */
+export function urlText(url: string, label = url): string {
+  if (!breaksLink(url) && !breaksLink(label)) return markdownLink(label, url);
+  return label === url ? inlineText(url) : `${inlineText(label)} (${inlineText(url)})`;
 }
 
 /** A null licence is a fact about the record, so it renders in words rather than as a blank. */
@@ -365,21 +434,24 @@ export function renderPhoto(photo: PhotoOutput, label: string): string[] {
 }
 
 /**
- * The heading of a capped array's block. The by-id tool reports how many entries
- * it kept against the array's upstream size; a search record carries neither
- * count and keeps the bare heading.
+ * The heading of a capped array's block. The by-id tool reports which entries
+ * of the array, sorted by ascending id, the page at `arrayOffset` kept against
+ * the array's whole size; a search record carries neither count and keeps the
+ * bare heading.
  */
 function cappedHeading(
   label: string,
   shown: number | undefined,
   total: number | undefined,
+  arrayOffset: number,
 ): string {
   if (shown === undefined && total === undefined) return `### ${label}`;
   if (shown === undefined) return `### ${label} — ${total} total`;
   if (total === undefined) return `### ${label} — ${shown} shown`;
-  return shown < total
-    ? `### ${label} — first ${shown} of ${total} shown, in upstream order`
-    : `### ${label} — ${shown} of ${total} shown`;
+  if (shown === total) return `### ${label} — ${shown} of ${total} shown`;
+  if (shown === 0)
+    return `### ${label} — 0 of ${total} shown, array_offset ${arrayOffset} is past the last entry`;
+  return `### ${label} — ${shown} of ${total} shown: entries ${arrayOffset + 1}–${arrayOffset + shown} by ascending id`;
 }
 
 function observationHeading(observation: ObservationOutput): string {
@@ -396,13 +468,22 @@ function observationHeading(observation: ObservationOutput): string {
  * The per-observation markdown block. Every terminal field of
  * {@link ObservationSchema} is rendered here, including the presence-based
  * expansion arms, so both tools satisfy format parity from one place.
+ * `arrayOffset` is the by-id page the capped arrays start at, which their
+ * headings name.
  */
-export function renderObservation(observation: ObservationOutput): string[] {
+export function renderObservation(observation: ObservationOutput, arrayOffset = 0): string[] {
   const lines: string[] = [`## ${observationHeading(observation)}`];
 
   lines.push(
     `**id** ${observation.id} · **uuid** ${inlineText(observation.uuid ?? 'not published')} · ${observation.url === null ? 'no page URL published' : urlText(observation.url)}`,
   );
+  if (observation.outlinks !== undefined) {
+    const links = observation.outlinks.map(({ source, url }) => {
+      const label = source ?? 'source not recorded';
+      return url === null ? `${inlineText(label)} (no URL published)` : urlText(url, label);
+    });
+    lines.push(`**Outlinks:** ${links.length === 0 ? 'none' : links.join(' · ')}`);
+  }
   if (observation.taxon) lines.push(`**Identified as:** ${taxonLine(observation.taxon)}`);
   lines.push(
     `**Observed:** ${inlineText(observation.observed_on ?? 'date not recorded')} · ${inlineText(observation.observed_at ?? 'no timestamp recorded')}`,
@@ -487,11 +568,15 @@ export function renderObservation(observation: ObservationOutput): string[] {
         'Observation fields',
         observation.observation_fields_shown,
         observation.observation_fields_total,
+        arrayOffset,
       ),
     );
     if (observation.observation_fields?.length === 0) lines.push('_none_');
     for (const field of observation.observation_fields ?? []) {
-      lines.push(`- **${inlineText(field.name ?? 'unnamed field')}:** ${inlineText(field.value)}`);
+      const taxon = field.taxon ? ` — ${taxonLine(field.taxon)}` : '';
+      lines.push(
+        `- **${inlineText(field.name ?? 'unnamed field')}** (${inlineText(field.datatype ?? 'datatype not recorded')}): ${inlineText(field.value)}${taxon}`,
+      );
     }
   }
 
@@ -516,8 +601,13 @@ export function renderObservation(observation: ObservationOutput): string[] {
         'Identification thread',
         observation.identifications_shown,
         observation.identifications_total,
+        arrayOffset,
       ),
     );
+    if (observation.identifications_hidden !== undefined)
+      lines.push(
+        `**identifications_hidden:** ${observation.identifications_hidden} — hidden entries across the whole thread, the same on every page`,
+      );
     for (const identification of identifications) {
       const taxon = identification.taxon
         ? taxonLine(identification.taxon)
@@ -527,6 +617,7 @@ export function renderObservation(observation: ObservationOutput): string[] {
         `disagreement: ${identification.disagreement ?? 'not recorded'}`,
         `from image classifier: ${identification.from_vision}`,
         `current: ${identification.current}`,
+        ...(identification.hidden === undefined ? [] : [`hidden: ${identification.hidden}`]),
         `id ${identification.id}`,
         inlineText(identification.created_at ?? 'no timestamp'),
       ];
@@ -538,10 +629,22 @@ export function renderObservation(observation: ObservationOutput): string[] {
   }
 
   if (comments && (comments.length > 0 || observation.comments_total !== undefined)) {
-    lines.push(cappedHeading('Comments', observation.comments_shown, observation.comments_total));
-    for (const comment of comments) {
+    lines.push(
+      cappedHeading(
+        'Comments',
+        observation.comments_shown,
+        observation.comments_total,
+        arrayOffset,
+      ),
+    );
+    if (observation.comments_hidden !== undefined)
       lines.push(
-        `- **${inlineText(comment.by ?? 'unknown')}** · id ${comment.id} · ${inlineText(comment.created_at ?? 'no timestamp')}`,
+        `**comments_hidden:** ${observation.comments_hidden} — hidden entries across all comments, the same on every page`,
+      );
+    for (const comment of comments) {
+      const hidden = comment.hidden === undefined ? '' : ` · hidden: ${comment.hidden}`;
+      lines.push(
+        `- **${inlineText(comment.by ?? 'unknown')}** · id ${comment.id} · ${inlineText(comment.created_at ?? 'no timestamp')}${hidden}`,
       );
       if (comment.body) lines.push(...blockquote(comment.body));
     }

@@ -11,11 +11,13 @@ import {
   annotationFilterNotice,
   areaInputShape,
   blankAsUnset,
+  captiveCohortNotice,
   creationDateRangeInputShape,
   dateRangeInputShape,
   emptyFilterNotice,
   observationFilterInputShape,
   observerProjectInputShape,
+  optionsSentence,
   resolveAnnotation,
   resolveArea,
   resolveDateRange,
@@ -192,6 +194,15 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
       thrownBy: 'service',
     },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
 
   async handler(input, ctx) {
@@ -287,6 +298,7 @@ export const inaturalistGetHistogram = tool('inaturalist_get_histogram', {
       generatedStart
         ? `Using generated ${lowerField}=${windowStart} as the histogram window start. total sums this window's upstream buckets, including any not shown.`
         : undefined,
+      captiveCohortNotice(input),
       total === 0
         ? zeroHitNotice(input, Object.keys(area.value).length > 0, windowStart)
         : undefined,
@@ -364,10 +376,15 @@ function continuationNotice(
  * set, otherwise the annotation or iconic-group filter when one was given, the
  * taxon only when one was given, and the area only when one was named. A
  * `term_value_id` from another attribute zeroes every bucket, so an annotation
- * filter always carries the pairing check.
+ * filter always carries the pairing check. The finding says no records match
+ * the filters, never that none exist: the default cohort leaves out needs_id,
+ * casual and captive records. Under `captive: true` no quality remedy is
+ * offered — captive records are graded casual, and the cohort notice says so.
  */
 function zeroHitNotice(
   input: {
+    quality_grade: readonly string[];
+    captive: boolean;
     taxon_id?: number | undefined;
     d1?: string | undefined;
     d2?: string | undefined;
@@ -398,7 +415,7 @@ function zeroHitNotice(
   let finding =
     windowStart !== undefined
       ? `Every bucket is zero — no records${of}${where} match the histogram window and other filters.`
-      : `Every bucket is zero — ${hasTaxon ? 'this taxon has no records' : 'nothing is recorded'}${where}.`;
+      : `Every bucket is zero — no records${of}${where} match these filters.`;
   const bounds = [
     ...(input.d1 !== undefined || input.d2 !== undefined
       ? [`observation-date d1/d2 ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}`]
@@ -430,8 +447,19 @@ function zeroHitNotice(
       : []),
     ...(iconic ? ['Drop iconic_taxa or choose another group.'] : []),
   ];
-  const remedy = hasTaxon
-    ? `Confirm the taxon with inaturalist_resolve_name${hasArea ? ', or widen the area' : ''}.`
-    : `${hasArea ? 'Widen the area, or relax' : 'Relax'} quality_grade.`;
-  return [finding, ...filterChecks, remedy].join(' ');
+  const researchOnly = input.quality_grade.length === 1 && input.quality_grade[0] === 'research';
+  let qualityRemedy: string | undefined;
+  if (!input.captive) {
+    qualityRemedy = hasTaxon
+      ? researchOnly
+        ? 'add "needs_id" to quality_grade'
+        : undefined
+      : 'relax quality_grade';
+  }
+  const remedy = optionsSentence([
+    ...(hasTaxon ? ['confirm the taxon with inaturalist_resolve_name'] : []),
+    ...(hasArea ? ['widen the area'] : []),
+    ...(qualityRemedy ? [qualityRemedy] : []),
+  ]);
+  return [finding, ...filterChecks, remedy].filter(Boolean).join(' ');
 }

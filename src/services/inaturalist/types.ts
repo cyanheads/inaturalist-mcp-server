@@ -4,7 +4,7 @@
  * @module services/inaturalist/types
  */
 
-import type { QualityGrade } from './vocabularies.js';
+import type { IucnCode, QualityGrade } from './vocabularies.js';
 
 /**
  * Every probed endpoint answers with this envelope, including the by-id paths —
@@ -57,6 +57,10 @@ export type RawTaxon = {
   observations_count?: number | null;
   matched_term?: string | null;
   default_photo?: RawPhoto | null;
+  /** False once a taxonomic change retires the taxon. */
+  is_active?: boolean;
+  /** The taxa that replace a retired one: null while active, `[]` when none is recorded. */
+  current_synonymous_taxon_ids?: number[] | null;
 };
 
 export type RawIdentification = {
@@ -69,6 +73,8 @@ export type RawIdentification = {
   vision?: boolean;
   body?: string | null;
   created_at?: string | null;
+  /** True once a moderator hid the entry; upstream still returns it, often with its body. */
+  hidden?: boolean;
 };
 
 export type RawComment = {
@@ -76,12 +82,26 @@ export type RawComment = {
   user?: { login?: string | null } | null;
   body?: string | null;
   created_at?: string | null;
+  /** True once a moderator hid the comment; upstream still returns it, often with its body. */
+  hidden?: boolean;
 };
 
 /** One observation-field value embedded in a record — `ofvs[]` upstream. */
 export type RawObservationFieldValue = {
+  /** The field value's own id — the by-id page sort key, distinct from `field_id`. */
+  id?: number;
   name?: string | null;
+  /** The field's type: `text`, `numeric`, `taxon`, `date`, `datetime`, … */
+  datatype?: string | null;
   value?: string | null;
+  /** On a `taxon` field whose value upstream resolved, the full taxon record; null otherwise. */
+  taxon?: RawTaxon | null;
+};
+
+/** One link from a record to an external database that holds a copy of it, e.g. its GBIF occurrence. */
+export type RawOutlink = {
+  source?: string | null;
+  url?: string | null;
 };
 
 export type RawObservation = {
@@ -116,6 +136,8 @@ export type RawObservation = {
   num_identification_disagreements?: number | null;
   identification_disagreements_count?: number | null;
   community_taxon_id?: number | null;
+  /** `[]` when no external database holds the record; upstream sends it on every record. */
+  outlinks?: RawOutlink[] | null;
 };
 
 export type RawGeoJsonPolygon = {
@@ -175,7 +197,6 @@ export type RawTaxonPhoto = {
 
 /** `/taxa/{id}` — 95 KB for a common species, and the only fat document here. */
 export type RawTaxonDocument = RawTaxon & {
-  is_active?: boolean;
   extinct?: boolean;
   vision?: boolean;
   listed_taxa_count?: number | null;
@@ -280,6 +301,8 @@ export type ProjectedIdentification = {
   from_vision: boolean;
   body: string | null;
   created_at: string | null;
+  /** Upstream's flag, relayed only when upstream sent the key — never defaulted. */
+  hidden?: boolean;
 };
 
 export type ProjectedComment = {
@@ -287,12 +310,23 @@ export type ProjectedComment = {
   by: string | null;
   body: string | null;
   created_at: string | null;
+  /** Upstream's flag, relayed only when upstream sent the key — never defaulted. */
+  hidden?: boolean;
 };
 
-/** A filled observation field — name and value as the record carries them. */
+/** A filled observation field — name, type, and value as the record carries them. */
 export type ProjectedObservationField = {
   name: string | null;
   value: string;
+  datatype: string | null;
+  /** The taxon a taxon-type value names, only when upstream resolved one. */
+  taxon?: TaxonSummary;
+};
+
+/** An external copy of the record — source name and URL, verbatim. */
+export type ProjectedOutlink = {
+  source: string | null;
+  url: string | null;
 };
 
 export type ProjectedObservation = {
@@ -320,15 +354,19 @@ export type ProjectedObservation = {
   agreements: number;
   disagreements: number;
   community_taxon_id: number | null;
+  /** In upstream order; absent when upstream sent no `outlinks` array. */
+  outlinks?: ProjectedOutlink[];
   photos?: ProjectedPhoto[];
   annotations?: ProjectedAnnotation[];
   sounds?: ProjectedSound[];
   identifications?: ProjectedIdentification[];
   identifications_total?: number;
   identifications_shown?: number;
+  identifications_hidden?: number;
   comments?: ProjectedComment[];
   comments_total?: number;
   comments_shown?: number;
+  comments_hidden?: number;
   community_taxon?: TaxonSummary | null;
   identification_disagreements_count?: number;
   description?: string | null;
@@ -397,6 +435,8 @@ export type ConservationStatus = {
   status: string | null;
   authority: string | null;
   iucn: number | null;
+  /** `iucn` decoded on the published scale; null when `iucn` is null or off it. */
+  iucn_code: IucnCode | null;
   place: string | null;
   url: string | null;
 };
@@ -414,6 +454,7 @@ export type ProjectedTaxonDocument = {
   common_name: string | null;
   iconic_taxon_name: string | null;
   is_active: boolean;
+  current_synonymous_taxon_ids: number[] | null;
   extinct: boolean;
   observations_count: number | null;
   listed_taxa_count: number | null;
@@ -485,6 +526,10 @@ export type ResolvedCandidate = {
   login?: string;
   common_name?: string;
   rank?: string;
+  /** On `kind: 'taxon'` only, whenever upstream sends it. */
+  is_active?: boolean;
+  /** On an inactive taxon only — upstream's array, `[]` included. */
+  current_synonymous_taxon_ids?: number[];
   display_name?: string;
   slug?: string;
   matched_term?: string;

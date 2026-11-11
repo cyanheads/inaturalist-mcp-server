@@ -19,6 +19,7 @@ import {
   renderPhoto,
   urlText,
 } from '@/mcp-server/tools/observation-record.js';
+import { IUCN_CODES } from '@/services/inaturalist/vocabularies.js';
 
 /** Heading stand-in for a taxon whose name and common name are both absent. */
 const UNNAMED_TAXON = '*(taxon name not recorded)*';
@@ -58,7 +59,15 @@ export const ConservationStatusSchema = z
     iucn: z
       .number()
       .nullable()
-      .describe('IUCN-normalised level upstream assigns this listing, on its own numeric scale.'),
+      .describe(
+        'IUCN-equivalent level upstream assigns this listing, whatever its authority: 0 NE, 5 DD, 10 LC, 20 NT, 30 VU, 40 EN, 50 CR, 60 EW, 70 EX. The csi filter matches on this level.',
+      ),
+    iucn_code: z
+      .enum(IUCN_CODES)
+      .nullable()
+      .describe(
+        'The code iucn maps to on that scale. An equivalence upstream assigns, not an IUCN assessment; the authority’s own status stays in status. Null when iucn is null or off the published scale.',
+      ),
     place: z
       .string()
       .nullable()
@@ -83,7 +92,7 @@ export const ConservationSchema = z
       .array(ConservationStatusSchema)
       .describe('Every listing upstream records, one per authority and place.'),
     global_status: ConservationStatusSchema.nullable().describe(
-      'Upstream global listing; null when none is recorded.',
+      'Upstream’s headline global status. Often null for a Least Concern taxon, whose global listings still appear in statuses with no place.',
     ),
   })
   .describe('Conservation listings for the taxon.');
@@ -108,7 +117,15 @@ export const TaxonDocumentSchema = z.object({
     .describe('Broad organism group, e.g. "Insecta". Usable as an iconic_taxa filter value.'),
   is_active: z
     .boolean()
-    .describe('False for a taxon superseded by a taxonomic change; its id still resolves.'),
+    .describe(
+      'False for a taxon superseded by a taxonomic change; its id still resolves, and current_synonymous_taxon_ids names its successors.',
+    ),
+  current_synonymous_taxon_ids: z
+    .array(z.number())
+    .nullable()
+    .describe(
+      'Taxon ids that replace this taxon after a taxonomic change; pass one as taxon_id for the current taxon. Null on an active taxon, empty when an inactive taxon records no successor, and several after a split, where the caller chooses.',
+    ),
   extinct: z.boolean().describe('True when the taxon is recorded as extinct.'),
   observations_count: z
     .number()
@@ -160,6 +177,7 @@ export const TAXON_SUMMARY_KEYS = [
   'common_name',
   'iconic_taxon_name',
   'is_active',
+  'current_synonymous_taxon_ids',
   'extinct',
   'observations_count',
   'listed_taxa_count',
@@ -169,11 +187,23 @@ export const TAXON_SUMMARY_KEYS = [
 /** Kept on every selection so a sliced document still identifies itself. */
 export const TAXON_ALWAYS_KEEP = ['id', 'name', 'rank'] as const;
 
+/**
+ * An inactive taxon's successor ids, with the onward pointer when there is one
+ * to follow. Shared by the document's scalar line and a resolve-name candidate.
+ */
+export function successorsText(ids: readonly number[]): string {
+  return ids.length === 0
+    ? 'current_synonymous_taxon_ids none recorded'
+    : `current_synonymous_taxon_ids ${ids.join(', ')} (pass one as taxon_id for the current taxon)`;
+}
+
 function conservationLine(status: z.infer<typeof ConservationStatusSchema>): string {
   return [
     `status ${inlineText(status.status ?? 'not published')}`,
     `authority ${inlineText(status.authority ?? 'not published')}`,
-    `iucn ${status.iucn ?? 'not published'}`,
+    status.iucn === null
+      ? 'iucn not published'
+      : `iucn ${status.iucn} (${status.iucn_code ?? 'off the published scale'})`,
     `place ${inlineText(status.place ?? 'global')}`,
     `url ${status.url === null ? 'none published' : urlText(status.url)}`,
   ].join(' · ');
@@ -209,6 +239,13 @@ function scalarLine(doc: PartialTaxonDocument, id: number): string {
     parts.push(`iconic_taxon_name ${inlineText(doc.iconic_taxon_name ?? 'none assigned')}`);
   }
   if (doc.is_active !== undefined) parts.push(`is_active ${doc.is_active}`);
+  if (doc.current_synonymous_taxon_ids !== undefined) {
+    parts.push(
+      doc.current_synonymous_taxon_ids === null
+        ? 'current_synonymous_taxon_ids not published'
+        : successorsText(doc.current_synonymous_taxon_ids),
+    );
+  }
   if (doc.extinct !== undefined) parts.push(`extinct ${doc.extinct}`);
   if (doc.observations_count !== undefined) {
     parts.push(`observations_count ${doc.observations_count ?? 'not published'}`);
@@ -260,7 +297,7 @@ export function renderTaxonDocument(doc: PartialTaxonDocument): string[] {
   if (doc.conservation) {
     lines.push('### Conservation');
     lines.push(
-      `**Global status:** ${doc.conservation.global_status ? conservationLine(doc.conservation.global_status) : 'none recorded'}`,
+      `**Global status:** ${doc.conservation.global_status ? conservationLine(doc.conservation.global_status) : 'none published'}`,
     );
     if (doc.conservation.statuses.length === 0) lines.push('_No listings published._');
     for (const status of doc.conservation.statuses) {

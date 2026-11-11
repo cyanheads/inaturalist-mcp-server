@@ -6,6 +6,7 @@
  * @module tests/mcp-server/tools/definitions/inaturalist-find-places.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistFindPlaces } from '@/mcp-server/tools/definitions/inaturalist-find-places.tool.js';
@@ -335,6 +336,20 @@ describe('bounding-box arm', () => {
     } finally {
       http.restore();
     }
+  });
+});
+
+describe('rate_budget_exhausted', () => {
+  it('declares the service-thrown daily budget refusal inline', () => {
+    expect(inaturalistFindPlaces.errors).toContainEqual({
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    });
   });
 });
 

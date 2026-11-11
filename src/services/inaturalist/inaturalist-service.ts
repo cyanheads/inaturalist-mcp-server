@@ -35,6 +35,7 @@ import {
   projectSimilarSpecies,
   projectSpeciesCount,
   projectTaxonDocument,
+  projectTaxonLifecycle,
   projectTaxonRecord,
   threadCap,
 } from './projections.js';
@@ -165,6 +166,8 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     ...OBSERVATION_FILTER_PARAMS,
     ...OBSERVER_PROJECT_PARAMS,
     ...TAXON_STATUS_PARAMS,
+    'ident_user_id',
+    'unobserved_by_user_id',
     'month',
     'acc_below',
     'obscuration',
@@ -190,6 +193,8 @@ const PARAMETER_ALLOWLIST: Readonly<Record<Endpoint, ReadonlySet<string>>> = {
     ...OBSERVATION_FILTER_PARAMS,
     ...OBSERVER_PROJECT_PARAMS,
     ...TAXON_STATUS_PARAMS,
+    'ident_user_id',
+    'unobserved_by_user_id',
     'rank',
     'month',
     'page',
@@ -549,6 +554,7 @@ export class INaturalistService {
         name: record.name,
         ...(record.common_name ? { common_name: record.common_name } : {}),
         ...(record.rank ? { rank: record.rank } : {}),
+        ...projectTaxonLifecycle(raw),
         ...(raw.matched_term ? { matched_term: raw.matched_term } : {}),
         ...(record.observations_count === undefined
           ? {}
@@ -590,6 +596,8 @@ export class INaturalistService {
         ...(kind === 'user' && record.login ? { login: record.login } : {}),
         ...(record.preferred_common_name ? { common_name: record.preferred_common_name } : {}),
         ...(record.rank ? { rank: record.rank } : {}),
+        // Place, project, and user records share this builder; lifecycle is a taxon's alone.
+        ...(kind === 'taxon' ? projectTaxonLifecycle(record) : {}),
         ...(record.display_name ? { display_name: record.display_name } : {}),
         ...(record.slug ? { slug: record.slug } : {}),
         ...(matched ? { matched_term: matched } : {}),
@@ -665,14 +673,17 @@ export class INaturalistService {
    * were asked for.
    *
    * The identification and comment threads and the filled observation fields
-   * share one entry budget across the distinct records that came back —
-   * `threadCap` of that count per array per record — so a heavily discussed
-   * record cannot carry a reply many times the size of the rest of the batch.
+   * share one `arrayLimit` entry budget across the distinct records that came
+   * back — `threadCap` of that count per array per record, from absolute index
+   * `arrayOffset` of each array sorted by id — so a heavily discussed record
+   * cannot carry a reply many times the size of the rest of the batch. Detail is
+   * never cached: every page re-downloads the whole record.
    */
   async getObservations(
     ids: readonly number[],
     include: ReadonlySet<ObservationExpansion>,
     ctx: Context,
+    { arrayOffset = 0, arrayLimit }: { arrayOffset?: number; arrayLimit?: number } = {},
   ): Promise<{ observations: ProjectedObservation[]; unresolved: number[] }> {
     const requested = [...new Set(ids)];
     const [terms, payload] = await Promise.all([
@@ -685,12 +696,12 @@ export class INaturalistService {
 
     const byId = new Map((payload.results ?? []).map((raw) => [raw.id, raw]));
     const resolved = requested.flatMap((id) => byId.get(id) ?? []);
-    const cap = threadCap(resolved.length);
+    const arrayPage = { offset: arrayOffset, size: threadCap(resolved.length, arrayLimit) };
     const observations = resolved.map((raw) =>
       projectObservation(raw, {
         include,
         detail: true,
-        threadCap: cap,
+        arrayPage,
         ...(terms ? { terms } : {}),
       }),
     );
@@ -796,7 +807,9 @@ export class INaturalistService {
  * that does not exist, `Taxon N is not genus or finer` names a real taxon too
  * coarse for `/identifications/similar_species`, `Unknown user_id X` names an
  * observer that does not exist — upstream words an unknown `user_login` the
- * same way — and `Unknown project_id: [X]` a project. The reason each carries
+ * same way — `Unknown ident_user_id: [X]` and `Unknown unobserved_by_user_id X`
+ * name the user behind those two selectors, and `Unknown project_id: [X]` a
+ * project. The reason each carries
  * is what routes the agent to its recovery: the framework fills the calling
  * tool's declared `recovery` for that reason onto the wire.
  *
@@ -828,6 +841,14 @@ function mapUpstreamError(err: unknown): unknown {
       'iNaturalist lists look-alikes only for a genus or a finer rank, and that taxon_id is coarser.',
       { reason: 'taxon_rank_too_coarse', retryable: false },
     );
+  }
+  for (const field of ['ident_user_id', 'unobserved_by_user_id'] as const) {
+    if (body.includes(`Unknown ${field}`)) {
+      return validationError(`iNaturalist does not recognize the user given as ${field}.`, {
+        reason: 'unknown_user',
+        retryable: false,
+      });
+    }
   }
   if (body.includes('Unknown user_id')) {
     return validationError('iNaturalist does not recognize that observer.', {

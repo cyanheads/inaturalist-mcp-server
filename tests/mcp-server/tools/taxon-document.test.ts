@@ -9,11 +9,15 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  ConservationSchema,
+  ConservationStatusSchema,
   renderTaxonDocument,
   TAXON_ALWAYS_KEEP,
   TAXON_SECTIONS,
   TAXON_SUMMARY_KEYS,
+  TaxonDocumentSchema,
 } from '@/mcp-server/tools/taxon-document.js';
+import type { ConservationStatus } from '@/services/inaturalist/types.js';
 import { projectedTaxonDocument } from '../../helpers/fixtures.js';
 import { markdownNodes, markdownText } from '../../helpers/rendering-commonmark.js';
 
@@ -25,7 +29,9 @@ describe('literal taxon rendering', () => {
       common_name: '  <b>Monarch</b>\r\n# literal  ',
       encyclopedia: { wikipedia_summary: summary, wikipedia_url: url },
       conservation: {
-        statuses: [{ status: '[EN]', authority: 'A &amp; B', iucn: 30, place: null, url }],
+        statuses: [
+          { status: '[EN]', authority: 'A &amp; B', iucn: 30, iucn_code: 'VU', place: null, url },
+        ],
         global_status: null,
       },
     });
@@ -104,7 +110,7 @@ describe('renderTaxonDocument — full record', () => {
   it('renders the conservation section with global status and per-listing entries', () => {
     const text = renderTaxonDocument(doc).join('\n');
     expect(text).toContain('### Conservation');
-    expect(text).toContain('**Global status:** none recorded');
+    expect(text).toContain('**Global status:** none published');
     expect(text).toContain('status Special Concern');
     expect(text).toContain('place Canada');
   });
@@ -171,8 +177,73 @@ describe('renderTaxonDocument — empty section arrays and null fields', () => {
     expect(text).toContain('_No encyclopedia summary published._');
   });
 
-  it('renders none-recorded for a missing global conservation status', () => {
-    expect(renderTaxonDocument(sparse).join('\n')).toContain('**Global status:** none recorded');
+  it('renders none-published for a missing global conservation status', () => {
+    const text = renderTaxonDocument(sparse).join('\n');
+    expect(text).toContain('**Global status:** none published');
+    expect(text).not.toContain('none recorded');
+  });
+});
+
+/**
+ * Upstream assigns every listing an IUCN-equivalent level whatever its
+ * authority. The decoded code rides beside the level on both surfaces, and an
+ * off-scale or absent level says so rather than borrowing a neighbour's code.
+ */
+describe('renderTaxonDocument — iucn levels', () => {
+  const listing = (iucn: number | null, iucn_code: ConservationStatus['iucn_code']) => ({
+    status: 'S3N,S4B',
+    authority: 'NatureServe',
+    iucn,
+    iucn_code,
+    place: 'Washington, US',
+    url: null,
+  });
+
+  it.each([
+    [30, 'VU', 'iucn 30 (VU)'],
+    [35, null, 'iucn 35 (off the published scale)'],
+    [null, null, 'iucn not published'],
+  ] as const)(
+    'renders iucn %s with iucn_code %s on a listing and on the global status',
+    (iucn, code, expected) => {
+      const doc = projectedTaxonDocument({
+        conservation: { statuses: [listing(iucn, code)], global_status: listing(iucn, code) },
+      });
+      const lines = renderTaxonDocument(doc);
+      const listingLine = lines.find((line) => line.startsWith('- status S3N,S4B'));
+      const globalLine = lines.find((line) => line.startsWith('**Global status:**'));
+      for (const line of [listingLine, globalLine]) {
+        expect(line).toBeDefined();
+        expect(markdownText(line ?? '')).toContain(` · ${expected} · `);
+        expect(markdownNodes(line ?? '').filter((node) => node.type === 'link')).toEqual([]);
+      }
+    },
+  );
+
+  it('describes the level scale, the decoded code, and the headline global status for callers', () => {
+    const iucn = ConservationStatusSchema.shape.iucn.description ?? '';
+    for (const pair of [
+      '0 NE',
+      '5 DD',
+      '10 LC',
+      '20 NT',
+      '30 VU',
+      '40 EN',
+      '50 CR',
+      '60 EW',
+      '70 EX',
+    ]) {
+      expect(iucn).toContain(pair);
+    }
+    const code = ConservationStatusSchema.shape.iucn_code;
+    expect(code.description).toContain('not an IUCN assessment');
+    expect(code.description).toContain('status');
+    expect(code.safeParse('VU').success).toBe(true);
+    expect(code.safeParse(null).success).toBe(true);
+    expect(code.safeParse('XX').success).toBe(false);
+    const global = ConservationSchema.shape.global_status.description ?? '';
+    expect(global).toContain('Least Concern');
+    expect(global).toContain('statuses');
   });
 });
 
@@ -199,6 +270,7 @@ describe('renderTaxonDocument — a single-section selection renders only that s
       common_name: doc.common_name,
       iconic_taxon_name: doc.iconic_taxon_name,
       is_active: doc.is_active,
+      current_synonymous_taxon_ids: doc.current_synonymous_taxon_ids,
       extinct: doc.extinct,
       observations_count: doc.observations_count,
       listed_taxa_count: doc.listed_taxa_count,
@@ -222,7 +294,7 @@ describe('renderTaxonDocument — a single-section selection renders only that s
  */
 describe('renderTaxonDocument — heading and scalar line follow the keys present', () => {
   const FULL_SCALAR_LINE =
-    'id 48662 · name Danaus plexippus · common_name Monarch · rank species · rank_level 10 · iconic_taxon_name Insecta · is_active true · extinct false · observations_count 250000 · listed_taxa_count 42 · vision true';
+    'id 48662 · name Danaus plexippus · common_name Monarch · rank species · rank_level 10 · iconic_taxon_name Insecta · is_active true · current_synonymous_taxon_ids not published · extinct false · observations_count 250000 · listed_taxa_count 42 · vision true';
 
   function summaryOf(doc: ReturnType<typeof projectedTaxonDocument>) {
     return {
@@ -233,6 +305,7 @@ describe('renderTaxonDocument — heading and scalar line follow the keys presen
       common_name: doc.common_name,
       iconic_taxon_name: doc.iconic_taxon_name,
       is_active: doc.is_active,
+      current_synonymous_taxon_ids: doc.current_synonymous_taxon_ids,
       extinct: doc.extinct,
       observations_count: doc.observations_count,
       listed_taxa_count: doc.listed_taxa_count,
@@ -240,10 +313,16 @@ describe('renderTaxonDocument — heading and scalar line follow the keys presen
     };
   }
 
-  it('(a) no selection: the full heading and all eleven scalars', () => {
+  it('(a) no selection: the full heading and all twelve scalars', () => {
     const [heading, scalars] = renderTaxonDocument(projectedTaxonDocument());
     expect(heading).toBe('## Monarch (Danaus plexippus)');
     expect(scalars).toBe(FULL_SCALAR_LINE);
+  });
+
+  it('(b) a selection without summary carries no successor text', () => {
+    const doc = projectedTaxonDocument({ is_active: false, current_synonymous_taxon_ids: [1] });
+    const lines = renderTaxonDocument({ id: doc.id, name: doc.name, rank: doc.rank, children: [] });
+    expect(lines.join('\n')).not.toContain('current_synonymous_taxon_ids');
   });
 
   it('(a) no selection: a genuinely null common name keeps its null-case text', () => {
@@ -278,11 +357,55 @@ describe('renderTaxonDocument — heading and scalar line follow the keys presen
     expect(scalars).toBe('id 48662 · name name not recorded · rank species');
   });
 
-  it('(c) a selection including summary: the full heading and all eleven scalars', () => {
+  it('(c) a selection including summary: the full heading and all twelve scalars', () => {
     const doc = projectedTaxonDocument();
     const [heading, scalars] = renderTaxonDocument({ ...summaryOf(doc), children: doc.children });
     expect(heading).toBe('## Monarch (Danaus plexippus)');
     expect(scalars).toBe(FULL_SCALAR_LINE);
+  });
+});
+
+/**
+ * After a taxonomic change the old id is inactive and its successors are what
+ * a caller should pass on. 21373 (Bufo bufo) split into two; 1522336 records
+ * none; an active taxon carries null.
+ */
+describe('renderTaxonDocument — successors of an inactive taxon', () => {
+  it.each([
+    [
+      'a split',
+      false,
+      [134693, 326296],
+      'is_active false · current_synonymous_taxon_ids 134693, 326296 (pass one as taxon_id for the current taxon)',
+    ],
+    [
+      'no recorded successor',
+      false,
+      [],
+      'is_active false · current_synonymous_taxon_ids none recorded · ',
+    ],
+    [
+      'an active taxon',
+      true,
+      null,
+      'is_active true · current_synonymous_taxon_ids not published · ',
+    ],
+  ])('renders %s beside the inactive status', (_label, isActive, successors, expected) => {
+    const [, scalars] = renderTaxonDocument(
+      projectedTaxonDocument({ is_active: isActive, current_synonymous_taxon_ids: successors }),
+    );
+    expect(markdownText(scalars ?? '')).toContain(expected);
+    if (successors?.length !== 2) expect(scalars).not.toContain('pass one as taxon_id');
+  });
+
+  it('describes the successor ids with the same pointer the render carries', () => {
+    const description = TaxonDocumentSchema.shape.current_synonymous_taxon_ids.description ?? '';
+    expect(description).toContain('pass one as taxon_id');
+    expect(TAXON_SUMMARY_KEYS).toContain('current_synonymous_taxon_ids');
+    const field = TaxonDocumentSchema.shape.current_synonymous_taxon_ids;
+    expect(field.safeParse(null).success).toBe(true);
+    expect(field.safeParse([]).success).toBe(true);
+    expect(field.safeParse([134693, 326296]).success).toBe(true);
   });
 });
 
@@ -314,6 +437,7 @@ describe('line breaks in taxon text cannot forge markdown structure', () => {
             status: `Special Concern\r${FORGERY}`,
             authority: `Some Authority\n${FORGERY}`,
             iucn: 30,
+            iucn_code: 'VU',
             place: null,
             url: null,
           },

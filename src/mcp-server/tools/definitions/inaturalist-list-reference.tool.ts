@@ -56,7 +56,7 @@ const EntrySchema = z
 
 export const inaturalistListReference = tool('inaturalist_list_reference', {
   description:
-    'Look up annotation attributes/values, quality grades, licences, ranks, iconic taxa, and conservation codes before filtering; unknown values can silently return nothing. Conservation codes are the normalised csi filter, distinct from authority-specific taxon status text. With topic controlled_terms and taxon_id, also return observed annotation usage and counts.',
+    'Look up annotation attributes/values, quality grades, licences, ranks, iconic taxa, and conservation codes before filtering; unknown values can silently return nothing. Conservation codes decode the iucn level on taxon listings and, all but NE and DD, are the csi filter values, distinct from authority-specific taxon status text. With topic controlled_terms and taxon_id, also return observed annotation usage and counts.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -129,6 +129,15 @@ export const inaturalistListReference = tool('inaturalist_list_reference', {
       when: 'iNaturalist answered 422 because the taxon_id does not exist.',
       recovery:
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
       thrownBy: 'service',
     },
   ],

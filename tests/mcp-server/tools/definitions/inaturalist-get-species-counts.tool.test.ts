@@ -352,6 +352,21 @@ describe('zero-hit and truncation enrichment', () => {
     expect(text).toContain('drop taxon_id or confirm it with inaturalist_resolve_name');
   });
 
+  it('names iconic_taxa and the annotation pairing check before the quality remedy, on both surfaces', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      place_id: 1282,
+      iconic_taxa: ['Chromista'],
+      term_id: [1],
+      term_value_id: [6],
+      per_page: 1,
+    });
+    const expected =
+      'No taxa recorded for those filters. Drop iconic_taxa, widen the area, check the term_id/term_value_id pairing with inaturalist_list_reference topic controlled_terms, or set quality_grade to include "needs_id".';
+    expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
   it('discloses truncation with the descending-rank ceiling when the page fills and more remain', async () => {
     fake.getSpeciesCounts.mockResolvedValue({ total: 100, species: species(25) });
     const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
@@ -412,6 +427,82 @@ describe('zero-hit and truncation enrichment', () => {
       quality_grade: ['research'],
       captive: false,
     });
+  });
+});
+
+describe('captive cohort disclosure', () => {
+  const COHORT =
+    'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+
+  it('discloses the cohort on an empty ranking, with no needs_id remedy, on both surfaces', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      place_id: 1282,
+      captive: true,
+    });
+    const expected = `${COHORT} No taxa recorded for those filters. Widen the area.`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
+  it('joins the clamp notice on an empty ranking', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      captive: true,
+      quality_grade: ['research', 'needs_id'],
+      per_page: 51,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `per_page 51 was clamped to 50. ${COHORT} No taxa recorded for those filters.`,
+    );
+  });
+
+  it('joins the clamp, ignored-array and cohort notices at once, in order, on both surfaces', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      captive: true,
+      quality_grade: ['research', 'needs_id'],
+      per_page: 51,
+      csi: [],
+    });
+    const notice = `per_page 51 was clamped to 50. csi was empty and ignored; omit empty filters to search without those restrictions. ${COHORT} No taxa recorded for those filters.`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(notice);
+  });
+
+  it('rides the truncation guidance and an untruncated page alike', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 100, species: species(25) });
+    const truncated = await runToolContract(inaturalistGetSpeciesCounts, { captive: true });
+    expect(truncated.structuredContent).toMatchObject({
+      truncated: true,
+      notice: `${COHORT} 100 taxa match. Raise page to walk further down the ranking, or raise per_page (max 50).`,
+    });
+
+    fake.getSpeciesCounts.mockResolvedValue({ total: 3, species: species(3) });
+    const whole = await runToolContract(inaturalistGetSpeciesCounts, { captive: true });
+    expect(whole.structuredContent).toMatchObject({ truncated: false, notice: COHORT });
+  });
+
+  it('keeps the date and area remedies but no needs_id one for a casual captive ranking', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, {
+      place_id: 1282,
+      captive: true,
+      quality_grade: ['casual'],
+      d1: '2027-01-01',
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'No taxa recorded for those filters. Widen or drop d1/d2, or widen the area.',
+    );
+  });
+
+  it('leaves a wild ranking without the cohort notice', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 3, species: species(3) });
+    const result = await runToolContract(inaturalistGetSpeciesCounts, { captive: false });
+    expect(result.structuredContent).not.toHaveProperty('notice');
   });
 });
 
@@ -534,6 +625,86 @@ describe('observer and project filters', () => {
     expect(getEnrichment(ctx).notice).toBe(
       'No taxa recorded for those filters. Drop user_id or confirm the observer with inaturalist_resolve_name, drop project_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
     );
+  });
+
+  it('names the identifier and unobserved-by filters after the observer remedy', async () => {
+    fake.getSpeciesCounts.mockResolvedValue({ total: 0, species: [] });
+    const ctx = createMockContext({ errors: inaturalistGetSpeciesCounts.errors });
+
+    await inaturalistGetSpeciesCounts.handler(
+      inaturalistGetSpeciesCounts.input.parse({
+        user_id: 134993,
+        unobserved_by_user_id: 134993,
+        ident_user_id: 205278,
+      }),
+      ctx,
+    );
+
+    expect(getEnrichment(ctx).notice).toBe(
+      'No taxa recorded for those filters. Drop user_id or confirm the observer with inaturalist_resolve_name, drop ident_user_id or confirm the identifier with inaturalist_resolve_name, drop unobserved_by_user_id or confirm the user with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
+    );
+  });
+
+  it.each([
+    ['ident_user_id', 205278, 'Unknown ident_user_id: [205278]'],
+    ['unobserved_by_user_id', 'natureguy', 'Unknown unobserved_by_user_id natureguy'],
+  ] as const)(
+    'forwards %s through the real service and maps its unknown value to unknown_user',
+    async (field, value, body) => {
+      const http = createFetchMock([
+        {
+          match: /api\.inaturalist\.org\/v1\/observations\/species_counts\?/,
+          respond: (request) =>
+            new URL(request.url).searchParams.get('place_id') === '1'
+              ? new Response(JSON.stringify({ error: body, status: 422 }), { status: 422 })
+              : Response.json({ total_results: 0, results: [] }),
+        },
+      ]);
+      vi.mocked(getINaturalistService).mockReturnValue(
+        new INaturalistService({
+          userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+          minRequestIntervalMs: 0,
+          maxConcurrentRequests: 4,
+          dailyRequestBudget: 1000,
+        }),
+      );
+      http.install();
+      try {
+        const ok = await runToolContract(inaturalistGetSpeciesCounts, {
+          place_id: 1282,
+          [field]: value,
+        });
+        expect(ok.isError).toBeFalsy();
+        expect(new URL(http.calls[0]!.request.url).searchParams.get(field)).toBe(String(value));
+
+        const failed = await runToolContract(inaturalistGetSpeciesCounts, {
+          place_id: 1,
+          [field]: value,
+        });
+        expect(failed.structuredContent).toMatchObject({
+          error: {
+            message: expect.stringContaining(field),
+            data: {
+              reason: 'unknown_user',
+              recovery: { hint: expect.stringContaining('inaturalist_resolve_name type user') },
+            },
+          },
+        });
+        expect(JSON.stringify(failed.content)).toContain(field);
+      } finally {
+        http.restore();
+      }
+    },
+  );
+
+  it('declares unknown_user over all four user selectors', () => {
+    const entry = inaturalistGetSpeciesCounts.errors?.find(
+      (candidate) => candidate.reason === 'unknown_user',
+    );
+    for (const field of ['user_id', 'user_login', 'ident_user_id', 'unobserved_by_user_id']) {
+      expect(entry?.when).toContain(field);
+    }
+    expect(entry?.recovery).not.toContain('observer');
   });
 
   it('surfaces an unknown project as unknown_project_id with the resolve_name recovery', async () => {

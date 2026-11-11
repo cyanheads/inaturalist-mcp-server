@@ -106,7 +106,7 @@ describe('projectConservationStatus', () => {
     expect(projectConservationStatus({ place: null }).place).toBeNull();
   });
 
-  it('relays status, authority, iucn, and url verbatim', () => {
+  it('relays status, authority, iucn, and url verbatim, beside the decoded iucn_code', () => {
     expect(
       projectConservationStatus({
         status: 'G4',
@@ -119,9 +119,31 @@ describe('projectConservationStatus', () => {
       status: 'G4',
       authority: 'NatureServe',
       iucn: 20,
+      iucn_code: 'NT',
       url: 'https://example.test/g4',
       place: null,
     });
+  });
+
+  it('decodes a NatureServe state listing to the level csi matches, keeping its own status', () => {
+    // Hooded Merganser (7109) at Washington, as /v1/taxa/7109 carries it.
+    expect(
+      projectConservationStatus({
+        status: 'S3N,S4B',
+        authority: 'NatureServe',
+        iucn: 30,
+        url: 'http://www.natureserve.org/explorer/servlet/NatureServe?searchName=Lophodytes+cucullatus',
+        place: { name: 'Washington', display_name: 'Washington, US' },
+      }),
+    ).toMatchObject({ status: 'S3N,S4B', iucn: 30, iucn_code: 'VU', place: 'Washington, US' });
+  });
+
+  it.each([
+    ['an off-scale level', { iucn: 35 }, 35],
+    ['a null level', { iucn: null }, null],
+    ['an absent level', {}, null],
+  ])('sets iucn_code null for %s and keeps iucn as upstream sent it', (_label, raw, iucn) => {
+    expect(projectConservationStatus(raw)).toMatchObject({ iucn, iucn_code: null });
   });
 });
 
@@ -154,14 +176,50 @@ describe('projectTaxonDocument', () => {
         observations_count: 250_000,
       },
     ]);
-    expect(doc?.conservation.statuses).toHaveLength(1);
-    expect(doc?.conservation.global_status).toMatchObject({ status: 'Least Concern' });
+    expect(doc?.conservation.statuses).toEqual([
+      {
+        status: 'Special Concern',
+        authority: 'NatureServe',
+        iucn: 10,
+        iucn_code: 'LC',
+        place: 'Canada',
+        url: 'https://example.test/status',
+      },
+    ]);
+    expect(doc?.conservation.global_status).toEqual({
+      status: 'Least Concern',
+      authority: 'IUCN Red List',
+      iucn: 10,
+      iucn_code: 'LC',
+      place: null,
+      url: 'https://example.test/global-status',
+    });
     expect(doc?.photos).toHaveLength(1);
     expect(doc?.encyclopedia).toEqual({
       wikipedia_summary: 'The <b>monarch butterfly</b> is a milkweed butterfly.',
       wikipedia_url: 'https://en.wikipedia.org/wiki/Monarch_butterfly',
     });
   });
+
+  /** As /v1/taxa/{id} carries the field: 21373 split, 1522336 retired with none, 48662 active. */
+  it.each([
+    ['a split inactive taxon', false, [134693, 326296], [134693, 326296]],
+    ['an inactive taxon with no recorded successor', false, [], []],
+    ['an active taxon', true, null, null],
+    ['a record that omits the field', true, undefined, null],
+  ])(
+    'relays current_synonymous_taxon_ids as upstream sends it for %s',
+    (_label, isActive, raw, projected) => {
+      const doc = projectTaxonDocument(
+        rawTaxonDocument({
+          is_active: isActive,
+          ...(raw === undefined ? {} : { current_synonymous_taxon_ids: raw }),
+        }),
+      );
+      expect(doc?.is_active).toBe(isActive);
+      expect(doc?.current_synonymous_taxon_ids).toEqual(projected);
+    },
+  );
 
   it('never emits a listed_taxa array — only the scalar count survives', () => {
     const doc = projectTaxonDocument(rawTaxonDocument());
@@ -210,6 +268,7 @@ describe('projectTaxonDocument', () => {
       common_name: null,
       iconic_taxon_name: null,
       is_active: false,
+      current_synonymous_taxon_ids: null,
       extinct: false,
       observations_count: null,
       listed_taxa_count: null,

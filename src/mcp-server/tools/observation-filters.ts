@@ -91,7 +91,7 @@ export const areaInputShape = {
     .min(1)
     .optional()
     .describe(
-      'Numeric iNaturalist place id from inaturalist_find_places. Mutually exclusive with the lat/lng/radius triple and the bounding box. A non-numeric value answers HTTP 500 upstream.',
+      'Numeric iNaturalist place id from inaturalist_find_places. Mutually exclusive with the lat/lng/radius triple and the bounding box.',
     ),
   lat: z
     .number()
@@ -193,6 +193,23 @@ export function emptyFilterNotice(input: object): string | undefined {
     : undefined;
 }
 
+/**
+ * Discloses the grade-inconsistent cohort. iNaturalist grades captive and
+ * cultivated records casual, so `captive: true` under a quality_grade without
+ * `casual` matches only records whose grade disagrees with their captive flag —
+ * a real cohort a data-quality check asks for, so the call still runs, and
+ * `casual` is never added for the caller, since a defaulted and an explicit
+ * `["research"]` cannot be told apart. Undefined outside that cohort, and on
+ * tools that take no `captive`.
+ */
+export function captiveCohortNotice(input: {
+  captive?: boolean | undefined;
+  quality_grade: readonly string[];
+}): string | undefined {
+  if (input.captive !== true || input.quality_grade.includes('casual')) return;
+  return 'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+}
+
 /** Explains the union semantics when an annotation filter has several distinct members. */
 export function annotationFilterNotice(input: {
   term_id?: readonly number[] | undefined;
@@ -215,7 +232,7 @@ export const observationFilterInputShape = {
     .boolean()
     .default(false)
     .describe(
-      'True returns captive and cultivated records only — zoo animals, garden plantings; false returns wild records only. Defaults to false.',
+      'True returns captive and cultivated records only — zoo animals, garden plantings; false returns wild records only. Defaults to false. Captive records are graded casual, so pair true with "casual" in quality_grade.',
     ),
   term_id: z
     .array(z.number().int().min(1))
@@ -227,13 +244,13 @@ export const observationFilterInputShape = {
     .array(z.number().int().min(1))
     .optional()
     .describe(
-      'Annotation value ids, from the same attribute listing — e.g. 6 for Larva. Requires term_id; sent alone it is ignored upstream and the unfiltered corpus comes back. Multiple ids match any one annotation with an attribute in term_id and a value in this set, not both annotations.',
+      'Annotation value ids, from the same attribute listing — e.g. 6 for Larva. Requires term_id. Multiple ids match any one annotation with an attribute in term_id and a value in this set, not both annotations.',
     ),
   iconic_taxa: z
     .array(z.enum(ICONIC_TAXA))
     .optional()
     .describe(
-      'Broad organism groups, by their scientific iconic-taxon name. A common-name value such as "Birds" matches nothing upstream, so only the listed values are accepted.',
+      'Broad organism groups, by their scientific iconic-taxon name — Aves, not "Birds"; inaturalist_list_reference topic iconic_taxa lists them.',
     ),
 };
 
@@ -265,6 +282,24 @@ export const observerProjectInputShape = {
     .describe(
       'Restrict to observations in one project, by numeric project id from inaturalist_resolve_name type project.',
     ),
+};
+
+/** A user named by positive integer id or by login, as upstream takes either in one parameter. */
+const userIdOrLogin = z.union([z.number().int().min(1), z.string().min(1)]).optional();
+
+/**
+ * Who identified a record, and whose life list it is missing from — search and
+ * species counts only. Each takes an id or a login in one field; an unknown
+ * value answers 422 and surfaces typed. A blank would answer unfiltered, so it
+ * reads as unset; a whitespace-only value reaches upstream and fails typed.
+ */
+export const userActivityInputShape = {
+  ident_user_id: blankAsUnset(userIdOrLogin).describe(
+    'Restrict to records carrying an identification by this user, by numeric user id or login from inaturalist_resolve_name type user. The user’s own observations count.',
+  ),
+  unobserved_by_user_id: blankAsUnset(userIdOrLogin).describe(
+    'Restrict to records of taxa this user has never observed, by numeric user id or login from inaturalist_resolve_name type user.',
+  ),
 };
 
 /** Establishment, conservation and rank-level filters supported by search and taxon counts. */
@@ -317,6 +352,7 @@ export type OptionalNarrowingFilters = {
   hrank?: string | undefined;
   lrank?: string | undefined;
   rank?: string | undefined;
+  iconic_taxa?: readonly string[] | undefined;
   month?: readonly number[] | undefined;
   acc_below?: number | undefined;
   obscuration?: readonly string[] | undefined;
@@ -324,33 +360,47 @@ export type OptionalNarrowingFilters = {
   created_d2?: string | undefined;
   updated_since?: string | undefined;
   identifications?: string | undefined;
+  q?: string | undefined;
+  search_on?: string | undefined;
+  license?: readonly string[] | undefined;
+  photo_license?: readonly string[] | undefined;
+  licensed?: boolean | undefined;
+  photo_licensed?: boolean | undefined;
 };
+
+/** The drop list, in the order its entries are named. `search_on` rides the `q` entry. */
+const DROPPABLE_FILTERS = [
+  'introduced',
+  'native',
+  'threatened',
+  'endemic',
+  'csi',
+  'hrank',
+  'lrank',
+  'rank',
+  'iconic_taxa',
+  'month',
+  'acc_below',
+  'obscuration',
+  'created_d1',
+  'created_d2',
+  'updated_since',
+  'identifications',
+  'q',
+  'license',
+  'photo_license',
+  'licensed',
+  'photo_licensed',
+] as const;
 
 /** Names only supplied, nonempty filters; empty arrays already have an ignored-filter notice. */
 export function optionalFilterGuidance(input: OptionalNarrowingFilters): string[] {
-  return (
-    [
-      'introduced',
-      'native',
-      'threatened',
-      'endemic',
-      'csi',
-      'hrank',
-      'lrank',
-      'rank',
-      'month',
-      'acc_below',
-      'obscuration',
-      'created_d1',
-      'created_d2',
-      'updated_since',
-      'identifications',
-    ] as const
-  ).flatMap((key) => {
+  return DROPPABLE_FILTERS.flatMap((key) => {
     const value = input[key];
-    return value === undefined || (Array.isArray(value) && value.length === 0)
-      ? []
-      : [`drop ${key}`];
+    if (value === undefined || (Array.isArray(value) && value.length === 0)) return [];
+    // search_on without q is refused, so q is never dropped on its own beside it.
+    if (key === 'q' && input.search_on !== undefined) return ['drop search_on or drop q with it'];
+    return [`drop ${key}`];
   });
 }
 
@@ -588,12 +638,18 @@ export function wideningGuidance(
     taxon_id?: number | undefined;
     user_id?: number | undefined;
     user_login?: string | undefined;
+    ident_user_id?: number | string | undefined;
+    unobserved_by_user_id?: number | string | undefined;
     project_id?: number | undefined;
+    term_id?: readonly number[] | undefined;
+    term_value_id?: readonly number[] | undefined;
     quality_grade: readonly string[];
+    captive?: boolean | undefined;
   },
   hasArea: boolean,
 ): string | undefined {
   const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
+  const forTaxon = input.taxon_id !== undefined ? ' and taxon_id' : '';
   const options = [
     ...optionalFilterGuidance(input),
     ...(input.d1 !== undefined || input.d2 !== undefined ? ['widen or drop d1/d2'] : []),
@@ -604,17 +660,36 @@ export function wideningGuidance(
     ...(input.user_id !== undefined || input.user_login !== undefined
       ? [`drop ${observerKey} or confirm the observer with inaturalist_resolve_name`]
       : []),
+    ...(input.ident_user_id !== undefined
+      ? ['drop ident_user_id or confirm the identifier with inaturalist_resolve_name']
+      : []),
+    ...(input.unobserved_by_user_id !== undefined
+      ? ['drop unobserved_by_user_id or confirm the user with inaturalist_resolve_name']
+      : []),
     ...(input.project_id !== undefined
       ? ['drop project_id or confirm it with inaturalist_resolve_name']
       : []),
-    ...(input.quality_grade.includes('needs_id')
+    ...(input.term_id?.length
+      ? [
+          input.term_value_id?.length
+            ? `check the term_id/term_value_id pairing with inaturalist_list_reference topic controlled_terms${forTaxon}`
+            : `check term_id with inaturalist_list_reference topic controlled_terms${forTaxon}`,
+        ]
+      : []),
+    // Captive records are graded casual, so needs_id never widens a captive search.
+    ...(input.quality_grade.includes('needs_id') || input.captive === true
       ? []
       : ['set quality_grade to include "needs_id"']),
   ];
-  const last = options.pop();
+  return optionsSentence(options);
+}
+
+/** Joins lower-case remedies into one sentence, "A, B, or C." Undefined when there are none. */
+export function optionsSentence(options: readonly string[]): string | undefined {
+  const last = options.at(-1);
   if (last === undefined) return;
-  const sentence = options.length > 0 ? `${options.join(', ')}, or ${last}` : last;
-  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
+  const text = options.length > 1 ? `${options.slice(0, -1).join(', ')}, or ${last}` : last;
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 }
 
 /**

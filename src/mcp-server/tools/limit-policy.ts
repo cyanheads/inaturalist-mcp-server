@@ -16,6 +16,8 @@ export const LIMIT_CAPS = {
   leaderboard: 250,
   observationBatch: 10,
   submittedObservationIds: 100,
+  /** Above the longest by-id array measured (1,393 comments), so one call can take a whole thread. */
+  arrayLimit: 1_500,
   radius: 20_040,
 } as const;
 
@@ -34,7 +36,7 @@ type LimitTool =
   | 'inaturalist_get_similar_species'
   | 'inaturalist_get_leaderboard'
   | 'inaturalist_get_observation';
-type LimitField = 'limit' | 'per_page' | 'observation_id' | 'radius';
+type LimitField = 'limit' | 'per_page' | 'observation_id' | 'array_limit' | 'radius';
 const clampCounter = createCounter(
   'mcp.inaturalist.limits.clamped',
   'Read limits reduced to their documented ceiling',

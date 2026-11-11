@@ -175,6 +175,28 @@ describe('parameter allowlist', () => {
     }
   });
 
+  it('allows the identifier and unobserved-by user filters on search and species counts alone', () => {
+    const service = internals(newService());
+    for (const endpoint of ['observations', 'observations/species_counts'] as const) {
+      expect(
+        service.buildUrl({
+          endpoint,
+          params: { ident_user_id: 205278, unobserved_by_user_id: 'natureguy' },
+        }),
+      ).toContain('?ident_user_id=205278&unobserved_by_user_id=natureguy');
+    }
+    for (const endpoint of [
+      'observations/histogram',
+      'observations/observers',
+      'observations/identifiers',
+      'identifications/similar_species',
+    ] as const) {
+      for (const key of ['ident_user_id', 'unobserved_by_user_id']) {
+        expect(() => service.buildUrl({ endpoint, params: { [key]: 1 } })).toThrow(McpError);
+      }
+    }
+  });
+
   it('allows the licence-code filters on observations alone', () => {
     const service = newService();
     expect(
@@ -594,6 +616,52 @@ describe('upstream error mapping', () => {
     }
   });
 
+  /** Bodies upstream returned live for an unknown login and a whitespace-only value. */
+  it.each([
+    ['observations', 'ident_user_id', 'Unknown ident_user_id: [zz-no-such-login-xq9]'],
+    ['observations', 'ident_user_id', 'Unknown ident_user_id: [ ]'],
+    ['observations/species_counts', 'ident_user_id', 'Unknown ident_user_id: [999999999]'],
+    ['observations', 'unobserved_by_user_id', 'Unknown unobserved_by_user_id 999999999'],
+    [
+      'observations/species_counts',
+      'unobserved_by_user_id',
+      'Unknown unobserved_by_user_id zz-no-such-login-xq9',
+    ],
+    ['observations/species_counts', 'unobserved_by_user_id', 'Unknown unobserved_by_user_id  '],
+  ] as const)(
+    'maps a 422 from %s naming an unknown %s to unknown_user, naming the field',
+    async (endpoint, field, body) => {
+      const http = createFetchMock([
+        {
+          match: (request) => new URL(request.url).pathname === `/v1/${endpoint}`,
+          respond: () =>
+            new Response(JSON.stringify({ error: body, status: 422 }), { status: 422 }),
+        },
+      ]);
+      http.install();
+      try {
+        const service = newService();
+        const params = { [field]: 'zz-no-such-login-xq9', page: 1, per_page: 10 };
+        const call =
+          endpoint === 'observations'
+            ? service.searchObservations(params, new Set(), createMockContext())
+            : service.getSpeciesCounts(params, createMockContext());
+        const error = await call.then(() => undefined).catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'unknown_user', retryable: false },
+        });
+        expect((error as McpError).message).toContain(field);
+        expect((error as McpError).data).not.toHaveProperty('body');
+        expect(http.calls).toHaveLength(1);
+      } finally {
+        http.restore();
+      }
+    },
+  );
+
   it('maps a 422 "Unknown project_id" body to unknown_project_id', async () => {
     const http = createFetchMock([
       {
@@ -819,6 +887,191 @@ describe('name resolution field mapping', () => {
 
       expect(candidates.map((candidate) => candidate.kind)).toEqual(['taxon', 'place', 'project']);
       for (const candidate of candidates) expect(candidate).not.toHaveProperty('login');
+    } finally {
+      http.restore();
+    }
+  });
+
+  /**
+   * Place, project, and user records reach the same candidate builder as taxa,
+   * so whatever lifecycle keys their raw records happen to carry must not leak
+   * onto them.
+   */
+  it('projects place, project, and user candidates without any taxon lifecycle field', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/search\?/,
+        respond: () =>
+          Response.json({
+            total_results: 3,
+            results: [
+              rawSearchResult({
+                type: 'Place',
+                score: 4.5,
+                matches: ['California'],
+                record: {
+                  id: 14,
+                  name: 'California',
+                  display_name: 'California, US',
+                  slug: 'california-us',
+                  is_active: true,
+                  current_synonymous_taxon_ids: null,
+                },
+              }),
+              rawSearchResult({
+                type: 'Project',
+                score: 3.25,
+                matches: ['City Nature Challenge'],
+                record: {
+                  id: 5,
+                  title: 'City Nature Challenge',
+                  slug: 'cnc',
+                  is_active: false,
+                  current_synonymous_taxon_ids: [1],
+                },
+              }),
+              rawSearchResult({
+                type: 'User',
+                score: 2,
+                matches: ['kueda'],
+                record: { id: 1, login: 'kueda', name: 'Ken-ichi Ueda', is_active: true },
+              }),
+            ],
+          }),
+      },
+    ]);
+    http.install();
+    try {
+      const { candidates } = await newService().searchRecords(
+        { q: 'c', limit: 10 },
+        createMockContext(),
+      );
+
+      expect(candidates).toEqual([
+        {
+          kind: 'place',
+          id: 14,
+          name: 'California',
+          display_name: 'California, US',
+          slug: 'california-us',
+          matched_term: 'California',
+          score: 4.5,
+        },
+        {
+          kind: 'project',
+          id: 5,
+          name: 'City Nature Challenge',
+          slug: 'cnc',
+          matched_term: 'City Nature Challenge',
+          score: 3.25,
+        },
+        {
+          kind: 'user',
+          id: 1,
+          name: 'Ken-ichi Ueda',
+          login: 'kueda',
+          matched_term: 'kueda',
+          score: 2,
+        },
+      ]);
+    } finally {
+      http.restore();
+    }
+  });
+
+  /**
+   * After a taxonomic change the old id is inactive. Upstream name matching
+   * ranks active taxa only, so an inactive candidate arrives through a numeric
+   * id: 21373 (Bufo bufo, split into 134693 and 326296) and 1522336 (Datura
+   * innoxia, no recorded successor), as /v1/taxa/autocomplete returned them.
+   */
+  it.each([
+    ['a split', 21373, [134693, 326296]],
+    ['no recorded successor', 1522336, []],
+  ])(
+    'relays is_active false and the successor array on an inactive taxon with %s',
+    async (_label, id, successors) => {
+      const http = createFetchMock([
+        {
+          match: /\/taxa\/autocomplete\?/,
+          respond: () =>
+            Response.json({
+              total_results: 1,
+              results: [
+                rawTaxon({ id, is_active: false, current_synonymous_taxon_ids: successors }),
+              ],
+            }),
+        },
+      ]);
+      http.install();
+      try {
+        const { candidates } = await newService().autocompleteTaxa(
+          { q: String(id), limit: 10 },
+          createMockContext(),
+        );
+
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0]).toMatchObject({
+          kind: 'taxon',
+          id,
+          is_active: false,
+          current_synonymous_taxon_ids: successors,
+        });
+      } finally {
+        http.restore();
+      }
+    },
+  );
+
+  it('relays is_active true and no successor key on an active taxon, on both taxon routes', async () => {
+    const active = rawTaxon({ id: 326296, is_active: true, current_synonymous_taxon_ids: null });
+    const http = createFetchMock([
+      {
+        match: /\/taxa\/autocomplete\?/,
+        respond: () => Response.json({ total_results: 1, results: [active] }),
+      },
+      {
+        match: /\/search\?/,
+        respond: () =>
+          Response.json({ total_results: 1, results: [rawSearchResult({ record: active })] }),
+      },
+    ]);
+    http.install();
+    try {
+      const service = newService();
+      const autocomplete = await service.autocompleteTaxa(
+        { q: 'Bufo bufo', limit: 10 },
+        createMockContext(),
+      );
+      const search = await service.searchRecords(
+        { q: 'Bufo bufo', limit: 10 },
+        createMockContext(),
+      );
+
+      for (const candidate of [autocomplete.candidates[0], search.candidates[0]]) {
+        expect(candidate).toMatchObject({ kind: 'taxon', id: 326296, is_active: true });
+        expect(candidate).not.toHaveProperty('current_synonymous_taxon_ids');
+      }
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('omits is_active on a taxon candidate whose record carries none, rather than inventing one', async () => {
+    const http = createFetchMock([
+      {
+        match: /\/taxa\/autocomplete\?/,
+        respond: () => Response.json({ total_results: 1, results: [rawTaxon()] }),
+      },
+    ]);
+    http.install();
+    try {
+      const { candidates } = await newService().autocompleteTaxa(
+        { q: 'monarch', limit: 10 },
+        createMockContext(),
+      );
+      expect(candidates[0]).not.toHaveProperty('is_active');
+      expect(candidates[0]).not.toHaveProperty('current_synonymous_taxon_ids');
     } finally {
       http.restore();
     }

@@ -25,4 +25,17 @@ describe('valid limit defaults', () => {
       inaturalistGetObservation.input.parse({ observation_id: [1, 1] }).observation_id,
     ).toEqual([1, 1]);
   });
+  it('defaults the by-id array page to offset 0 and limit 40, accepting an oversized limit', () => {
+    expect(inaturalistGetObservation.input.parse({ observation_id: [1] })).toMatchObject({
+      array_offset: 0,
+      array_limit: 40,
+    });
+    expect(
+      inaturalistGetObservation.input.safeParse({ observation_id: [1], array_limit: 1501 }).success,
+    ).toBe(true);
+    for (const bad of [{ array_offset: -1 }, { array_offset: 2.5 }, { array_limit: 0 }])
+      expect(
+        inaturalistGetObservation.input.safeParse({ observation_id: [1], ...bad }).success,
+      ).toBe(false);
+  });
 });

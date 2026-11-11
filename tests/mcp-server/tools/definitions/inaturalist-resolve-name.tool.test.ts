@@ -5,6 +5,7 @@
  * @module tests/mcp-server/tools/definitions/inaturalist-resolve-name.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { inaturalistResolveName } from '@/mcp-server/tools/definitions/inaturalist-resolve-name.tool.js';
@@ -236,6 +237,114 @@ describe('user candidates', () => {
   });
 });
 
+/**
+ * A retired taxon id resolves like any other, so the candidate has to say it is
+ * retired and where its successors are — on both surfaces — while every other
+ * record kind renders as it did.
+ */
+describe('taxon lifecycle on candidates', () => {
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join('\n');
+
+  it.each([
+    [
+      21373,
+      [134693, 326296],
+      'is_active false · current_synonymous_taxon_ids 134693, 326296 (pass one as taxon_id for the current taxon)',
+    ],
+    [1522336, [], 'is_active false · current_synonymous_taxon_ids none recorded'],
+  ])(
+    'relays inactive taxon %i with its successor array on both surfaces',
+    async (id, successors, line) => {
+      fake.autocompleteTaxa.mockResolvedValue({
+        total: 1,
+        candidates: [
+          resolvedCandidate({ id, is_active: false, current_synonymous_taxon_ids: successors }),
+        ],
+      });
+
+      const result = await runToolContract(inaturalistResolveName, { q: String(id) });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        found: true,
+        candidates: [{ id, is_active: false, current_synonymous_taxon_ids: successors }],
+      });
+      const text = textOf(result);
+      expect(text).toContain(line);
+      if (successors.length === 0) expect(text).not.toContain('pass one as taxon_id');
+    },
+  );
+
+  it.each([
+    ['taxon', 'autocompleteTaxa'],
+    ['any', 'searchRecords'],
+  ] as const)(
+    'relays an active taxon on type %s with is_active true and no successor field',
+    async (type, route) => {
+      fake[route].mockResolvedValue({
+        total: 1,
+        candidates: [resolvedCandidate({ id: 326296, name: 'Bufo bufo', is_active: true })],
+      });
+
+      const result = await runToolContract(inaturalistResolveName, { q: 'Bufo bufo', type });
+
+      const [candidate] = (
+        result.structuredContent as { candidates: Array<Record<string, unknown>> }
+      ).candidates;
+      expect(candidate).toMatchObject({ id: 326296, is_active: true });
+      expect(candidate).not.toHaveProperty('current_synonymous_taxon_ids');
+      const text = textOf(result);
+      expect(text).toContain('rank species · is_active true · matched on');
+      expect(text).not.toContain('current_synonymous_taxon_ids');
+    },
+  );
+
+  it('describes both fields with the onward pointer', () => {
+    const candidate = inaturalistResolveName.output.shape.candidates.element;
+    expect(candidate.shape.is_active.description).toContain('current_synonymous_taxon_ids');
+    expect(candidate.shape.current_synonymous_taxon_ids.description).toContain(
+      'pass one as taxon_id',
+    );
+  });
+
+  it('renders place, project, and user candidates exactly as before', async () => {
+    fake.searchRecords.mockResolvedValue({
+      total: 3,
+      candidates: [
+        {
+          kind: 'place',
+          id: 14,
+          name: 'California',
+          display_name: 'California, US',
+          slug: 'california-us',
+          matched_term: 'California',
+          score: 4.5,
+        },
+        { kind: 'project', id: 5, name: 'City Nature Challenge', slug: 'cnc', score: 3.25 },
+        { kind: 'user', id: 1, name: 'Ken-ichi Ueda', login: 'kueda', observations_count: 56317 },
+      ],
+    });
+
+    const result = await runToolContract(inaturalistResolveName, { q: 'c', type: 'any' });
+
+    const lines = textOf(result).split('\n');
+    expect(lines).toContain(
+      'kind place · id 14 · name California · display name California, US · slug california-us · matched on "California" · score 4.5',
+    );
+    expect(lines).toContain(
+      'kind project · id 5 · name City Nature Challenge · slug cnc · score 3.25',
+    );
+    expect(lines).toContain(
+      'kind user · id 1 · name Ken-ichi Ueda · login kueda · 56317 observations',
+    );
+    for (const candidate of (result.structuredContent as { candidates: object[] }).candidates) {
+      expect(candidate).not.toHaveProperty('is_active');
+      expect(candidate).not.toHaveProperty('current_synonymous_taxon_ids');
+    }
+  });
+});
+
 describe('miss guidance', () => {
   it('names the taxon-prefix miss reason when no rank was given', async () => {
     fake.autocompleteTaxa.mockResolvedValue({ total: 0, candidates: [] });
@@ -296,6 +405,18 @@ describe('type any miss guidance', () => {
 });
 
 describe('errors', () => {
+  it('declares the service-thrown daily budget refusal inline', () => {
+    expect(inaturalistResolveName.errors).toContainEqual({
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    });
+  });
+
   it.each(['taxon', 'user'] as const)(
     'rejects an explicit %s result window before service I/O on both surfaces',
     async (type) => {

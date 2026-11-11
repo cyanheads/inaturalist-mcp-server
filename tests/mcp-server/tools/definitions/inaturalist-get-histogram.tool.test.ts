@@ -18,6 +18,7 @@ import {
   getINaturalistService,
   INaturalistService,
 } from '@/services/inaturalist/inaturalist-service.js';
+import type { QualityGrade } from '@/services/inaturalist/vocabularies.js';
 import {
   asService,
   createFakeService,
@@ -450,7 +451,7 @@ describe('zero-hit notice', () => {
 
     expect(result.total).toBe(0);
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — nothing is recorded. Relax quality_grade.',
+      'Every bucket is zero — no records match these filters. Relax quality_grade.',
     );
   });
 
@@ -462,7 +463,7 @@ describe('zero-hit notice', () => {
     await inaturalistGetHistogram.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — nothing is recorded in that area. Widen the area, or relax quality_grade.',
+      'Every bucket is zero — no records in that area match these filters. Widen the area, or relax quality_grade.',
     );
   });
 
@@ -474,7 +475,7 @@ describe('zero-hit notice', () => {
     await inaturalistGetHistogram.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — this taxon has no records in that area. Confirm the taxon with inaturalist_resolve_name, or widen the area.',
+      'Every bucket is zero — no records of this taxon in that area match these filters. Confirm the taxon with inaturalist_resolve_name, widen the area, or add "needs_id" to quality_grade.',
     );
   });
 
@@ -486,8 +487,36 @@ describe('zero-hit notice', () => {
     await inaturalistGetHistogram.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'Every bucket is zero — this taxon has no records. Confirm the taxon with inaturalist_resolve_name.',
+      'Every bucket is zero — no records of this taxon match these filters. Confirm the taxon with inaturalist_resolve_name, or add "needs_id" to quality_grade.',
     );
+  });
+
+  it('words an empty taxon histogram as no matching records, on both surfaces', async () => {
+    // 135056 held 32 casual records when this was probed, all outside the default cohort.
+    fake.getHistogram.mockResolvedValue(
+      Array.from({ length: 12 }, (_, i) => ({ key: String(i + 1), count: 0 })),
+    );
+    const result = await runToolContract(inaturalistGetHistogram, { taxon_id: 135056 });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).not.toContain('has no records');
+    expect(notice).toContain('no records of this taxon match these filters');
+    expect(notice).toContain('add "needs_id" to quality_grade');
+    expect(JSON.stringify(result.content)).toContain(
+      'no records of this taxon match these filters',
+    );
+  });
+
+  it('offers needs_id on the taxon branch only when research grade alone was searched', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    for (const quality_grade of [['research', 'needs_id'], ['casual']] satisfies QualityGrade[][]) {
+      const result = await runToolContract(inaturalistGetHistogram, {
+        taxon_id: 135056,
+        quality_grade,
+      });
+      expect((result.structuredContent as { notice: string }).notice).toBe(
+        'Every bucket is zero — no records of this taxon match these filters. Confirm the taxon with inaturalist_resolve_name.',
+      );
+    }
   });
 
   it('names the date range when d1 or d2 was set, on both surfaces', async () => {
@@ -503,7 +532,7 @@ describe('zero-hit notice', () => {
 
     expect(result.isError).toBeFalsy();
     const expected =
-      'Every bucket is zero — no records of this taxon in that area match the combined filters. The supplied observation-date d1/d2 2090-01-01…any end may narrow the intersection; widen or drop those bounds. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
+      'Every bucket is zero — no records of this taxon in that area match the combined filters. The supplied observation-date d1/d2 2090-01-01…any end may narrow the intersection; widen or drop those bounds. Confirm the taxon with inaturalist_resolve_name, widen the area, or add "needs_id" to quality_grade.';
     expect(result.structuredContent).toMatchObject({ total: 0, notice: expected });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))
@@ -562,6 +591,57 @@ describe('zero-hit notice', () => {
       date_field: 'created',
     });
   });
+});
+
+describe('captive cohort disclosure', () => {
+  const COHORT =
+    'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+
+  it('discloses the cohort on an empty captive histogram with no quality remedy, on both surfaces', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      place_id: 1282,
+      captive: true,
+    });
+    const expected = `${COHORT} Every bucket is zero — no records in that area match these filters. Widen the area.`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
+  it('offers no needs_id hint on the taxon branch and joins the radius clamp', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 0 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      taxon_id: 47126,
+      lat: 47.6,
+      lng: -122.3,
+      radius: 20041,
+      captive: true,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `radius 20041 was clamped to 20040. ${COHORT} Every bucket is zero — no records of this taxon in that area match these filters. Confirm the taxon with inaturalist_resolve_name, or widen the area.`,
+    );
+  });
+
+  it('rides a histogram with records too', async () => {
+    fake.getHistogram.mockResolvedValue([{ key: '1', count: 4 }]);
+    const result = await runToolContract(inaturalistGetHistogram, {
+      captive: true,
+      quality_grade: ['needs_id'],
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(COHORT);
+  });
+
+  it.each([
+    { captive: true, quality_grade: ['casual'] },
+    { captive: false, quality_grade: ['research'] },
+  ] satisfies { captive: boolean; quality_grade: QualityGrade[] }[])(
+    'carries no cohort notice for %j',
+    async (cohort) => {
+      fake.getHistogram.mockResolvedValue([{ key: '1', count: 4 }]);
+      const result = await runToolContract(inaturalistGetHistogram, cohort);
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    },
+  );
 });
 
 describe('bucket cap', () => {
@@ -823,7 +903,7 @@ describe('annotation and iconic-group filters', () => {
 
     expect(result.isError).toBeFalsy();
     const expected =
-      'Every bucket is zero — no records of this taxon in that area match the annotation filter. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms and taxon_id, or drop the annotation filter. Confirm the taxon with inaturalist_resolve_name, or widen the area.';
+      'Every bucket is zero — no records of this taxon in that area match the annotation filter. Check that each term_value_id belongs to its term_id with inaturalist_list_reference topic controlled_terms and taxon_id, or drop the annotation filter. Confirm the taxon with inaturalist_resolve_name, widen the area, or add "needs_id" to quality_grade.';
     expect(result.structuredContent).toMatchObject({ total: 0, notice: expected });
     const text = (result.content ?? [])
       .map((block) => ('text' in block ? block.text : ''))

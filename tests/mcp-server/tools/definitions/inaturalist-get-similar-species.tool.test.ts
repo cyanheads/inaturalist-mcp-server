@@ -319,6 +319,66 @@ describe('zero-hit and limit-truncation enrichment', () => {
   });
 });
 
+describe('captive cohort disclosure', () => {
+  const COHORT =
+    'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+
+  it('joins the zero-hit notice on both surfaces', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 0, similar: [] });
+    const result = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      place_id: 1282,
+      captive: true,
+    });
+    const expected = `${COHORT} No related taxa were returned for these filters. Re-run without the area filter to broaden the result.`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
+  it('joins the clamp and truncation guidance', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 24, similar: candidates(24) });
+    const result = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      captive: true,
+      limit: 50,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `limit 50 was clamped to 24. ${COHORT} Upstream serves at most 24 related taxa and publishes no paging, so this list may be cut. Narrow the area or date filters to explore a smaller set.`,
+    );
+  });
+
+  it('joins the limit clamp, radius clamp and cohort notices at once, in order, on both surfaces', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 24, similar: candidates(24) });
+    const result = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      lat: 47.6,
+      lng: -122.3,
+      radius: 20_041,
+      captive: true,
+      limit: 50,
+    });
+    const notice = `limit 50 was clamped to 24. radius 20041 was clamped to 20040. ${COHORT} Upstream serves at most 24 related taxa and publishes no paging, so this list may be cut. Narrow the area or date filters to explore a smaller set.`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(notice);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(notice).slice(1, -1));
+  });
+
+  it('rides an uncut list, and stays off once casual is searched', async () => {
+    fake.getSimilarSpecies.mockResolvedValue({ total: 3, similar: candidates(3) });
+    const captive = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      captive: true,
+    });
+    expect((captive.structuredContent as { notice?: string }).notice).toBe(COHORT);
+
+    const casual = await runToolContract(inaturalistGetSimilarSpecies, {
+      taxon_id: 48662,
+      captive: true,
+      quality_grade: ['casual'],
+    });
+    expect(casual.structuredContent).not.toHaveProperty('notice');
+  });
+});
+
 describe('format()', () => {
   it('renders the header and a ranked numbered list with the photo block', () => {
     const result = { taxon_id: 48662, similar_species: [similarSpecies()] };

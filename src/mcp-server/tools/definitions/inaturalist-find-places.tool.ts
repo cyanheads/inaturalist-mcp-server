@@ -153,6 +153,15 @@ export const inaturalistFindPlaces = tool('inaturalist_find_places', {
       recovery:
         'Pass q to search place names, or all four of nelat, nelng, swlat and swlng, with nelat at or north of swlat, to list the places covering a map area.',
     },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
 
   async handler(input, ctx) {

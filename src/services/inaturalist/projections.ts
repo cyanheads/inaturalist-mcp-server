@@ -43,6 +43,7 @@ import type {
   RawTaxon,
   RawTaxonCount,
   RawTaxonDocument,
+  ResolvedCandidate,
   SimilarSpecies,
   SpeciesCount,
   TaxonChild,
@@ -50,7 +51,7 @@ import type {
   TaxonRecord,
   TaxonSummary,
 } from './types.js';
-import { toQualityGrade } from './vocabularies.js';
+import { iucnCode, toQualityGrade } from './vocabularies.js';
 
 /**
  * The host the upstream spec names for openly-licensed media. Any other host —
@@ -242,6 +243,30 @@ export function projectTaxonRecord(raw: RawTaxon | null | undefined): TaxonRecor
   };
 }
 
+/**
+ * A taxon candidate's lifecycle: `is_active` whenever upstream sends it, and the
+ * successor array only on an inactive taxon, so a retired id is caught where it
+ * is resolved. Upstream name matching ranks active taxa only; an inactive
+ * candidate arrives through a numeric id.
+ */
+export function projectTaxonLifecycle(
+  raw: RawTaxon,
+): Pick<ResolvedCandidate, 'is_active' | 'current_synonymous_taxon_ids'> {
+  if (typeof raw.is_active !== 'boolean') return {};
+  if (raw.is_active || !Array.isArray(raw.current_synonymous_taxon_ids)) {
+    return { is_active: raw.is_active };
+  }
+  return { is_active: false, current_synonymous_taxon_ids: raw.current_synonymous_taxon_ids };
+}
+
+/**
+ * Upstream's moderation flag, relayed only where upstream sent it: an entry
+ * without the key is not known to be visible, so it is never defaulted.
+ */
+function hiddenFlag(raw: { hidden?: boolean }): { hidden?: boolean } {
+  return typeof raw.hidden === 'boolean' ? { hidden: raw.hidden } : {};
+}
+
 function projectIdentification(raw: RawIdentification): ProjectedIdentification {
   return {
     id: raw.id ?? 0,
@@ -253,6 +278,7 @@ function projectIdentification(raw: RawIdentification): ProjectedIdentification 
     from_vision: raw.vision ?? false,
     body: raw.body ?? null,
     created_at: raw.created_at ?? null,
+    ...hiddenFlag(raw),
   };
 }
 
@@ -262,61 +288,89 @@ function projectComment(raw: RawComment): ProjectedComment {
     by: raw.user?.login ?? null,
     body: raw.body ?? null,
     created_at: raw.created_at ?? null,
+    ...hiddenFlag(raw),
   };
 }
 
 /**
- * Entries of each capped by-id array — `identifications[]`, `comments[]`, and
- * `observation_fields[]` — one response spends per array, shared across every
- * record it returns, so the arrays of a ten-record batch cost about what one
- * record's do. Sized from the measured per-entry reply cost — see the by-id
- * array cap in `docs/design.md`.
+ * Default `array_limit`: the entries of each capped by-id array —
+ * `identifications[]`, `comments[]`, and `observation_fields[]` — one response
+ * spends per array, shared across every record it returns, so the arrays of a
+ * ten-record batch cost about what one record's do. Sized from the measured
+ * per-entry reply cost — see the by-id array cap in `docs/design.md`.
  */
 export const THREAD_ENTRY_BUDGET = 40;
 
 /** The fewest entries any one record keeps per capped array, however large the batch. */
 export const THREAD_ENTRY_FLOOR = 4;
 
-/** Per-record, per-array cap for a by-id response carrying `records` observations. */
-export function threadCap(records: number): number {
-  return Math.max(THREAD_ENTRY_FLOOR, Math.floor(THREAD_ENTRY_BUDGET / records));
+/**
+ * Per-record, per-array share of `arrayLimit` for a by-id response carrying
+ * `records` observations: never above the limit itself, never below the floor
+ * unless the limit is.
+ */
+export function threadCap(records: number, arrayLimit: number = THREAD_ENTRY_BUDGET): number {
+  return Math.min(arrayLimit, Math.max(THREAD_ENTRY_FLOOR, Math.floor(arrayLimit / records)));
 }
 
+/** One page of every capped by-id array: `size` entries from absolute index `offset`. */
+export type ArrayPage = { offset: number; size: number };
+
 /**
- * Projects the first `cap` entries of a thread array in upstream order, cutting
- * before projecting, and reports how many upstream held.
+ * Sorts a by-id array by ascending upstream `id` — creation order for
+ * identifications and comments — and cuts one page of it before projecting.
+ * Upstream's own order is stable but not sorted, while ids only grow, so a new
+ * entry always lands past every page already read. `total` and `hidden` — the
+ * entries upstream flags `hidden: true` — are counted over the whole sorted
+ * array, before the cut, so both are identical on every page. A hidden entry
+ * keeps its sorted place, so hiding one never shifts the entries after it.
+ * Without a page the whole array is kept.
  */
-function projectThread<Raw, Projected>(
+function projectThread<Raw extends { id?: number; hidden?: boolean }, Projected>(
   raw: readonly Raw[] | null | undefined,
   project: (entry: Raw) => Projected,
-  cap: number | undefined,
-): { entries: Projected[]; total: number } {
-  const all = raw ?? [];
-  const kept = cap === undefined ? all : all.slice(0, cap);
-  return { entries: kept.map(project), total: all.length };
+  page: ArrayPage | undefined,
+): { entries: Projected[]; total: number; hidden: number } {
+  // `?? 0` mirrors the projected `id`, so the output reads ascending.
+  const sorted = (raw ?? []).toSorted((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  const total = sorted.length;
+  const hidden = sorted.filter((entry) => entry.hidden === true).length;
+  const kept = page ? sorted.slice(page.offset, page.offset + page.size) : sorted;
+  return { entries: kept.map(project), total, hidden };
+}
+
+type FilledObservationField = RawObservationFieldValue & { value: string };
+
+/**
+ * One filled field. A taxon-type value upstream resolved carries the full
+ * 26–29-key taxon record, cut here to the five-field summary; a free-text value
+ * in a taxon-type field has no upstream taxon, so none is attached.
+ */
+function projectObservationField(raw: FilledObservationField): ProjectedObservationField {
+  const taxon = projectTaxonSummary(raw.taxon);
+  return {
+    name: raw.name ?? null,
+    value: raw.value,
+    datatype: raw.datatype ?? null,
+    ...(taxon ? { taxon } : {}),
+  };
 }
 
 /**
  * Keeps an observation field only when it carries a value — a project can
  * attach a field to a record and leave it empty, and a blank row tells a reader
- * nothing — then keeps the first `cap` filled fields in upstream order. `total`
- * counts every filled field, so the cap is measured against what a reader could
- * have seen, not against the blanks.
+ * nothing — then sorts and pages the filled fields like a thread, so `total`
+ * and every offset count only what a reader could have seen, not the blanks.
  */
 function projectObservationFields(
   raw: readonly RawObservationFieldValue[] | null | undefined,
-  cap: number | undefined,
+  page: ArrayPage | undefined,
 ): { entries: ProjectedObservationField[]; total: number } {
-  const entries: ProjectedObservationField[] = [];
-  let total = 0;
-  for (const field of raw ?? []) {
-    if (typeof field.value !== 'string' || field.value.trim() === '') continue;
-    total += 1;
-    if (cap === undefined || entries.length < cap) {
-      entries.push({ name: field.name ?? null, value: field.value });
-    }
-  }
-  return { entries, total };
+  const filled = (raw ?? []).filter(
+    (field): field is FilledObservationField =>
+      typeof field.value === 'string' && field.value.trim() !== '',
+  );
+  return projectThread(filled, projectObservationField, page);
 }
 
 /**
@@ -325,12 +379,14 @@ function projectObservationFields(
  * `include` selects which embedded arrays survive; everything else — the
  * `non_owner_ids` near-duplicate of `identifications`, the 40 unlabelled
  * `place_ids`, the full 22-key `user` profile, `geojson`, votes, faves, flags —
- * is dropped outright.
+ * is dropped outright. `outlinks`, the record's copies in external databases
+ * such as its GBIF occurrence, is relayed in upstream order on every record.
  *
- * `threadCap` bounds each included thread array — and, on the detail arm, the
- * filled observation fields — to its first entries in upstream order, cut
- * before projecting, so a 1,114-entry thread costs 40 projections, not 1,114.
- * Each capped array reports its upstream total beside what it kept.
+ * `arrayPage` bounds each included thread array — and, on the detail arm, the
+ * filled observation fields — to one page of its entries in ascending `id`
+ * order, cut before projecting, so a 1,139-entry thread costs 40 projections,
+ * not 1,139. Each capped array reports its whole size beside what it kept, and
+ * each thread how many of its entries are hidden.
  */
 export function projectObservation(
   raw: RawObservation,
@@ -338,7 +394,7 @@ export function projectObservation(
     include?: ReadonlySet<ObservationExpansion>;
     terms?: ControlledTermIndex;
     detail?: boolean;
-    threadCap?: number;
+    arrayPage?: ArrayPage;
   } = {},
 ): ProjectedObservation {
   const include = options.include ?? new Set<ObservationExpansion>();
@@ -348,12 +404,12 @@ export function projectObservation(
     ? photos.map(projectPhoto).filter((photo): photo is ProjectedPhoto => photo !== null)
     : undefined;
   const identifications = include.has('identifications')
-    ? projectThread(raw.identifications, projectIdentification, options.threadCap)
+    ? projectThread(raw.identifications, projectIdentification, options.arrayPage)
     : undefined;
   const comments = include.has('comments')
-    ? projectThread(raw.comments, projectComment, options.threadCap)
+    ? projectThread(raw.comments, projectComment, options.arrayPage)
     : undefined;
-  const fields = options.detail ? projectObservationFields(raw.ofvs, options.threadCap) : undefined;
+  const fields = options.detail ? projectObservationFields(raw.ofvs, options.arrayPage) : undefined;
 
   return {
     id: raw.id ?? 0,
@@ -380,6 +436,14 @@ export function projectObservation(
     agreements: raw.num_identification_agreements ?? 0,
     disagreements: raw.num_identification_disagreements ?? 0,
     community_taxon_id: raw.community_taxon_id ?? null,
+    ...(Array.isArray(raw.outlinks)
+      ? {
+          outlinks: raw.outlinks.map((link) => ({
+            source: link.source ?? null,
+            url: link.url ?? null,
+          })),
+        }
+      : {}),
     ...(expandedPhotos ? { photos: expandedPhotos } : {}),
     ...(include.has('annotations')
       ? { annotations: decodeAnnotations(raw.annotations, options.terms) }
@@ -390,6 +454,7 @@ export function projectObservation(
           identifications: identifications.entries,
           identifications_total: identifications.total,
           identifications_shown: identifications.entries.length,
+          identifications_hidden: identifications.hidden,
         }
       : {}),
     ...(comments
@@ -397,6 +462,7 @@ export function projectObservation(
           comments: comments.entries,
           comments_total: comments.total,
           comments_shown: comments.entries.length,
+          comments_hidden: comments.hidden,
         }
       : {}),
     ...(fields
@@ -500,10 +566,12 @@ export function projectTaxonChild(raw: RawTaxon): TaxonChild | null {
  * name is what identifies a listing.
  */
 export function projectConservationStatus(raw: RawConservationStatus): ConservationStatus {
+  const iucn = raw.iucn ?? null;
   return {
     status: raw.status ?? null,
     authority: raw.authority ?? null,
-    iucn: raw.iucn ?? null,
+    iucn,
+    iucn_code: iucnCode(iucn),
     place: raw.place?.display_name ?? raw.place?.name ?? null,
     url: raw.url ?? null,
   };
@@ -528,6 +596,7 @@ export function projectTaxonDocument(
     common_name: raw.preferred_common_name ?? null,
     iconic_taxon_name: raw.iconic_taxon_name ?? null,
     is_active: raw.is_active ?? false,
+    current_synonymous_taxon_ids: raw.current_synonymous_taxon_ids ?? null,
     extinct: raw.extinct ?? false,
     observations_count: raw.observations_count ?? null,
     listed_taxa_count: raw.listed_taxa_count ?? null,

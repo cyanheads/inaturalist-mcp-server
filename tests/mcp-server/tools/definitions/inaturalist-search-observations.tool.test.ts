@@ -24,6 +24,7 @@ import {
   getINaturalistService,
   INaturalistService,
 } from '@/services/inaturalist/inaturalist-service.js';
+import type { QualityGrade } from '@/services/inaturalist/vocabularies.js';
 import { failingUpstream } from '../../../helpers/failing-upstream.js';
 import {
   asService,
@@ -57,6 +58,23 @@ beforeEach(() => {
 function observations(count: number, idOffset = 0) {
   return Array.from({ length: count }, (_, i) => projectedObservation({ id: idOffset + i + 1 }));
 }
+
+/** A cohort that silences both default-cohort hints, so a supplied filter's fragment stands alone. */
+const SILENT_COHORT: { quality_grade: QualityGrade[]; captive: boolean } = {
+  quality_grade: ['research', 'needs_id', 'casual'],
+  captive: true,
+};
+const RESEARCH_HINT =
+  'Only research-grade records were searched. Add "needs_id" to quality_grade to include sightings whose identification is not yet community-confirmed.';
+const WILD_HINT =
+  'Only wild records were searched. To search captive/cultivated-only records, use captive: true with "casual" in quality_grade in a separate call.';
+const CAPTIVE_COHORT =
+  'Captive and cultivated records are graded casual, so captive: true without "casual" in quality_grade matches only records whose grade disagrees with their captive flag. Add "casual" to quality_grade for captive or cultivated records.';
+const SUCCESSOR_POINTER =
+  'Check taxon_id with inaturalist_get_taxon: an inactive taxon lists its successors.';
+const TAXON_FRAGMENTS = `No sightings of that taxon match the other filters. Confirm taxon_id with inaturalist_resolve_name, or drop it. ${SUCCESSOR_POINTER}`;
+const PLACE_FRAGMENT =
+  'No sightings in that place match the other filters. Confirm place_id with inaturalist_find_places, or drop it.';
 
 describe('input validation', () => {
   it('forwards accurate/open, monthly, uploaded/updated and disputed filters through the real service', async () => {
@@ -254,9 +272,10 @@ describe('input validation', () => {
     expect(fake.searchObservations).toHaveBeenCalledTimes(1);
     expect(fake.getObservations).toHaveBeenCalledTimes(1);
   });
+  // The fixture record's one GBIF outlink costs 148 serialized bytes across both surfaces.
   it.each([
-    [21_819, 1],
-    [21_820, 0],
+    [21_745, 1],
+    [21_746, 0],
   ])('keeps complete records at the measured reserve boundary (%s)', async (length, shown) => {
     fake.searchObservations.mockResolvedValue({
       total: 1,
@@ -271,12 +290,12 @@ describe('input validation', () => {
     });
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
     const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
-    if (shown === 1) expect(text).toContain('x'.repeat(21_819));
+    if (shown === 1) expect(text).toContain('x'.repeat(21_745));
     else expect(text).toContain('inaturalist_get_observation');
   });
 
   it('composes clamp, ignored-filter, pagination and deferred guidance once', async () => {
-    // Shorter synthetic text offsets timestamp fields while keeping the same 23-record boundary.
+    // This record shape, timestamps and one GBIF outlink included, measures a 21-record boundary.
     const records = observations(25).map((record) => ({
       ...record,
       observer: 'ab',
@@ -292,10 +311,10 @@ describe('input validation', () => {
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({
       cap: 25,
-      shown: 23,
+      shown: 21,
       has_more: true,
       next_cursor: '25',
-      deferred: [{ observation_id: 24 }, { observation_id: 25 }],
+      deferred: [22, 23, 24, 25].map((observation_id) => ({ observation_id })),
     });
     const notice = z.object({ notice: z.string() }).parse(result.structuredContent).notice;
     for (const fragment of [
@@ -369,7 +388,7 @@ describe('input validation', () => {
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(50_000);
   });
 
-  it('continues from the full fetched page across multiple deferred cursor hops', async () => {
+  it('continues from the full fetched page across deferred cursor hops and ends on the full final page', async () => {
     const seen: number[] = [];
     for (const [hop, ids] of [
       [0, [6, 5]],
@@ -391,11 +410,18 @@ describe('input validation', () => {
         ...output.deferred.map(({ observation_id }) => observation_id),
       );
       expect(output.observations).toEqual([]);
-      expect(output.next_cursor).toBe(String(ids[1]));
-      expect(output.has_more).toBe(true);
-      expect(result.content.map((block) => ('text' in block ? block.text : '')).join('')).toContain(
-        `Pass cursor "${ids[1]}"`,
-      );
+      const text = result.content.map((block) => ('text' in block ? block.text : '')).join('');
+      // Every record is deferred, so continuation can only come from the full upstream page.
+      if (hop < 2) {
+        expect(output.next_cursor).toBe(String(ids[1]));
+        expect(output.has_more).toBe(true);
+        expect(text).toContain(`Pass cursor "${ids[1]}"`);
+      } else {
+        expect(output.next_cursor).toBeUndefined();
+        expect(output.has_more).toBe(false);
+        expect(text).not.toContain('Pass cursor');
+        expect(text).toContain('Deferred records remain available even when has_more is false.');
+      }
     }
     expect(seen).toEqual([6, 5, 4, 3, 2, 1]);
     expect(fake.searchObservations.mock.calls.map(([params]) => params.id_below)).toEqual([
@@ -949,9 +975,9 @@ describe('has_more / next_cursor', () => {
     expect(structured).toMatchObject({
       has_more: true,
       truncated: true,
-      shown: 23,
+      shown: 21,
       cap: 25,
-      deferred: [{ observation_id: 24 }, { observation_id: 25 }],
+      deferred: [22, 23, 24, 25].map((observation_id) => ({ observation_id })),
     });
     expect(structured).not.toHaveProperty('next_cursor');
     const expected =
@@ -1025,16 +1051,59 @@ describe('has_more / next_cursor', () => {
     expect(result.next_cursor).toBeUndefined();
   });
 
-  it('continues under a cursor whenever the page is full, independent of total', async () => {
-    fake.searchObservations.mockResolvedValue({ total: 2, observations: observations(2) });
-    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({ cursor: '99', per_page: 2 });
+  /** Asserts the continuation an id-descending page reports, on both assembled surfaces. */
+  async function expectContinuation(
+    args: Record<string, unknown>,
+    upstream: { total: number; ids: number[] },
+    hasMore: boolean,
+  ) {
+    fake.searchObservations.mockResolvedValue({
+      total: upstream.total,
+      observations: upstream.ids.map((id) => projectedObservation({ id })),
+    });
+    const result = await runToolContract(searchContract, { ...args, per_page: 2 });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    const text = (result.content ?? [])
+      .map((block) => ('text' in block ? block.text : ''))
+      .join('');
+    const cursor = String(upstream.ids.at(-1));
+    expect(structured).toMatchObject({ has_more: hasMore, truncated: hasMore });
+    if (hasMore) {
+      expect(structured.next_cursor).toBe(cursor);
+      expect(structured.notice).toContain(`More records match. Pass cursor "${cursor}"`);
+      expect(text).toContain(`**has_more:** true · **next_cursor:** ${cursor}`);
+      expect(text).toContain(`More records match. Pass cursor "${cursor}"`);
+    } else {
+      expect(structured).not.toHaveProperty('next_cursor');
+      expect(structured).not.toHaveProperty('notice');
+      expect(text).toContain('**has_more:** false · **next_cursor:** none');
+      expect(text).not.toContain('More records match');
+    }
+  }
 
-    const result = await inaturalistSearchObservations.handler(input, ctx);
+  it.each([
+    { name: 'a full page short of the total', page: 1, total: 5, ids: [5, 4], hasMore: true },
+    { name: 'a full page reaching the total', page: 2, total: 4, ids: [2, 1], hasMore: false },
+    { name: 'a short final page', page: 3, total: 5, ids: [1], hasMore: false },
+  ])(
+    'reads page-path continuation from the offset and total: $name',
+    async ({ page, total, ids, hasMore }) => {
+      await expectContinuation({ page, order_by: 'id' }, { total, ids }, hasMore);
+    },
+  );
 
-    expect(result.has_more).toBe(true);
-    expect(result.next_cursor).toBe(String(2));
-  });
+  // Under a cursor upstream counts only the records below it, so total and per_page decide the end.
+  it.each([
+    { name: 'a full page whose total equals per_page', total: 2, ids: [2, 1], hasMore: false },
+    { name: 'a full page short of the total', total: 3, ids: [3, 2], hasMore: true },
+    { name: 'a short final page', total: 1, ids: [1], hasMore: false },
+  ])(
+    'reads cursor continuation from the below-cursor total: $name',
+    async ({ total, ids, hasMore }) => {
+      await expectContinuation({ cursor: '99' }, { total, ids }, hasMore);
+    },
+  );
 
   it('reports has_more: false with no next_cursor on an empty result', async () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
@@ -1060,12 +1129,169 @@ describe('zero-hit notice composition', () => {
     expect(notice).toContain('Only wild records were searched.');
   });
 
+  it('returns exactly the two default-cohort hints when nothing beyond the defaults was supplied', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {});
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `${RESEARCH_HINT} ${WILD_HINT}`,
+    );
+  });
+
+  it('names q, then the place, before the default-cohort hints, on both surfaces', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      place_id: 1282,
+      q: 'zzqqxxnotaword',
+      per_page: 1,
+    });
+    const expected = `Relax supplied filters one at a time: drop q. ${PLACE_FRAGMENT} ${RESEARCH_HINT} ${WILD_HINT}`;
+    expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
+  it('names licences, the taxon and the place, with the wild-only hint last', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      place_id: 1282,
+      taxon_id: 67356,
+      license: ['cc0'],
+      photo_license: ['cc0'],
+      quality_grade: ['research', 'needs_id'],
+      per_page: 1,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `Relax supplied filters one at a time: drop license, drop photo_license. ${TAXON_FRAGMENTS} ${PLACE_FRAGMENT} ${WILD_HINT}`,
+    );
+  });
+
+  it('names taxon_id before both default-cohort hints when it is the only supplied filter', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, { taxon_id: 135056 });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `${TAXON_FRAGMENTS} ${RESEARCH_HINT} ${WILD_HINT}`,
+    );
+  });
+
+  it('points a zero-hit taxon search at the successor check in one upstream request, and only then', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\?/,
+        respond: () => Response.json({ total_results: 0, results: [] }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const withTaxon = await runToolContract(inaturalistSearchObservations, { taxon_id: 135056 });
+      expect(http.calls).toHaveLength(1);
+      const notice = (withTaxon.structuredContent as { notice: string }).notice;
+      expect(notice).toContain(SUCCESSOR_POINTER);
+      expect(notice).toContain('Only research-grade records were searched.');
+      expect(JSON.stringify(withTaxon.content)).toContain(SUCCESSOR_POINTER);
+
+      const withoutTaxon = await runToolContract(inaturalistSearchObservations, { place_id: 1 });
+      expect(http.calls).toHaveLength(2);
+      expect((withoutTaxon.structuredContent as { notice: string }).notice).not.toContain(
+        'inaturalist_get_taxon',
+      );
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('names a bounding box', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    await inaturalistSearchObservations.handler(
+      inaturalistSearchObservations.input.parse({
+        ...SILENT_COHORT,
+        nelat: 48,
+        nelng: -122,
+        swlat: 47,
+        swlng: -123,
+      }),
+      ctx,
+    );
+    expect(getEnrichment(ctx).notice).toBe(
+      'No sightings inside that bounding box. Widen the box, or search a named area with a place_id from inaturalist_find_places.',
+    );
+  });
+
+  it('orders every supplied fragment and names each filter once', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    await inaturalistSearchObservations.handler(
+      inaturalistSearchObservations.input.parse({
+        q: 'moth',
+        search_on: 'tags',
+        licensed: true,
+        photo_licensed: false,
+        iconic_taxa: ['Insecta'],
+        taxon_id: 47157,
+        user_id: 1,
+        project_id: 5,
+        term_id: [1],
+        sounds: true,
+        d1: '2026-01-01',
+        lat: 47.6,
+        lng: -122.3,
+        radius: 10,
+      }),
+      ctx,
+    );
+    const notice = getEnrichment(ctx).notice as string;
+    const order = [
+      'Relax supplied filters one at a time:',
+      'No sightings of that taxon',
+      'No sightings by that observer',
+      'No sightings in that project',
+      'No sightings carry that annotation',
+      'sounds: true selected',
+      'No sightings fall in',
+      'No sightings within 10 km',
+      'Only research-grade records',
+      'Only wild records',
+    ].map((fragment) => notice.indexOf(fragment));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    for (const item of [
+      'drop search_on or drop q with it',
+      'drop licensed',
+      'drop photo_licensed',
+      'drop iconic_taxa',
+    ]) {
+      expect(notice.split(item)).toHaveLength(2);
+    }
+    // search_on without q is refused, so no remedy drops q on its own.
+    expect(notice).not.toMatch(/drop q(?! with it)/);
+    expect(notice).not.toContain('No sightings matched');
+  });
+
+  it('never names an empty array it already reported as ignored', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      ...SILENT_COHORT,
+      license: [],
+      photo_license: [],
+      iconic_taxa: [],
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'iconic_taxa, license, photo_license were empty and ignored; omit empty filters to search without those restrictions. No sightings matched. Relax one filter at a time.',
+    );
+  });
+
   it('names the date range when the defaults were widened', async () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
+      ...SILENT_COHORT,
       d1: '2026-01-01',
       d2: '2026-01-31',
     });
@@ -1080,28 +1306,21 @@ describe('zero-hit notice composition', () => {
     expect(notice).not.toContain('here');
   });
 
-  it('names taxon_id in the fallback only when it was supplied, and never the absent date range', async () => {
+  it('names taxon_id in its own fragment rather than the fallback, and never the absent date range', async () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
-      taxon_id: 47126,
-    });
+    const input = inaturalistSearchObservations.input.parse({ ...SILENT_COHORT, taxon_id: 47126 });
 
     await inaturalistSearchObservations.handler(input, ctx);
 
-    expect(getEnrichment(ctx).notice).toBe(
-      'No sightings matched. Relax one filter at a time. Confirm taxon_id with inaturalist_resolve_name, or drop it.',
-    );
+    expect(getEnrichment(ctx).notice).toBe(TAXON_FRAGMENTS);
   });
 
   it('names the annotation filter when a term_id was supplied', async () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
+      ...SILENT_COHORT,
       term_id: [1],
     });
 
@@ -1116,8 +1335,7 @@ describe('zero-hit notice composition', () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
+      ...SILENT_COHORT,
       taxon_id: 47126,
       term_id: [1],
     });
@@ -1125,7 +1343,7 @@ describe('zero-hit notice composition', () => {
     await inaturalistSearchObservations.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe(
-      'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
+      `${TAXON_FRAGMENTS} No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.`,
     );
   });
 
@@ -1133,8 +1351,7 @@ describe('zero-hit notice composition', () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
+      ...SILENT_COHORT,
       lat: 47.6,
       lng: -122.3,
       radius: 10,
@@ -1152,8 +1369,7 @@ describe('zero-hit notice composition', () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
 
     const result = await runToolContract(inaturalistSearchObservations, {
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
+      ...SILENT_COHORT,
       per_page: 5,
     });
 
@@ -1185,14 +1401,82 @@ describe('zero-hit notice composition', () => {
   it('falls back to the generic notice when no specific condition applies', async () => {
     fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
-    const input = inaturalistSearchObservations.input.parse({
-      quality_grade: ['research', 'needs_id'],
-      captive: true,
-    });
+    const input = inaturalistSearchObservations.input.parse(SILENT_COHORT);
 
     await inaturalistSearchObservations.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBe('No sightings matched. Relax one filter at a time.');
+  });
+});
+
+describe('captive cohort disclosure', () => {
+  it('discloses the cohort on an empty captive search, with no needs_id remedy beside it', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      place_id: 1282,
+      captive: true,
+      per_page: 2,
+    });
+    const expected = `${CAPTIVE_COHORT} ${PLACE_FRAGMENT}`;
+    expect(result.structuredContent).toMatchObject({ total_results: 0, notice: expected });
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+  });
+
+  it('returns the grade-inconsistent records it finds, with the notice, on both surfaces', async () => {
+    fake.searchObservations.mockResolvedValue({
+      total: 1,
+      observations: [projectedObservation({ id: 404315372, captive: true })],
+    });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      place_id: 14,
+      captive: true,
+      quality_grade: ['research', 'needs_id'],
+      per_page: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observations: [{ id: 404315372 }],
+      notice: CAPTIVE_COHORT,
+    });
+    expect(JSON.stringify(result.content)).toContain(JSON.stringify(CAPTIVE_COHORT).slice(1, -1));
+  });
+
+  it('joins the clamp, ignored-array and zero-hit notices rather than replacing them', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      captive: true,
+      quality_grade: ['needs_id'],
+      license: [],
+      taxon_id: 47126,
+      per_page: 26,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `per_page 26 was clamped to 25. license was empty and ignored; omit empty filters to search without those restrictions. ${CAPTIVE_COHORT} ${TAXON_FRAGMENTS}`,
+    );
+  });
+
+  it.each([
+    { captive: true, quality_grade: ['casual'] },
+    { captive: true, quality_grade: ['research', 'casual'] },
+    { captive: false, quality_grade: ['research'] },
+    { captive: false, quality_grade: ['research', 'needs_id', 'casual'] },
+  ] satisfies { captive: boolean; quality_grade: QualityGrade[] }[])(
+    'carries no cohort notice for %j',
+    async (cohort) => {
+      fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+      const result = await runToolContract(inaturalistSearchObservations, cohort);
+      expect(String((result.structuredContent as { notice?: string }).notice)).not.toContain(
+        'graded casual',
+      );
+    },
+  );
+
+  it('names "casual" beside captive: true in the wild-only fragment', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      quality_grade: ['research', 'needs_id'],
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(WILD_HINT);
   });
 });
 
@@ -1280,10 +1564,10 @@ describe('an id-descending walk through the real service', () => {
    * Upstream stand-in over ids 1–30: `id_below` filters and re-counts, `page`
    * offsets, and ordering is id descending — the one ordering a cursor
    * continues. The walk starts on the page path and continues by cursor, so
-   * both halves of the handoff are exercised past the first hop.
+   * both halves of the handoff are exercised past the first hop. `ids` is read
+   * on every request, so a caller can delete records between hops.
    */
-  function idDescendingUpstream() {
-    const ids = Array.from({ length: 30 }, (_, i) => 30 - i);
+  function idDescendingUpstream(ids = Array.from({ length: 30 }, (_, i) => 30 - i)) {
     return createFetchMock([
       {
         match: /api\.inaturalist\.org\/v1\/observations\?/,
@@ -1304,7 +1588,7 @@ describe('an id-descending walk through the real service', () => {
     ]);
   }
 
-  it('reaches every record once, in order, from page 1 through two cursor hops', async () => {
+  it('reaches every record once, in order, from page 1 through two cursor hops, ending on the full final page', async () => {
     const http = idDescendingUpstream();
     vi.mocked(getINaturalistService).mockReturnValue(
       new INaturalistService({
@@ -1323,9 +1607,12 @@ describe('an id-descending walk through the real service', () => {
         const structured = result.structuredContent as {
           observations: { id: number }[];
           next_cursor?: string;
+          has_more: boolean;
         };
         seen.push(...structured.observations.map((o) => o.id));
-        expect(structured.next_cursor).toBe(String(seen.at(-1)));
+        const final = hop === 2;
+        expect(structured.has_more).toBe(!final);
+        expect(structured.next_cursor).toBe(final ? undefined : String(seen.at(-1)));
         args = { cursor: structured.next_cursor, per_page: 10 };
       }
 
@@ -1336,6 +1623,57 @@ describe('an id-descending walk through the real service', () => {
     } finally {
       http.restore();
     }
+  });
+
+  it('says the walk is complete when the records below an issued cursor are gone by the next call', async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => 30 - i);
+    const http = idDescendingUpstream(ids);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const first = await runToolContract(inaturalistSearchObservations, {
+        order_by: 'id',
+        order: 'desc',
+        per_page: 10,
+      });
+      const cursor = (first.structuredContent as { next_cursor?: string }).next_cursor;
+      expect(cursor).toBe('21');
+      ids.splice(10);
+
+      const end = await runToolContract(inaturalistSearchObservations, { cursor, per_page: 10 });
+      const expected =
+        'No records below cursor 21 match these filters, so the id-descending walk is complete.';
+      expect(end.structuredContent).toMatchObject({
+        observations: [],
+        has_more: false,
+        notice: expected,
+      });
+      expect(end.structuredContent).not.toHaveProperty('next_cursor');
+      expect(JSON.stringify(end.content)).toContain(expected);
+      expect(http.calls).toHaveLength(2);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('keeps the other notices beside the walk-complete notice', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const result = await runToolContract(inaturalistSearchObservations, {
+      place_id: 1282,
+      cursor: '1',
+      per_page: 26,
+      captive: true,
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `per_page 26 was clamped to 25. ${CAPTIVE_COHORT} No records below cursor 1 match these filters, so the id-descending walk is complete.`,
+    );
   });
 });
 
@@ -1429,8 +1767,7 @@ describe('observer and project filters', () => {
     const withBoth = createMockContext({ errors: inaturalistSearchObservations.errors });
     await inaturalistSearchObservations.handler(
       inaturalistSearchObservations.input.parse({
-        quality_grade: ['research', 'needs_id'],
-        captive: true,
+        ...SILENT_COHORT,
         user_login: 'kueda',
         project_id: 227779,
       }),
@@ -1443,13 +1780,94 @@ describe('observer and project filters', () => {
 
     const withNeither = createMockContext({ errors: inaturalistSearchObservations.errors });
     await inaturalistSearchObservations.handler(
-      inaturalistSearchObservations.input.parse({
-        quality_grade: ['research', 'needs_id'],
-        captive: true,
-      }),
+      inaturalistSearchObservations.input.parse(SILENT_COHORT),
       withNeither,
     );
     expect(getEnrichment(withNeither).notice).not.toMatch(/observer|project/);
+  });
+
+  it('sends ident_user_id and unobserved_by_user_id upstream as an id or a login, never blank', async () => {
+    expect(await capturedSearchUrl({ ident_user_id: 205278, project_id: 225392 })).toBe(
+      'https://api.inaturalist.org/v1/observations?captive=false&ident_user_id=205278&order=desc&order_by=observed_on&page=1&per_page=10&project_id=225392&quality_grade=research',
+    );
+    expect(await capturedSearchUrl({ unobserved_by_user_id: 'natureguy' })).toContain(
+      '&unobserved_by_user_id=natureguy',
+    );
+    const blank = await capturedSearchUrl({ ident_user_id: '', unobserved_by_user_id: '' });
+    expect(blank).not.toMatch(/ident_user_id|unobserved_by_user_id/);
+  });
+
+  it('names the identifier and unobserved-by filters beside the observer when no records match', async () => {
+    fake.searchObservations.mockResolvedValue({ total: 0, observations: [] });
+    const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
+    await inaturalistSearchObservations.handler(
+      inaturalistSearchObservations.input.parse({
+        ...SILENT_COHORT,
+        user_login: 'kueda',
+        ident_user_id: 'ajwright',
+        unobserved_by_user_id: 134993,
+        project_id: 225392,
+      }),
+      ctx,
+    );
+    expect(getEnrichment(ctx).notice).toBe(
+      'No sightings by that observer match the other filters. Confirm user_login with inaturalist_resolve_name type user, or drop it. No sightings identified by that user match the other filters. Confirm ident_user_id with inaturalist_resolve_name type user, or drop it. No sightings of taxa that user has not observed match the other filters. Confirm unobserved_by_user_id with inaturalist_resolve_name type user, or drop it. No sightings in that project match the other filters. Confirm project_id with inaturalist_resolve_name type project, or drop it.',
+    );
+  });
+
+  it.each([
+    ['ident_user_id', 'Unknown ident_user_id: [zz-no-such-login-xq9]'],
+    ['unobserved_by_user_id', 'Unknown unobserved_by_user_id zz-no-such-login-xq9'],
+  ] as const)(
+    'fails an unknown %s as unknown_user naming that field, on both surfaces',
+    async (field, body) => {
+      const http = createFetchMock([
+        {
+          match: /api\.inaturalist\.org\/v1\/observations\?/,
+          respond: () =>
+            new Response(JSON.stringify({ error: body, status: 422 }), { status: 422 }),
+        },
+      ]);
+      vi.mocked(getINaturalistService).mockReturnValue(
+        new INaturalistService({
+          userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+          minRequestIntervalMs: 0,
+          maxConcurrentRequests: 4,
+          dailyRequestBudget: 1000,
+        }),
+      );
+      http.install();
+      try {
+        const result = await runToolContract(inaturalistSearchObservations, {
+          [field]: 'zz-no-such-login-xq9',
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            message: expect.stringContaining(field),
+            data: {
+              reason: 'unknown_user',
+              recovery: { hint: expect.stringContaining('inaturalist_resolve_name type user') },
+            },
+          },
+        });
+        expect(JSON.stringify(result.content)).toContain(field);
+        expect(http.calls).toHaveLength(1);
+      } finally {
+        http.restore();
+      }
+    },
+  );
+
+  it('declares unknown_user over all four user selectors', () => {
+    const entry = inaturalistSearchObservations.errors?.find(
+      (candidate) => candidate.reason === 'unknown_user',
+    );
+    for (const field of ['user_id', 'user_login', 'ident_user_id', 'unobserved_by_user_id']) {
+      expect(entry?.when).toContain(field);
+    }
+    expect(entry?.recovery).not.toContain('observer');
   });
 
   it('names user_id rather than user_login when the observer was given by id', async () => {
@@ -1457,8 +1875,7 @@ describe('observer and project filters', () => {
     const ctx = createMockContext({ errors: inaturalistSearchObservations.errors });
     await inaturalistSearchObservations.handler(
       inaturalistSearchObservations.input.parse({
-        quality_grade: ['research', 'needs_id'],
-        captive: true,
+        ...SILENT_COHORT,
         user_id: 1,
       }),
       ctx,
@@ -1574,7 +1991,7 @@ describe('search records stay free of the by-id detail fields', () => {
                 description: 'Confirm?',
                 ofvs: Array.from({ length: 60 }, (_, i) => ({ name: `Field ${i}`, value: 'x' })),
                 identifications: Array.from({ length: 60 }, (_, i) =>
-                  rawIdentification({ id: i + 1 }),
+                  rawIdentification({ id: i + 1, hidden: i % 2 === 0 }),
                 ),
               }),
             ],
@@ -1604,16 +2021,80 @@ describe('search records stay free of the by-id detail fields', () => {
         'identifications',
         'identifications_total',
         'identifications_shown',
+        'identifications_hidden',
         'comments_total',
+        'comments_hidden',
       ]) {
         expect(record).not.toHaveProperty(key);
       }
+      expect(
+        inaturalistSearchObservations.output.shape.observations.element.shape,
+      ).not.toHaveProperty('identifications_hidden');
       const text = (result.content ?? [])
         .map((block) => ('text' in block ? block.text : ''))
         .join('\n');
       expect(text).not.toContain('Observer’s description');
       expect(text).not.toContain('### Observation fields');
       expect(text).not.toContain('### Identification thread');
+      expect(text).not.toContain('_hidden');
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('outlinks on search records', () => {
+  it('relays each record’s outlinks in upstream order on both surfaces, through the real service', async () => {
+    const http = createFetchMock([
+      {
+        match: /api\.inaturalist\.org\/v1\/observations\?/,
+        respond: () =>
+          Response.json({
+            total_results: 3,
+            results: [
+              rawObservation({
+                id: 5890862,
+                outlinks: [
+                  { source: 'GBIF', url: 'http://www.gbif.org/occurrence/2006102216' },
+                  { source: 'GloBI', url: 'http://www.globalbioticinteractions.org/?a=1&b=2' },
+                ],
+              }),
+              rawObservation({ id: 412088410, outlinks: [] }),
+              (({ outlinks: _omitted, ...rest }) => ({ ...rest, id: 7 }))(rawObservation()),
+            ],
+          }),
+      },
+    ]);
+    vi.mocked(getINaturalistService).mockReturnValue(
+      new INaturalistService({
+        userAgent: 'inaturalist-mcp-server/test (+https://example.test)',
+        minRequestIntervalMs: 0,
+        maxConcurrentRequests: 4,
+        dailyRequestBudget: 1000,
+      }),
+    );
+    http.install();
+    try {
+      const result = await runToolContract(inaturalistSearchObservations, { place_id: 46 });
+
+      expect(result.isError).toBeFalsy();
+      const [linked, empty, unkeyed] = (
+        result.structuredContent as { observations: Record<string, unknown>[] }
+      ).observations;
+      expect(linked?.outlinks).toEqual([
+        { source: 'GBIF', url: 'http://www.gbif.org/occurrence/2006102216' },
+        { source: 'GloBI', url: 'http://www.globalbioticinteractions.org/?a=1&b=2' },
+      ]);
+      expect(empty?.outlinks).toEqual([]);
+      expect(unkeyed).not.toHaveProperty('outlinks');
+      const text = (result.content ?? [])
+        .map((block) => ('text' in block ? block.text : ''))
+        .join('\n');
+      expect(text).toContain(
+        '**Outlinks:** [GBIF](<http://www.gbif.org/occurrence/2006102216>) · [GloBI](<http://www.globalbioticinteractions.org/?a=1&b=2>)',
+      );
+      expect(text.split('**Outlinks:** none')).toHaveLength(2);
+      expect(text.split('**Outlinks:**')).toHaveLength(3);
     } finally {
       http.restore();
     }

@@ -14,9 +14,11 @@ import {
   radiusClampNotice,
 } from '@/mcp-server/tools/limit-policy.js';
 import {
+  type AreaInput,
   annotationFilterNotice,
   areaInputShape,
   blankAsUnset,
+  captiveCohortNotice,
   creationDateRangeInputShape,
   dateRangeInputShape,
   emptyFilterNotice,
@@ -36,6 +38,7 @@ import {
   taxonStatusInputShape,
   UPSTREAM_INT_MAX,
   updatedSinceInputShape,
+  userActivityInputShape,
 } from '@/mcp-server/tools/observation-filters.js';
 import {
   renderObservation,
@@ -105,7 +108,7 @@ const SearchPageSchema = z.object({
   has_more: z
     .boolean()
     .describe(
-      'True when the fetched page filled the applied per_page and more records follow, independent of deferred ids. On the page path an exactly full final page is false; under a cursor, where the offset is unknown, every full page is true.',
+      'True when the fetched page filled the applied per_page and more records follow, independent of deferred ids. An exactly full final page is false; under a cursor, total_results counts only the records below the cursor, so a full page whose total equals per_page ends the walk.',
     ),
 });
 
@@ -113,7 +116,7 @@ type SearchPage = z.infer<typeof SearchPageSchema>;
 
 export const inaturalistSearchObservations = tool('inaturalist_search_observations', {
   description:
-    'Search georeferenced wildlife sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence. Returns a projected record per sighting with coordinates, licence, first photo, and identification counts. An area is given in exactly one form — place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box — and defaults to research-grade, wild-only records, which are echoed back on every call. Identifications and comments are deliberately not expandable here (one thread is 28 KB); fetch them for specific records with inaturalist_get_observation. page walks the first 10,000 results under any ordering; past 10,000, order by id descending (order_by "id", order "desc") and pass each page’s next_cursor as cursor.',
+    'Search georeferenced wildlife sightings by area, date, taxon, quality grade, annotation, conservation status, observer, project, and licence. Returns a projected record per sighting with coordinates, licence, first photo, and identification counts. An area is given in exactly one form — place_id, the lat/lng/radius triple in kilometres, or a four-corner bounding box — and defaults to research-grade, wild-only records, which are echoed back on every call. Identifications and comments are deliberately not expandable here; fetch them for specific records with inaturalist_get_observation. page walks the first 10,000 results under any ordering; past 10,000, order by id descending (order_by "id", order "desc") and pass each page’s next_cursor as cursor.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -129,6 +132,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     ...dateRangeInputShape,
     ...observationFilterInputShape,
     ...observerProjectInputShape,
+    ...userActivityInputShape,
     ...taxonStatusInputShape,
     ...monthInputShape,
     ...creationDateRangeInputShape,
@@ -207,7 +211,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
         })
         .optional(),
     ).describe(
-      'next_cursor from a previous id-descending page, to continue past the 10,000-result window — a positive integer observation id, sent upstream as id_below. Mutually exclusive with page, and forces order_by "id", order "desc".',
+      'next_cursor from a previous id-descending page, to continue past the 10,000-result window — a positive integer observation id. Mutually exclusive with page, and forces order_by "id", order "desc".',
     ),
     per_page: limitSchema(
       LIMIT_CAPS.searchObservations,
@@ -333,9 +337,9 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     {
       reason: 'unknown_user',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      when: 'iNaturalist answered 422 because user_id, user_login, ident_user_id, or unobserved_by_user_id names no user.',
       recovery:
-        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+        'Resolve the user with inaturalist_resolve_name type user and pass the id or login it returns.',
       thrownBy: 'service',
     },
     {
@@ -344,6 +348,15 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       when: 'iNaturalist answered 422 because the project_id does not exist.',
       recovery:
         'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
       thrownBy: 'service',
     },
   ],
@@ -418,6 +431,8 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       quality_grade: input.quality_grade,
       captive: input.captive,
       iconic_taxa: input.iconic_taxa,
+      ident_user_id: input.ident_user_id,
+      unobserved_by_user_id: input.unobserved_by_user_id,
       csi: input.csi,
       month: input.month,
       acc_below: input.acc_below,
@@ -464,6 +479,7 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
       radiusNotice,
       ignoredFilters,
       annotationFilterNotice(input),
+      captiveCohortNotice(input),
     ].filter((notice): notice is string => notice !== undefined);
 
     /** Required disclosure on every path; nonempty pages update it after budgeting. */
@@ -483,25 +499,32 @@ export const inaturalistSearchObservations = tool('inaturalist_search_observatio
     if (observations.length === 0) {
       // On the page path a non-zero total means this page, not the filters, came
       // back empty. A cursor walk has no page offset, and its upstream total
-      // counts only what lies below the cursor.
-      ctx.enrich.notice(
-        [
-          ...notices,
-          !usingCursor && total > 0
-            ? emptyPageNotice({ page, perPage, total, noun: 'records' })
-            : zeroHitNotice(input),
-        ]
-          .filter(Boolean)
-          .join(' '),
-      );
+      // counts only what lies below the cursor, so an empty cursor page is the
+      // end of the walk. A walk normally ends a page earlier; this is a cursor
+      // with nothing below it, or one whose records were deleted or stopped
+      // matching after it was issued.
+      let emptyNotice: string;
+      if (usingCursor) {
+        emptyNotice = `No records below cursor ${input.cursor} match these filters, so the id-descending walk is complete.`;
+      } else if (total > 0) {
+        emptyNotice = emptyPageNotice({ page, perPage, total, noun: 'records' });
+      } else {
+        emptyNotice = zeroHitNotice(input);
+      }
+      ctx.enrich.notice([...notices, emptyNotice].join(' '));
       return { total_results: total, observations, deferred: [], has_more: false };
     }
 
-    // A full page is necessary but not sufficient: on the page path the offset
-    // is known, so an exactly-full final page is reported as the end rather than
-    // sending the agent after a page that does not exist. Under a cursor the
-    // offset is unknown and a full page is the only signal there is.
-    const hasMore = observations.length >= perPage && (usingCursor || page * perPage < total);
+    /**
+     * A full page is necessary but not sufficient: an exactly-full final page is
+     * reported as the end rather than sending the agent after a page that does
+     * not exist. A cursor request is page 1 of an `id_below` query whose total
+     * counts only the records below the cursor, so both paths compare the
+     * records through this page with the total. `observations` is the full
+     * upstream page; byte-budget deferral comes after and does not move the end.
+     */
+    const hasMore =
+      observations.length >= perPage && (usingCursor ? perPage : page * perPage) < total;
     // `id_below` continues only an id-descending walk: under any other ordering
     // it repeats or skips records, and under `id asc` it walks back over page 1.
     const idDescending = orderBy === 'id' && order === 'desc';
@@ -569,38 +592,69 @@ function formatSearchPage(result: SearchPage) {
 }
 
 /**
- * Names the filter most likely to be responsible for an empty page, so the agent
- * relaxes one thing rather than guessing. Composed by condition, most specific
- * first, and never naming a filter the call did not supply.
+ * Names the filters most likely to be responsible for an empty page, so the
+ * agent relaxes one thing rather than guessing. Every supplied narrowing filter
+ * is named once, in a fixed order — the drop list, the taxon, the people and
+ * project, the annotation, sounds, the dates, the area — and the default-cohort
+ * hints come last, since they describe what was searched rather than what the
+ * caller chose. Never names a filter the call did not supply.
  */
 function zeroHitNotice(
-  input: OptionalNarrowingFilters & {
-    quality_grade: readonly string[];
-    captive: boolean;
-    sounds?: boolean | undefined;
-    taxon_id?: number | undefined;
-    d1?: string | undefined;
-    d2?: string | undefined;
-    term_id?: readonly number[] | undefined;
-    radius?: number | undefined;
-    user_id?: number | undefined;
-    user_login?: string | undefined;
-    project_id?: number | undefined;
-  },
+  input: OptionalNarrowingFilters &
+    AreaInput & {
+      quality_grade: readonly string[];
+      captive: boolean;
+      sounds?: boolean | undefined;
+      taxon_id?: number | undefined;
+      d1?: string | undefined;
+      d2?: string | undefined;
+      term_id?: readonly number[] | undefined;
+      user_id?: number | undefined;
+      user_login?: string | undefined;
+      ident_user_id?: number | string | undefined;
+      unobserved_by_user_id?: number | string | undefined;
+      project_id?: number | undefined;
+    },
 ): string {
   const fragments: string[] = [];
   const optionalGuidance = optionalFilterGuidance(input);
   if (optionalGuidance.length > 0)
     fragments.push(`Relax supplied filters one at a time: ${optionalGuidance.join(', ')}.`);
 
-  if (input.quality_grade.length === 1 && input.quality_grade[0] === 'research') {
+  if (input.taxon_id !== undefined) {
+    // A retired id matches nothing; its successors are one get_taxon call away,
+    // so the search itself stays a single upstream request.
     fragments.push(
-      'Only research-grade records were searched. Add "needs_id" to quality_grade to include sightings whose identification is not yet community-confirmed.',
+      'No sightings of that taxon match the other filters. Confirm taxon_id with inaturalist_resolve_name, or drop it.',
+      'Check taxon_id with inaturalist_get_taxon: an inactive taxon lists its successors.',
     );
   }
-  if (!input.captive) {
+  const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
+  if (input.user_id !== undefined || input.user_login !== undefined) {
     fragments.push(
-      'Only wild records were searched. To search captive/cultivated-only records, use captive: true in a separate call.',
+      `No sightings by that observer match the other filters. Confirm ${observerKey} with inaturalist_resolve_name type user, or drop it.`,
+    );
+  }
+  if (input.ident_user_id !== undefined) {
+    fragments.push(
+      'No sightings identified by that user match the other filters. Confirm ident_user_id with inaturalist_resolve_name type user, or drop it.',
+    );
+  }
+  if (input.unobserved_by_user_id !== undefined) {
+    fragments.push(
+      'No sightings of taxa that user has not observed match the other filters. Confirm unobserved_by_user_id with inaturalist_resolve_name type user, or drop it.',
+    );
+  }
+  if (input.project_id !== undefined) {
+    fragments.push(
+      'No sightings in that project match the other filters. Confirm project_id with inaturalist_resolve_name type project, or drop it.',
+    );
+  }
+  if (input.term_id?.length) {
+    fragments.push(
+      input.taxon_id === undefined
+        ? 'No sightings carry that annotation. Check the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.'
+        : 'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
     );
   }
   if (input.sounds !== undefined) {
@@ -613,32 +667,34 @@ function zeroHitNotice(
       `No sightings fall in ${input.d1 ?? 'any start'}…${input.d2 ?? 'any end'}. Widen the range, or call inaturalist_get_histogram with the same filters to see which months have records.`,
     );
   }
-  if (input.term_id?.length) {
+  if (input.place_id !== undefined) {
     fragments.push(
-      input.taxon_id === undefined
-        ? 'No sightings carry that annotation. Check the valid attribute and value pairs with inaturalist_list_reference topic controlled_terms.'
-        : 'No sightings carry that annotation. Check which annotations exist for this taxon with inaturalist_list_reference topic controlled_terms and taxon_id.',
+      'No sightings in that place match the other filters. Confirm place_id with inaturalist_find_places, or drop it.',
     );
-  }
-  if (input.radius !== undefined) {
+  } else if (input.radius !== undefined) {
     fragments.push(
       `No sightings within ${input.radius} km of that point. Raise radius, or search a named area with a place_id from inaturalist_find_places.`,
     );
-  }
-  const observerKey = input.user_id !== undefined ? 'user_id' : 'user_login';
-  if (input.user_id !== undefined || input.user_login !== undefined) {
+  } else if (input.nelat !== undefined) {
     fragments.push(
-      `No sightings by that observer match the other filters. Confirm ${observerKey} with inaturalist_resolve_name type user, or drop it.`,
-    );
-  }
-  if (input.project_id !== undefined) {
-    fragments.push(
-      'No sightings in that project match the other filters. Confirm project_id with inaturalist_resolve_name type project, or drop it.',
+      'No sightings inside that bounding box. Widen the box, or search a named area with a place_id from inaturalist_find_places.',
     );
   }
 
-  if (fragments.length > 0) return fragments.join(' ');
-  return input.taxon_id === undefined
-    ? 'No sightings matched. Relax one filter at a time.'
-    : 'No sightings matched. Relax one filter at a time. Confirm taxon_id with inaturalist_resolve_name, or drop it.';
+  // Under captive: true the cohort notice carries the quality remedy: captive
+  // records are graded casual, so needs_id would not widen the search.
+  if (!input.captive && input.quality_grade.length === 1 && input.quality_grade[0] === 'research') {
+    fragments.push(
+      'Only research-grade records were searched. Add "needs_id" to quality_grade to include sightings whose identification is not yet community-confirmed.',
+    );
+  }
+  if (!input.captive) {
+    fragments.push(
+      'Only wild records were searched. To search captive/cultivated-only records, use captive: true with "casual" in quality_grade in a separate call.',
+    );
+  }
+
+  return fragments.length > 0
+    ? fragments.join(' ')
+    : 'No sightings matched. Relax one filter at a time.';
 }

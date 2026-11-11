@@ -22,6 +22,13 @@ afterEach(() => {
   add.mockClear();
 });
 
+/**
+ * The `.env` test runs in a fresh process: the framework's lazy `.env` load is
+ * module state in an externalized dependency, which `vi.resetModules()` does
+ * not re-evaluate, so only a new process exercises the real first-load path.
+ */
+const SUBPROCESS_TIMEOUT_MS = 20_000;
+
 describe('limit policy', () => {
   it.each(['true', 'false'])(
     'preserves accepted input maxima while reducing to served caps once in %s mode',
@@ -133,9 +140,9 @@ describe('limit policy', () => {
           [
             '--no-env-file',
             '--eval',
-            `const {z}=await import(${JSON.stringify(core)}); const p=await import(${JSON.stringify(source)}); const specs=[['resolve-name','inaturalistResolveName','limit'],['find-places','inaturalistFindPlaces','per_page'],['search-observations','inaturalistSearchObservations','per_page'],['get-species-counts','inaturalistGetSpeciesCounts','per_page'],['get-similar-species','inaturalistGetSimilarSpecies','limit'],['get-leaderboard','inaturalistGetLeaderboard','per_page'],['get-observation','inaturalistGetObservation','observation_id']]; const schemas=[]; let searchValidation; for(const [file,name,field] of specs){ const tool=(await import(${JSON.stringify(toolsRoot)}+'inaturalist-'+file+'.tool.ts'))[name]; schemas.push(z.toJSONSchema(tool.input).properties[field]); if(file==='search-observations') searchValidation=[26,0,-1,2.5].map(per_page=>tool.input.safeParse({per_page}).success); } console.log(JSON.stringify({mode:p.clampLimits,schemas,searchValidation}));`,
+            `const {z}=await import(${JSON.stringify(core)}); const p=await import(${JSON.stringify(source)}); const specs=[['resolve-name','inaturalistResolveName','limit'],['find-places','inaturalistFindPlaces','per_page'],['search-observations','inaturalistSearchObservations','per_page'],['get-species-counts','inaturalistGetSpeciesCounts','per_page'],['get-similar-species','inaturalistGetSimilarSpecies','limit'],['get-leaderboard','inaturalistGetLeaderboard','per_page'],['get-observation','inaturalistGetObservation','observation_id'],['get-observation','inaturalistGetObservation','array_limit']]; const schemas=[]; let searchValidation; for(const [file,name,field] of specs){ const tool=(await import(${JSON.stringify(toolsRoot)}+'inaturalist-'+file+'.tool.ts'))[name]; schemas.push(z.toJSONSchema(tool.input).properties[field]); if(file==='search-observations') searchValidation=[26,0,-1,2.5].map(per_page=>tool.input.safeParse({per_page}).success); } console.log(JSON.stringify({mode:p.clampLimits,schemas,searchValidation}));`,
           ],
-          { cwd, env, encoding: 'utf8', timeout: 20000 },
+          { cwd, env, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS },
         );
         const snapshot = JSON.parse(result.trim()) as {
           mode: boolean;
@@ -148,10 +155,15 @@ describe('limit policy', () => {
           mode === 'false' ? [30, 30, 25, 50, 50, 250] : Array(6).fill(Number.MAX_SAFE_INTEGER),
         );
         expect(snapshot.schemas[6]?.maxItems).toBe(mode === 'false' ? 10 : 100);
+        expect(snapshot.schemas[7]?.maximum).toBe(
+          mode === 'false' ? 1500 : Number.MAX_SAFE_INTEGER,
+        );
       } finally {
         rmSync(cwd, { recursive: true });
       }
     },
+    // The subprocess's own timeout is the bound, plus a second for the temp-dir setup around it.
+    SUBPROCESS_TIMEOUT_MS + 1_000,
   );
   it.each(['true', 'false'])('validates safe positive integers in %s mode', async (mode) => {
     vi.stubEnv('INATURALIST_CLAMP_LIMITS', mode);
@@ -205,5 +217,12 @@ describe('limit policy', () => {
     ).toBe(false);
     const schema = z.toJSONSchema(inaturalistGetObservation.input);
     expect(schema.properties?.observation_id).toMatchObject({ maxItems: 10 });
+    expect(schema.properties?.array_limit).toMatchObject({ maximum: 1500, default: 40 });
+    expect(
+      inaturalistGetObservation.input.safeParse({ observation_id: [1], array_limit: 1501 }).success,
+    ).toBe(false);
+    expect(
+      inaturalistGetObservation.input.safeParse({ observation_id: [1], array_limit: 1500 }).success,
+    ).toBe(true);
   });
 });

@@ -6,7 +6,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { TaxonDocumentSchema } from '@/mcp-server/tools/taxon-document.js';
 import { getINaturalistService } from '@/services/inaturalist/inaturalist-service.js';
 
@@ -30,17 +30,26 @@ export const inaturalistTaxonResource = resource('inaturalist://taxa/{taxon_id}'
 
   output: TaxonDocumentSchema,
 
+  // `/taxa/{id}` answers an unknown id with 200 and empty results, never the
+  // 422 that `unknown_taxon_id` maps, so a miss has one reason here.
+  errors: [
+    {
+      reason: 'not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'iNaturalist answered with an empty results array for that taxon id.',
+      recovery:
+        'Resolve the organism name with inaturalist_resolve_name and read the resource at the taxon id it returns.',
+    },
+  ],
+
   async handler(params, ctx) {
     const taxonId = Number(params.taxon_id);
     ctx.log.info('Reading a taxon resource', { taxonId });
 
     const doc = await getINaturalistService().getTaxon(taxonId, ctx);
     if (!doc) {
-      throw notFound(`iNaturalist holds no taxon with id ${taxonId}.`, {
+      throw ctx.fail('not_found', `iNaturalist holds no taxon with id ${taxonId}.`, {
         taxon_id: taxonId,
-        recovery: {
-          hint: 'Resolve the organism name with inaturalist_resolve_name and read the resource at the taxon id it returns.',
-        },
       });
     }
     return doc;

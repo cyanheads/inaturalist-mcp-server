@@ -82,14 +82,16 @@ describe('search schema fragment', () => {
     expect(text).toContain('updated_at: null');
   });
 
-  it('exports a schema omitting exactly the twelve unreachable detail fields', async () => {
+  it('exports a schema omitting exactly the fourteen unreachable detail fields', async () => {
     const detailFields = [
       'identifications',
       'identifications_total',
       'identifications_shown',
+      'identifications_hidden',
       'comments',
       'comments_total',
       'comments_shown',
+      'comments_hidden',
       'community_taxon',
       'identification_disagreements_count',
       'description',
@@ -112,6 +114,7 @@ describe('search schema fragment', () => {
     expect(Object.keys(SearchObservationSchema.shape)).toEqual(
       expect.arrayContaining([
         'community_taxon_id',
+        'outlinks',
         'identifications_count',
         'agreements',
         'disagreements',
@@ -182,6 +185,52 @@ describe('lossless literal relay', () => {
     expect(photo).toEqual(before);
   });
 
+  it('renders outlinks as one line of links whose destinations round-trip exactly', () => {
+    const outlinks = [
+      { source: 'GBIF', url: 'http://www.gbif.org/occurrence/2006102216' },
+      {
+        source: 'GloBI',
+        url: 'http://www.globalbioticinteractions.org/?interactionType=interactsWith&accordingTo=https://www.inaturalist.org/observations/5890862',
+      },
+      { source: 'Odd <source> & *label*', url: 'https://example.test/a_(b)?q=&amp;&x=1' },
+    ];
+    const observation = projectedObservation({ outlinks });
+    const before = structuredClone(observation);
+    const line = renderObservation(observation).find((entry) => entry.startsWith('**Outlinks:**'));
+    expect(line).toMatch(
+      /^\*\*Outlinks:\*\* \[GBIF\]\(<http:\/\/www\.gbif\.org\/occurrence\/2006102216>\) · \[GloBI\]\(<http:\/\/www\.globalbioticinteractions\.org\/\?interactionType=interactsWith&accordingTo=https:\/\/www\.inaturalist\.org\/observations\/5890862>\) · \[/,
+    );
+    const nodes = markdownNodes(line ?? '');
+    const links = nodes.filter((node) => node.type === 'link');
+    expect(links.map((node) => node.destination)).toEqual(outlinks.map((entry) => entry.url));
+    expect(markdownText(line ?? '')).toBe(
+      `Outlinks: ${outlinks.map((entry) => entry.source).join(' · ')}`,
+    );
+    expect(nodes.filter((node) => node.type === 'html_inline' || node.type === 'emph')).toEqual([]);
+    expect(observation).toEqual(before);
+  });
+
+  it('renders none for an empty outlinks array and no line when the record carries none', () => {
+    const lines = renderObservation(projectedObservation({ outlinks: [] }));
+    expect(lines).toContain('**Outlinks:** none');
+    const { outlinks: _omitted, ...withoutOutlinks } = projectedObservation();
+    expect(renderObservation(withoutOutlinks).join('\n')).not.toContain('Outlinks');
+  });
+
+  it('keeps an outlink with a missing source or url visible as literal text', () => {
+    const line = renderObservation(
+      projectedObservation({
+        outlinks: [
+          { source: 'EDDMapS', url: null },
+          { source: null, url: 'https://x.test/' },
+        ],
+      }),
+    ).find((entry) => entry.startsWith('**Outlinks:**'));
+    expect(line).toBe(
+      '**Outlinks:** EDDMapS (no URL published) · [source not recorded](<https://x.test/>)',
+    );
+  });
+
   it('distinguishes omitted, null, empty, and populated detail states', () => {
     const omitted = renderObservation(projectedObservation()).join('\n');
     expect(omitted).not.toContain('Observer’s description');
@@ -233,7 +282,7 @@ describe('lossless literal relay', () => {
           taxon: taxonSummary({ common_name: value }),
           description: value,
           comments: [projectedComment({ by: value, body: value })],
-          observation_fields: [{ name: value, value }],
+          observation_fields: [{ name: value, value, datatype: value }],
         });
         const before = structuredClone(observation);
         const rendered = renderObservation(observation).join('\n');
@@ -256,6 +305,16 @@ describe('lossless literal relay', () => {
 });
 
 describe('literal relay timing', () => {
+  const SIZES = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
+  const SIZE_CPU_BOUND_MICROS = 2_000_000;
+  /**
+   * The body is synchronous, so vitest cannot interrupt it: its timeout only
+   * compares wall-clock time after the body returns, which fails linear work on
+   * a loaded machine. `0` disables that comparison; the per-size thread-CPU
+   * bound and the growth ratio decide the outcome, and the per-size check stops
+   * a super-linear regression at the first size over its bound.
+   */
+  const NO_WALL_CLOCK_TIMEOUT = 0;
   const shapes = [
     (size: number) => '1'.repeat(size),
     (size: number) => '<a'.repeat(Math.ceil(size / 2)).slice(0, size),
@@ -266,7 +325,7 @@ describe('literal relay timing', () => {
     'bounds work across doubling input sizes, shape $index',
     ({ shape }) => {
       const timings: number[] = [];
-      for (let size = 5_000; size <= 320_000; size *= 2) {
+      for (const size of SIZES) {
         const value = shape(size);
         inlineText(value);
         blockquote(value);
@@ -277,11 +336,12 @@ describe('literal relay timing', () => {
         }
         const cpu = process.threadCpuUsage(start);
         const micros = cpu.user + cpu.system;
-        expect(micros).toBeLessThan(2_000_000);
+        expect(micros).toBeLessThan(SIZE_CPU_BOUND_MICROS);
         timings.push(micros);
       }
       expect(timings.at(-1)! / timings[0]!).toBeLessThan(256);
     },
+    NO_WALL_CLOCK_TIMEOUT,
   );
 });
 
@@ -508,6 +568,65 @@ describe('renderObservation', () => {
     expect(entry).toContain('from image classifier: true');
   });
 
+  it('renders hidden: true or hidden: false in each entry’s flags whenever upstream sent the key', () => {
+    const { hidden: _noIdentKey, ...unkeyedIdentification } = projectedIdentification({ id: 3 });
+    const { hidden: _noCommentKey, ...unkeyedComment } = projectedComment({ id: 30 });
+    const lines = renderObservation(
+      projectedObservation({
+        identifications: [
+          projectedIdentification({ id: 1, hidden: true, body: 'Moderated text.' }),
+          projectedIdentification({ id: 2, hidden: false }),
+          unkeyedIdentification,
+        ],
+        identifications_total: 3,
+        identifications_shown: 3,
+        identifications_hidden: 1,
+        comments: [
+          projectedComment({ id: 10, hidden: true }),
+          projectedComment({ id: 20, hidden: false }),
+          unkeyedComment,
+        ],
+        comments_total: 3,
+        comments_shown: 3,
+        comments_hidden: 1,
+      }),
+    );
+    const entry = (prefix: string, id: number) =>
+      lines.find((line) => line.startsWith(prefix) && line.includes(` id ${id} `)) ?? '';
+    expect(entry('- **identifier_one**', 1)).toContain('hidden: true');
+    expect(entry('- **identifier_one**', 2)).toContain('hidden: false');
+    expect(entry('- **identifier_one**', 3)).not.toContain('hidden');
+    expect(entry('- **commenter_one**', 10)).toContain('hidden: true');
+    expect(entry('- **commenter_one**', 20)).toContain('hidden: false');
+    expect(entry('- **commenter_one**', 30)).not.toContain('hidden');
+    // The hidden body is relayed unchanged, beneath its entry.
+    expect(lines).toContain('> Moderated text.');
+    expect(lines).toContain(
+      '**identifications_hidden:** 1 — hidden entries across the whole thread, the same on every page',
+    );
+    expect(lines).toContain(
+      '**comments_hidden:** 1 — hidden entries across all comments, the same on every page',
+    );
+  });
+
+  it('renders a zero hidden count, and no count line when the record carries none', () => {
+    const counted = renderObservation(
+      projectedObservation({
+        identifications: [],
+        identifications_total: 0,
+        identifications_shown: 0,
+        identifications_hidden: 0,
+      }),
+    );
+    expect(counted).toContain(
+      '**identifications_hidden:** 0 — hidden entries across the whole thread, the same on every page',
+    );
+    const bare = renderObservation(
+      projectedObservation({ identifications: [projectedIdentification()] }),
+    ).join('\n');
+    expect(bare).not.toContain('identifications_hidden');
+  });
+
   it('blockquotes an identification body when present', () => {
     const lines = renderObservation(
       projectedObservation({ identifications: [projectedIdentification({ body: 'Note.' })] }),
@@ -570,10 +689,41 @@ describe('renderObservation', () => {
       }),
     );
     expect(lines).toContain(
-      '### Identification thread — first 40 of 1113 shown, in upstream order',
+      '### Identification thread — 40 of 1113 shown: entries 1–40 by ascending id',
     );
-    expect(lines).toContain('### Comments — first 40 of 1377 shown, in upstream order');
+    expect(lines).toContain('### Comments — 40 of 1377 shown: entries 1–40 by ascending id');
     expect(lines.filter((line) => line.startsWith('- **identifier_one**'))).toHaveLength(40);
+  });
+
+  it('names the kept range from the array offset, through the last page and past the end', () => {
+    const page = (offset: number, shown: number) =>
+      renderObservation(
+        projectedObservation({
+          identifications: Array.from({ length: shown }, (_, i) =>
+            projectedIdentification({ id: offset + i }),
+          ),
+          identifications_total: 1139,
+          identifications_shown: shown,
+          observation_fields: [],
+          observation_fields_total: 923,
+          observation_fields_shown: 0,
+        }),
+        offset,
+      );
+
+    expect(page(40, 40)).toContain(
+      '### Identification thread — 40 of 1139 shown: entries 41–80 by ascending id',
+    );
+    expect(page(1100, 39)).toContain(
+      '### Identification thread — 39 of 1139 shown: entries 1101–1139 by ascending id',
+    );
+    expect(page(1100, 39)).toContain(
+      '### Observation fields — 0 of 923 shown, array_offset 1100 is past the last entry',
+    );
+    expect(page(1500, 0)).toContain(
+      '### Identification thread — 0 of 1139 shown, array_offset 1500 is past the last entry',
+    );
+    expect(page(1500, 0).join('\n')).not.toContain('upstream order');
   });
 
   it('still states the counts for an included thread that is empty', () => {
@@ -604,21 +754,49 @@ describe('renderObservation', () => {
     expect(lines).toContain('**Observer’s description:** no description');
   });
 
-  it('renders filled observation fields as an inline bullet list', () => {
+  it('renders filled observation fields as an inline bullet list with each datatype', () => {
     const lines = renderObservation(
       projectedObservation({
         observation_fields: [
-          { name: 'Habitat_Description', value: 'Garden' },
-          { name: null, value: '8' },
+          { name: 'Habitat_Description', value: 'Garden', datatype: 'text' },
+          { name: null, value: '8', datatype: 'numeric' },
+          { name: 'Legacy', value: 'kept', datatype: null },
         ],
       }),
     );
     const at = lines.indexOf('### Observation fields');
     expect(at).toBeGreaterThan(-1);
-    expect(lines.slice(at + 1, at + 3)).toEqual([
-      '- **Habitat_Description:** Garden',
-      '- **unnamed field:** 8',
+    expect(lines.slice(at + 1, at + 4)).toEqual([
+      '- **Habitat_Description** (text): Garden',
+      '- **unnamed field** (numeric): 8',
+      '- **Legacy** (datatype not recorded): kept',
     ]);
+  });
+
+  it('names a resolved taxon-type value with the taxon line, and a free-text one bare', () => {
+    const lines = renderObservation(
+      projectedObservation({
+        observation_fields: [
+          {
+            name: 'Host',
+            value: '125625',
+            datatype: 'taxon',
+            taxon: taxonSummary({
+              id: 125625,
+              name: 'Miscanthus',
+              rank: 'genus',
+              common_name: 'Silvergrasses',
+              iconic_taxon_name: 'Plantae',
+            }),
+          },
+          { name: 'Species', value: 'Ondatra zibethicus', datatype: 'taxon' },
+        ],
+      }),
+    );
+    expect(lines).toContain(
+      '- **Host** (taxon): 125625 — Silvergrasses (Miscanthus) · taxon_id 125625 · genus · Plantae',
+    );
+    expect(lines).toContain('- **Species** (taxon): Ondatra zibethicus');
   });
 
   it('renders an empty Observation fields block when none are filled', () => {
@@ -712,13 +890,32 @@ describe('line breaks in upstream text cannot forge markdown structure', () => {
     expect(forgedLines(lines)).toEqual([]);
   });
 
-  it('does not let an observation-field name or value break out of its bullet', () => {
+  it('does not let an observation-field name, datatype, or value break out of its bullet', () => {
     const lines = renderObservation(
       projectedObservation({
-        observation_fields: [{ name: `Habitat\n${FORGERY}`, value: `Garden\r${FORGERY}` }],
+        observation_fields: [
+          {
+            name: `Habitat\n${FORGERY}`,
+            value: `Garden\r${FORGERY}`,
+            datatype: `text\n${FORGERY}`,
+          },
+        ],
       }),
     );
     expect(forgedLines(lines)).toEqual([]);
+  });
+
+  it('does not let an outlink source or url break out of the Outlinks line', () => {
+    const outlinks = [
+      { source: `GBIF\n${FORGERY}`, url: 'http://www.gbif.org/occurrence/1' },
+      { source: 'GloBI', url: `http://example.test/\r${FORGERY}` },
+    ];
+    const lines = renderObservation(projectedObservation({ outlinks }));
+    expect(forgedLines(lines)).toEqual([]);
+    const line = lines.find((entry) => entry.startsWith('**Outlinks:**')) ?? '';
+    expect(line.split(/\r\n|[\r\n]/)).toHaveLength(1);
+    expect(markdownText(line)).toContain(`GBIF\n${FORGERY}`);
+    expect(markdownText(line)).toContain(`http://example.test/\r${FORGERY}`);
   });
 
   it('keeps a description quoted across a bare CR', () => {

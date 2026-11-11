@@ -16,6 +16,7 @@ import {
   annotationFilterNotice,
   areaInputShape,
   blankAsUnset,
+  captiveCohortNotice,
   dateRangeInputShape,
   emptyFilterNotice,
   emptyPageNotice,
@@ -28,6 +29,7 @@ import {
   resolveObserver,
   resolveRankRange,
   taxonStatusInputShape,
+  userActivityInputShape,
   wideningGuidance,
 } from '@/mcp-server/tools/observation-filters.js';
 import { inlineText, PhotoSchema, renderPhoto } from '@/mcp-server/tools/observation-record.js';
@@ -81,6 +83,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     ...dateRangeInputShape,
     ...observationFilterInputShape,
     ...observerProjectInputShape,
+    ...userActivityInputShape,
     ...taxonStatusInputShape,
     ...monthInputShape,
     rank: blankAsUnset(z.enum(RANKS).optional()).describe(
@@ -192,9 +195,9 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
     {
       reason: 'unknown_user',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'iNaturalist answered 422 because the user_id or user_login names no observer.',
+      when: 'iNaturalist answered 422 because user_id, user_login, ident_user_id, or unobserved_by_user_id names no user.',
       recovery:
-        'Resolve the observer with inaturalist_resolve_name type user and pass the id or login it returns.',
+        'Resolve the user with inaturalist_resolve_name type user and pass the id or login it returns.',
       thrownBy: 'service',
     },
     {
@@ -203,6 +206,15 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       when: 'iNaturalist answered 422 because the project_id does not exist.',
       recovery:
         'Resolve the project name with inaturalist_resolve_name type project and pass the id it returns.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
       thrownBy: 'service',
     },
   ],
@@ -260,6 +272,8 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       quality_grade: input.quality_grade,
       captive: input.captive,
       iconic_taxa: input.iconic_taxa,
+      ident_user_id: input.ident_user_id,
+      unobserved_by_user_id: input.unobserved_by_user_id,
       page: input.page,
       per_page: input.per_page,
     };
@@ -269,11 +283,12 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
 
     const { total, species } = await getINaturalistService().getSpeciesCounts(params, ctx);
     const radiusNotice = radiusClampNotice(area.radiusClamp, ctx, 'inaturalist_get_species_counts');
-    const ignoredFilters = [
+    const leadNotices = [
       clampNotice,
       radiusNotice,
       emptyFilterNotice(input),
       annotationFilterNotice(input),
+      captiveCohortNotice(input),
     ]
       .filter(Boolean)
       .join(' ');
@@ -292,7 +307,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       if (total > 0) {
         ctx.enrich.notice(
           [
-            ignoredFilters,
+            leadNotices,
             emptyPageNotice({ page: input.page, perPage: input.per_page, total, noun: 'taxa' }),
           ]
             .filter(Boolean)
@@ -301,7 +316,7 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
       } else {
         const lead = 'No taxa recorded for those filters.';
         const guidance = wideningGuidance(input, hasArea);
-        ctx.enrich.notice([ignoredFilters, lead, guidance].filter(Boolean).join(' '));
+        ctx.enrich.notice([leadNotices, lead, guidance].filter(Boolean).join(' '));
       }
       return { total_results: total, species };
     }
@@ -315,13 +330,13 @@ export const inaturalistGetSpeciesCounts = tool('inaturalist_get_species_counts'
         cap: input.per_page,
         ...(ceiling === undefined ? {} : { ceiling }),
         guidance: [
-          ignoredFilters,
+          leadNotices,
           `${total} taxa match. Raise page to walk further down the ranking, or raise per_page (max ${LIMIT_CAPS.speciesCounts}).`,
         ]
           .filter(Boolean)
           .join(' '),
       });
-    } else if (ignoredFilters) ctx.enrich.notice(ignoredFilters);
+    } else if (leadNotices) ctx.enrich.notice(leadNotices);
 
     return { total_results: total, species };
   },

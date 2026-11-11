@@ -131,7 +131,45 @@ export const RANK_LEVEL: Readonly<Record<Rank, number>> = {
   infrahybrid: 5,
 };
 
+/** The levels the `csi` filter accepts. */
 export const CONSERVATION_STATUS_CODES = ['LC', 'NT', 'VU', 'EN', 'CR', 'EW', 'EX'] as const;
+
+/** Levels that appear on taxon listings but that `csi` does not accept. */
+const LISTING_ONLY_CODES = ['NE', 'DD'] as const;
+
+/** Every code on the IUCN-equivalent scale a conservation listing can carry. */
+export const IUCN_CODES = [...CONSERVATION_STATUS_CODES, ...LISTING_ONLY_CODES] as const;
+
+export type IucnCode = (typeof IUCN_CODES)[number];
+
+/**
+ * The IUCN-equivalent level upstream assigns every conservation listing,
+ * whatever its authority, as `RawConservationStatus.iucn` in the API
+ * specification maps it (NOT_EVALUATED = 0 … EXTINCT = 70). `csi` filters on
+ * these levels, so a NatureServe state rank and an IUCN Red List category with
+ * the same level answer the same `csi` value. Read by the listing decode and by
+ * the `conservation_status_codes` topic alike.
+ */
+const IUCN_LEVELS: Readonly<Record<IucnCode, { level: number; label: string }>> = {
+  LC: { level: 10, label: 'Least concern' },
+  NT: { level: 20, label: 'Near threatened' },
+  VU: { level: 30, label: 'Vulnerable' },
+  EN: { level: 40, label: 'Endangered' },
+  CR: { level: 50, label: 'Critically endangered' },
+  EW: { level: 60, label: 'Extinct in the wild' },
+  EX: { level: 70, label: 'Extinct' },
+  NE: { level: 0, label: 'Not evaluated' },
+  DD: { level: 5, label: 'Data deficient' },
+};
+
+const IUCN_CODE_BY_LEVEL: ReadonlyMap<number, IucnCode> = new Map(
+  IUCN_CODES.map((code) => [IUCN_LEVELS[code].level, code]),
+);
+
+/** Decodes a listing's `iucn` level; null when it is absent or off the published scale. */
+export function iucnCode(level: number | null): IucnCode | null {
+  return level === null ? null : (IUCN_CODE_BY_LEVEL.get(level) ?? null);
+}
 
 export const LICENSE_CODES = [
   'cc-by',
@@ -260,18 +298,6 @@ const ICONIC_TAXON_LABELS: Readonly<Record<(typeof ICONIC_TAXA)[number], string>
   unknown: 'No iconic group assigned',
 };
 
-const CONSERVATION_STATUS_LABELS: Readonly<
-  Record<(typeof CONSERVATION_STATUS_CODES)[number], string>
-> = {
-  LC: 'Least concern',
-  NT: 'Near threatened',
-  VU: 'Vulnerable',
-  EN: 'Endangered',
-  CR: 'Critically endangered',
-  EW: 'Extinct in the wild',
-  EX: 'Extinct',
-};
-
 /** The static topics, keyed by the `topic` value that selects them. */
 export const STATIC_VOCABULARIES: Readonly<Record<string, readonly VocabularyEntry[]>> = {
   quality_grades: QUALITY_GRADE_ENTRIES,
@@ -282,8 +308,16 @@ export const STATIC_VOCABULARIES: Readonly<Record<string, readonly VocabularyEnt
     ...(DOCUMENTED_RANK_LEVELS.has(rank) ? { notes: `rank_level ${RANK_LEVEL[rank]}.` } : {}),
   })),
   iconic_taxa: ICONIC_TAXA.map((code) => ({ code, label: ICONIC_TAXON_LABELS[code] })),
-  conservation_status_codes: CONSERVATION_STATUS_CODES.map((code) => ({
-    code,
-    label: CONSERVATION_STATUS_LABELS[code],
-  })),
+  conservation_status_codes: [
+    ...CONSERVATION_STATUS_CODES.map((code) => ({
+      code,
+      label: IUCN_LEVELS[code].label,
+      notes: `iucn ${IUCN_LEVELS[code].level}.`,
+    })),
+    ...LISTING_ONLY_CODES.map((code) => ({
+      code,
+      label: IUCN_LEVELS[code].label,
+      notes: `iucn ${IUCN_LEVELS[code].level}. Carried on taxon conservation listings; not a csi value.`,
+    })),
+  ],
 };

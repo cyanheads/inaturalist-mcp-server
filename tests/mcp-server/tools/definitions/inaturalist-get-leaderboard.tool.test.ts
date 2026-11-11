@@ -6,6 +6,7 @@
  * @module tests/mcp-server/tools/definitions/inaturalist-get-leaderboard.tool.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -524,6 +525,74 @@ describe('observer and project scope', () => {
       (result.content ?? []).map((block) => ('text' in block ? block.text : '')).join(''),
     ).toContain(notice);
   });
+});
+
+/**
+ * The widening guidance is shared with species counts, which gained filters the
+ * leaderboard does not take. Every input the leaderboard accepts keeps its notice.
+ */
+describe('notices across every accepted filter', () => {
+  it.each([
+    [
+      {
+        kind: 'observers',
+        place_id: 1,
+        user_login: 'kueda',
+        project_id: 5,
+        taxon_id: 3,
+        d1: '2020-01-01',
+        d2: '2020-12-31',
+        quality_grade: ['casual'],
+      },
+      0,
+      'Nobody has recorded observations matching those filters. Widen or drop d1/d2, widen the area, drop taxon_id or confirm it with inaturalist_resolve_name, drop user_login or confirm the observer with inaturalist_resolve_name, drop project_id or confirm it with inaturalist_resolve_name, or set quality_grade to include "needs_id".',
+    ],
+    [
+      {
+        kind: 'identifiers',
+        lat: 47.6,
+        lng: -122.3,
+        radius: 20041,
+        user_id: 1,
+        quality_grade: ['needs_id'],
+        per_page: 251,
+      },
+      0,
+      'per_page 251 was clamped to 250. radius 20041 was clamped to 20040. Nobody has made identifications matching those filters. Widen the area, or drop user_id or confirm the observer with inaturalist_resolve_name.',
+    ],
+    [
+      {
+        kind: 'observers',
+        nelat: 48,
+        nelng: -122,
+        swlat: 47,
+        swlng: -123,
+        d2: '1800-01-01',
+        quality_grade: ['research', 'needs_id'],
+      },
+      0,
+      'Nobody has recorded observations matching those filters. Widen or drop d1/d2, or widen the area.',
+    ],
+    [
+      { kind: 'identifiers', quality_grade: ['research', 'casual'] },
+      0,
+      'Nobody has made identifications matching those filters. Set quality_grade to include "needs_id".',
+    ],
+    [
+      { kind: 'observers', taxon_id: 3, page: 3, per_page: 10 },
+      15,
+      'Page 3 is past the end: 15 people match, so the last page holding results at per_page 10 is 2. Request page 2 or lower — the filters are not what emptied this page.',
+    ],
+  ] satisfies [z.input<typeof inaturalistGetLeaderboard.input>, number, string][])(
+    'keeps the notice for %j on both surfaces',
+    async (input, total, expected) => {
+      fake.getLeaderboard.mockResolvedValue({ total, entries: [] });
+      const result = await runToolContract(inaturalistGetLeaderboard, input);
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { notice?: string }).notice).toBe(expected);
+      expect(JSON.stringify(result.content)).toContain(JSON.stringify(expected).slice(1, -1));
+    },
+  );
 });
 
 describe('format()', () => {

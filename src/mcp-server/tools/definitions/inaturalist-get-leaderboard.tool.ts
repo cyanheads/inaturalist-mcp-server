@@ -181,6 +181,15 @@ export const inaturalistGetLeaderboard = tool('inaturalist_get_leaderboard', {
         'Resolve the organism name with inaturalist_resolve_name and pass the taxon id it returns.',
       thrownBy: 'service',
     },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
+    },
   ],
 
   async handler(requestedInput, ctx) {

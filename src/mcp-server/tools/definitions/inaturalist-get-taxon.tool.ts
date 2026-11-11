@@ -53,8 +53,8 @@ function describeUnknownSections(unknown: readonly string[]): string {
 
 /**
  * Measures the document as the six named sections rather than as one section
- * per top-level key: the eleven root scalars are one thing an agent asks for,
- * and outlining them individually would list eleven sections of a few bytes
+ * per top-level key: the twelve root scalars are one thing an agent asks for,
+ * and outlining them individually would list twelve sections of a few bytes
  * each alongside the ones that actually carry the weight.
  */
 function taxonSections(doc: ProjectedTaxonDocument): SectionMeta[] {
@@ -71,7 +71,7 @@ function taxonSections(doc: ProjectedTaxonDocument): SectionMeta[] {
 
 export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
   description:
-    'Fetch a taxon profile: the taxonomic path, per-authority conservation listings, the encyclopedia summary, the photo gallery, immediate children, and observation counts. Resolve a name to a taxon id with inaturalist_resolve_name first. The upstream record is 95 KB for a common species, so it is projected before anything else happens; a taxon that still overflows comes back as an outline of its sections with their byte sizes, and naming those sections in a re-call returns only those. The valid section names are summary, taxonomy, children, conservation, photos, and encyclopedia.',
+    'Fetch a taxon profile: the taxonomic path, per-authority conservation listings, the encyclopedia summary, the photo gallery, immediate children, and observation counts. Resolve a name to a taxon id with inaturalist_resolve_name first. A taxon that overflows the response budget comes back as an outline of its sections with their byte sizes, and naming those sections in a re-call returns only those. The valid section names are summary, taxonomy, children, conservation, photos, and encyclopedia.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -79,9 +79,7 @@ export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
       .number()
       .int()
       .min(1)
-      .describe(
-        'Numeric taxon id. A non-numeric value answers HTTP 422 with an empty message upstream, so the integer is enforced here. Resolve a name to an id with inaturalist_resolve_name.',
-      ),
+      .describe('Numeric taxon id. Resolve a name to an id with inaturalist_resolve_name.'),
     sections: z
       .array(z.string().min(1))
       .optional()
@@ -141,6 +139,15 @@ export const inaturalistGetTaxon = tool('inaturalist_get_taxon', {
       when: 'sections named a key the projected document does not carry.',
       recovery:
         'Call inaturalist_get_taxon without sections to see the section outline, then name sections from that list.',
+    },
+    {
+      reason: 'rate_budget_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'This server has spent its daily iNaturalist request budget for the current UTC day.',
+      recovery:
+        'The upstream daily request allowance is spent; retry after the next UTC midnight, or raise INATURALIST_DAILY_REQUEST_BUDGET only if this deployment does not share an egress IP.',
+      retryable: false,
+      thrownBy: 'service',
     },
   ],
 

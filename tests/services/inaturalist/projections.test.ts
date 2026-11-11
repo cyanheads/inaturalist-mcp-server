@@ -30,6 +30,7 @@ import {
   rawControlledTerm,
   rawIdentification,
   rawObservation,
+  rawObservationField,
   rawPhoto,
   rawPlace,
   rawPopularFieldValue,
@@ -313,6 +314,37 @@ describe('projectObservation', () => {
     }
   });
 
+  it('relays outlinks verbatim and in upstream order on search and detail records', () => {
+    const outlinks = [
+      { source: 'GloBI', url: 'http://www.globalbioticinteractions.org/?a=1&b=2' },
+      { source: 'GBIF', url: 'http://www.gbif.org/occurrence/2006102216' },
+    ];
+    for (const detail of [false, true]) {
+      const observation = projectObservation(rawObservation({ outlinks }), { detail });
+      expect(observation.outlinks).toEqual(outlinks);
+    }
+  });
+
+  it('relays an empty outlinks array as [], and omits the field when upstream sent no key', () => {
+    expect(projectObservation(rawObservation({ outlinks: [] })).outlinks).toEqual([]);
+    const { outlinks: _omitted, ...withoutKey } = rawObservation();
+    for (const detail of [false, true]) {
+      expect(projectObservation(withoutKey, { detail })).not.toHaveProperty('outlinks');
+    }
+    expect(projectObservation({ id: 1, outlinks: null })).not.toHaveProperty('outlinks');
+  });
+
+  it('keeps an outlink whose source or url upstream left out, as null rather than dropping it', () => {
+    expect(
+      projectObservation(
+        rawObservation({ outlinks: [{ source: 'EDDMapS' }, { url: 'https://x.test/' }] }),
+      ).outlinks,
+    ).toEqual([
+      { source: 'EDDMapS', url: null },
+      { source: null, url: 'https://x.test/' },
+    ]);
+  });
+
   it('preserves observation dates independently of detail projection', () => {
     for (const detail of [false, true]) {
       expect(projectObservation(rawObservation(), { detail })).toMatchObject({
@@ -456,6 +488,7 @@ describe('projectObservation', () => {
         by: 'commenter_one',
         body: 'Great find!',
         created_at: '2026-06-01T13:00:00-07:00',
+        hidden: false,
       },
     ]);
   });
@@ -476,7 +509,7 @@ describe('projectObservation', () => {
     expect(notDetailed.identification_disagreements_count).toBeUndefined();
   });
 
-  it('projects every identification and comment in upstream order when no thread cap is given', () => {
+  it('projects every identification and comment by ascending id when no page is given', () => {
     const observation = projectObservation(
       rawObservation({
         identifications: [3, 1, 2].map((id) => rawIdentification({ id })),
@@ -484,30 +517,100 @@ describe('projectObservation', () => {
       }),
       { include: new Set(['identifications', 'comments']) },
     );
-    expect(observation.identifications?.map((entry) => entry.id)).toEqual([3, 1, 2]);
-    expect(observation.comments?.map((entry) => entry.id)).toEqual([30, 10, 20]);
+    expect(observation.identifications?.map((entry) => entry.id)).toEqual([1, 2, 3]);
+    expect(observation.comments?.map((entry) => entry.id)).toEqual([10, 20, 30]);
   });
 
-  it('keeps the first threadCap entries of each thread array, in upstream order, with the upstream total', () => {
+  it('keeps the first page of each thread array by ascending id, with the whole total', () => {
     const observation = projectObservation(
       rawObservation({
         identifications: [5, 3, 1, 4, 2].map((id) => rawIdentification({ id })),
         comments: [50, 30, 10].map((id) => rawComment({ id })),
       }),
-      { include: new Set(['identifications', 'comments']), detail: true, threadCap: 2 },
+      {
+        include: new Set(['identifications', 'comments']),
+        detail: true,
+        arrayPage: { offset: 0, size: 2 },
+      },
     );
-    expect(observation.identifications?.map((entry) => entry.id)).toEqual([5, 3]);
+    expect(observation.identifications?.map((entry) => entry.id)).toEqual([1, 2]);
     expect(observation.identifications_total).toBe(5);
     expect(observation.identifications_shown).toBe(2);
-    expect(observation.comments?.map((entry) => entry.id)).toEqual([50, 30]);
+    expect(observation.comments?.map((entry) => entry.id)).toEqual([10, 30]);
     expect(observation.comments_total).toBe(3);
     expect(observation.comments_shown).toBe(2);
+  });
+
+  it('pages every capped array from one absolute offset into its sorted order', () => {
+    const raw = rawObservation({
+      identifications: [5, 3, 1, 4, 2].map((id) => rawIdentification({ id })),
+      comments: [50, 30, 10].map((id) => rawComment({ id })),
+      ofvs: [40, 20, 10, 30].map((id) => ({ id, name: `f${id}`, value: 'v' })),
+    });
+    const pageAt = (offset: number) =>
+      projectObservation(raw, {
+        include: new Set(['identifications', 'comments']),
+        detail: true,
+        arrayPage: { offset, size: 2 },
+      });
+
+    const second = pageAt(2);
+    expect(second.identifications?.map((entry) => entry.id)).toEqual([3, 4]);
+    expect(second.comments?.map((entry) => entry.id)).toEqual([50]);
+    expect(second.observation_fields?.map((field) => field.name)).toEqual(['f30', 'f40']);
+    expect(second).toMatchObject({
+      identifications_total: 5,
+      identifications_shown: 2,
+      comments_total: 3,
+      comments_shown: 1,
+      observation_fields_total: 4,
+      observation_fields_shown: 2,
+    });
+
+    const past = pageAt(5);
+    expect(past).toMatchObject({
+      identifications: [],
+      identifications_total: 5,
+      comments: [],
+      comments_total: 3,
+      observation_fields: [],
+      observation_fields_total: 4,
+    });
+  });
+
+  it('keeps upstream relative order between entries sharing an id, and sorts a missing id as 0', () => {
+    const { id: _omitted, ...withoutId } = rawIdentification({ body: 'no id' });
+    const observation = projectObservation(
+      rawObservation({
+        identifications: [
+          rawIdentification({ id: 2, body: 'first 2' }),
+          withoutId,
+          rawIdentification({ id: 2, body: 'second 2' }),
+          rawIdentification({ id: 1, body: 'one' }),
+        ],
+      }),
+      { include: new Set(['identifications']) },
+    );
+    expect(observation.identifications?.map((entry) => [entry.id, entry.body])).toEqual([
+      [0, 'no id'],
+      [1, 'one'],
+      [2, 'first 2'],
+      [2, 'second 2'],
+    ]);
+  });
+
+  it('does not reorder the upstream arrays it reads', () => {
+    const raw = rawObservation({
+      identifications: [3, 1, 2].map((id) => rawIdentification({ id })),
+    });
+    projectObservation(raw, { include: new Set(['identifications']) });
+    expect(raw.identifications?.map((entry) => entry.id)).toEqual([3, 1, 2]);
   });
 
   it('keeps a thread exactly at the cap whole, and reports shown equal to total', () => {
     const observation = projectObservation(
       rawObservation({ identifications: [1, 2, 3].map((id) => rawIdentification({ id })) }),
-      { include: new Set(['identifications']), detail: true, threadCap: 3 },
+      { include: new Set(['identifications']), detail: true, arrayPage: { offset: 0, size: 3 } },
     );
     expect(observation.identifications).toHaveLength(3);
     expect(observation.identifications_total).toBe(3);
@@ -519,7 +622,7 @@ describe('projectObservation', () => {
     const observation = projectObservation(withoutComments, {
       include: new Set(['identifications', 'comments']),
       detail: true,
-      threadCap: 40,
+      arrayPage: { offset: 0, size: 40 },
     });
     expect(observation.identifications).toEqual([]);
     expect(observation.identifications_total).toBe(0);
@@ -533,16 +636,120 @@ describe('projectObservation', () => {
     const observation = projectObservation(rawObservation(), {
       include: new Set(['identifications']),
       detail: true,
-      threadCap: 40,
+      arrayPage: { offset: 0, size: 40 },
     });
     expect(observation.identifications_total).toBe(1);
     expect(observation).not.toHaveProperty('comments');
     expect(observation).not.toHaveProperty('comments_total');
     expect(observation).not.toHaveProperty('comments_shown');
 
-    const bare = projectObservation(rawObservation(), { detail: true, threadCap: 40 });
+    const bare = projectObservation(rawObservation(), {
+      detail: true,
+      arrayPage: { offset: 0, size: 40 },
+    });
     expect(bare).not.toHaveProperty('identifications_total');
     expect(bare).not.toHaveProperty('identifications_shown');
+  });
+
+  it("relays upstream's hidden flag on each entry, and omits it where upstream sent no key", () => {
+    const { hidden: _noIdentKey, ...unkeyedIdentification } = rawIdentification({ id: 3 });
+    const { hidden: _noCommentKey, ...unkeyedComment } = rawComment({ id: 30 });
+    const observation = projectObservation(
+      rawObservation({
+        identifications: [
+          rawIdentification({ id: 1, hidden: true, body: 'Moderated text.' }),
+          rawIdentification({ id: 2, hidden: false }),
+          unkeyedIdentification,
+        ],
+        comments: [
+          rawComment({ id: 10, hidden: true, body: 'Hidden comment.' }),
+          rawComment({ id: 20, hidden: false }),
+          unkeyedComment,
+        ],
+      }),
+      { include: new Set(['identifications', 'comments']), detail: true },
+    );
+
+    const [hiddenId, shownId, unkeyedId] = observation.identifications ?? [];
+    expect(hiddenId).toMatchObject({ id: 1, hidden: true, body: 'Moderated text.' });
+    expect(shownId).toMatchObject({ id: 2, hidden: false });
+    expect(unkeyedId).not.toHaveProperty('hidden');
+    const [hiddenComment, shownComment, unkeyedCommentOut] = observation.comments ?? [];
+    expect(hiddenComment).toMatchObject({ id: 10, hidden: true, body: 'Hidden comment.' });
+    expect(shownComment).toMatchObject({ id: 20, hidden: false });
+    expect(unkeyedCommentOut).not.toHaveProperty('hidden');
+    // An entry without the key is never counted as hidden.
+    expect(observation).toMatchObject({
+      identifications_total: 3,
+      identifications_hidden: 1,
+      comments_total: 3,
+      comments_hidden: 1,
+    });
+  });
+
+  it('counts hidden entries over the whole array on every page, and never shifts a later entry', () => {
+    // Ids 1–10 served scrambled; 2, 7 and 9 hidden, 5 sent without the key.
+    const hiddenIds = new Set([2, 7, 9]);
+    const identification = (id: number) => {
+      if (id !== 5) return rawIdentification({ id, hidden: hiddenIds.has(id) });
+      const { hidden: _omitted, ...unkeyed } = rawIdentification({ id });
+      return unkeyed;
+    };
+    const raw = rawObservation({
+      identifications: [6, 2, 9, 1, 10, 4, 7, 3, 8, 5].map(identification),
+      comments: [40, 10, 30, 20].map((id) => rawComment({ id, hidden: id === 30 })),
+    });
+    const pageAt = (offset: number) =>
+      projectObservation(raw, {
+        include: new Set(['identifications', 'comments']),
+        detail: true,
+        arrayPage: { offset, size: 3 },
+      });
+
+    const stitched: { id: number; hidden?: boolean }[] = [];
+    for (const offset of [0, 3, 6, 9, 12]) {
+      const page = pageAt(offset);
+      expect(page).toMatchObject({
+        identifications_total: 10,
+        identifications_hidden: 3,
+        comments_total: 4,
+        comments_hidden: 1,
+      });
+      stitched.push(...(page.identifications ?? []));
+    }
+    expect(stitched.map((entry) => entry.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(stitched.filter((entry) => entry.hidden === true).map((entry) => entry.id)).toEqual([
+      2, 7, 9,
+    ]);
+    expect(stitched.find((entry) => entry.id === 5)).not.toHaveProperty('hidden');
+    expect(pageAt(12).identifications).toEqual([]);
+  });
+
+  it('reports zero hidden entries for a thread with none, and for an empty or omitted one', () => {
+    const none = projectObservation(
+      rawObservation({ identifications: [rawIdentification({ hidden: false })] }),
+      { include: new Set(['identifications', 'comments']), detail: true },
+    );
+    expect(none).toMatchObject({ identifications_hidden: 0, comments_hidden: 0 });
+
+    const { comments: _omitted, ...withoutComments } = rawObservation({ identifications: [] });
+    const empty = projectObservation(withoutComments, {
+      include: new Set(['identifications', 'comments']),
+      detail: true,
+    });
+    expect(empty).toMatchObject({ identifications_hidden: 0, comments_hidden: 0 });
+  });
+
+  it('carries no hidden count for an arm that was not included', () => {
+    const observation = projectObservation(
+      rawObservation({ comments: [rawComment({ hidden: true })] }),
+      { include: new Set(['identifications']), detail: true },
+    );
+    expect(observation).toHaveProperty('identifications_hidden', 0);
+    expect(observation).not.toHaveProperty('comments_hidden');
+    expect(projectObservation(rawObservation(), { detail: true })).not.toHaveProperty(
+      'identifications_hidden',
+    );
   });
 
   it("relays the observer's description and the filled observation-field values in detail mode", () => {
@@ -550,22 +757,67 @@ describe('projectObservation', () => {
       rawObservation({
         description: 'caterpillar on narrow-leaf milkweed',
         ofvs: [
-          { name: 'Habitat_Description', value: 'Garden' },
-          { name: 'Blank', value: '' },
-          { name: 'Whitespace', value: '   ' },
-          { name: 'Missing', value: null },
-          { name: 'Literal null', value: 'null' },
-          { name: null, value: '8' },
+          { name: 'Habitat_Description', datatype: 'text', value: 'Garden' },
+          { name: 'Blank', datatype: 'text', value: '' },
+          { name: 'Whitespace', datatype: 'text', value: '   ' },
+          { name: 'Missing', datatype: 'text', value: null },
+          { name: 'Literal null', datatype: 'text', value: 'null' },
+          { name: null, datatype: 'numeric', value: '8' },
         ],
       }),
       { detail: true },
     );
     expect(observation.description).toBe('caterpillar on narrow-leaf milkweed');
     expect(observation.observation_fields).toEqual([
-      { name: 'Habitat_Description', value: 'Garden' },
-      { name: 'Literal null', value: 'null' },
-      { name: null, value: '8' },
+      { name: 'Habitat_Description', datatype: 'text', value: 'Garden' },
+      { name: 'Literal null', datatype: 'text', value: 'null' },
+      { name: null, datatype: 'numeric', value: '8' },
     ]);
+  });
+
+  it('names the taxon a taxon-type field resolved to with the five summary fields only', () => {
+    const observation = projectObservation(
+      rawObservation({
+        ofvs: [
+          rawObservationField(),
+          rawObservationField({
+            id: 22343313,
+            name: 'Species',
+            value: 'Ondatra zibethicus',
+            taxon: null,
+          }),
+          { id: 8686987, name: 'Alive', datatype: 'text', value: 'Yes' },
+          { id: 8686988, name: 'No datatype key', value: 'kept' },
+        ],
+      }),
+      { detail: true },
+    );
+    // Sorted by field-value id: 8686987, 8686988, 22343313, 43288312.
+    const [text, unkeyed, species, host] = observation.observation_fields ?? [];
+    expect(host).toEqual({
+      name: 'Host',
+      value: '125625',
+      datatype: 'taxon',
+      taxon: {
+        id: 125625,
+        name: 'Miscanthus',
+        rank: 'genus',
+        common_name: 'Silvergrasses',
+        iconic_taxon_name: 'Plantae',
+      },
+    });
+    expect(Object.keys(host?.taxon ?? {})).toEqual([
+      'id',
+      'name',
+      'rank',
+      'common_name',
+      'iconic_taxon_name',
+    ]);
+    // A free-text value in a taxon-type field has no upstream taxon, so none is invented.
+    expect(species).toEqual({ name: 'Species', value: 'Ondatra zibethicus', datatype: 'taxon' });
+    expect(text).toEqual({ name: 'Alive', value: 'Yes', datatype: 'text' });
+    expect(unkeyed).toEqual({ name: 'No datatype key', value: 'kept', datatype: null });
+    expect(observation).toMatchObject({ observation_fields_total: 4, observation_fields_shown: 4 });
   });
 
   it('reports a null description and no observation fields when upstream carries none', () => {
@@ -584,7 +836,7 @@ describe('projectObservation', () => {
     expect(observation).not.toHaveProperty('observation_fields_shown');
   });
 
-  it('cuts filled observation fields to the thread cap after dropping blanks, with the filled total', () => {
+  it('cuts filled observation fields to the page after dropping blanks, with the filled total', () => {
     const observation = projectObservation(
       rawObservation({
         ofvs: [
@@ -595,14 +847,35 @@ describe('projectObservation', () => {
           { name: 'E', value: '3' },
         ],
       }),
-      { detail: true, threadCap: 2 },
+      { detail: true, arrayPage: { offset: 0, size: 2 } },
     );
-    expect(observation.observation_fields).toEqual([
+    expect(observation.observation_fields?.map(({ name, value }) => ({ name, value }))).toEqual([
       { name: 'B', value: '1' },
       { name: 'D', value: '2' },
     ]);
     expect(observation.observation_fields_total).toBe(3);
     expect(observation.observation_fields_shown).toBe(2);
+  });
+
+  it('indexes observation-field pages over the filled fields only, sorted by value id', () => {
+    const ofvs = [
+      { id: 5, name: 'E', value: '5' },
+      { id: 1, name: 'Blank low id', value: '' },
+      { id: 4, name: 'D', value: '4' },
+      { id: 2, name: 'B', value: '2' },
+      { id: 3, name: 'Whitespace', value: '\t ' },
+      { id: 6, name: 'F', value: '6' },
+    ];
+    const pageAt = (offset: number) =>
+      projectObservation(rawObservation({ ofvs }), {
+        detail: true,
+        arrayPage: { offset, size: 2 },
+      });
+
+    expect(pageAt(0).observation_fields?.map((field) => field.name)).toEqual(['B', 'D']);
+    expect(pageAt(2).observation_fields?.map((field) => field.name)).toEqual(['E', 'F']);
+    expect(pageAt(2)).toMatchObject({ observation_fields_total: 4, observation_fields_shown: 2 });
+    expect(pageAt(4)).toMatchObject({ observation_fields: [], observation_fields_total: 4 });
   });
 
   it('keeps every filled field and reports shown equal to total when no cap is given', () => {
@@ -653,6 +926,23 @@ describe('threadCap — the batch-shared identification/comment budget', () => {
     expect(threadCap(9)).toBe(4);
     expect(threadCap(10)).toBe(4);
   });
+
+  it.each([
+    [1, 40, 40],
+    [10, 40, 4],
+    [10, 100, 10],
+    [10, 20, 4],
+    [1, 2, 2],
+    [10, 2, 2],
+    [10, 1500, 150],
+    [1, 1500, 1500],
+    [3, 6, 4],
+  ])(
+    'shares array_limit as min(limit, max(4, floor(limit / records))): %i records at %i → %i',
+    (records, limit, share) => {
+      expect(threadCap(records, limit)).toBe(share);
+    },
+  );
 });
 
 describe('projectPlace', () => {
