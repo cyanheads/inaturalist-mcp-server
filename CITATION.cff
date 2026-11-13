@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: inaturalist-mcp-server
+abstract: "Search wildlife sightings, read identification threads, rank taxa by area, chart phenology, and find look-alike taxa from iNaturalist via MCP. STDIO or Streamable HTTP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/inaturalist-mcp-server"
+license: Apache-2.0
+doi: 10.5281/zenodo.24193008
+keywords:
+  - mcp
+  - model-context-protocol
+  - inaturalist
+  - biodiversity
+  - citizen-science
+  - species
+  - wildlife
+  - observations
+  - natural-history
